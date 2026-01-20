@@ -1,0 +1,411 @@
+apply plugin: 'java'
+apply plugin: 'eclipse'
+apply plugin: 'idea'
+apply plugin: 'checkstyle'
+
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'org.openapitools:openapi-generator-gradle-plugin:7.9.0'
+        classpath 'com.autonomousapps:dependency-analysis-gradle-plugin:1.30.0'
+    }
+}
+
+apply plugin: org.openapitools.generator.gradle.plugin.OpenApiGeneratorPlugin
+apply plugin: 'com.autonomousapps.dependency-analysis'
+
+// This is the Ghidra extension build file
+// It requires the Ghidra installation directory to be set via GHIDRA_INSTALL_DIR environment variable
+// or via gradle.properties
+
+//----------------------START "DO NOT MODIFY" SECTION------------------------------
+def ghidraInstallDir
+
+if (System.env.GHIDRA_INSTALL_DIR) {
+    ghidraInstallDir = System.env.GHIDRA_INSTALL_DIR
+}
+else if (project.hasProperty("GHIDRA_INSTALL_DIR")) {
+    ghidraInstallDir = project.getProperty("GHIDRA_INSTALL_DIR")
+}
+else {
+    // Try to auto-detect common Ghidra installation locations
+    def commonPaths = []
+    
+    // macOS common locations
+    if (System.getProperty("os.name").toLowerCase().contains("mac")) {
+        def appsDir = new File("/Applications")
+        if (appsDir.exists() && appsDir.isDirectory()) {
+            def ghidraApp = appsDir.listFiles()?.find { 
+                it.isDirectory() && it.name.startsWith("ghidra_") 
+            }
+            if (ghidraApp != null) {
+                commonPaths.add(ghidraApp.absolutePath)
+            }
+        }
+        commonPaths.add(new File(System.getProperty("user.home"), "ghidra_11.0").absolutePath)
+        commonPaths.add(new File(System.getProperty("user.home"), "ghidra_11.1").absolutePath)
+        commonPaths.add(new File(System.getProperty("user.home"), "ghidra_11.2").absolutePath)
+    }
+    
+    // Linux/Unix common locations
+    commonPaths.add(new File(System.getProperty("user.home"), "ghidra_11.0").absolutePath)
+    commonPaths.add(new File(System.getProperty("user.home"), "ghidra_11.1").absolutePath)
+    commonPaths.add(new File(System.getProperty("user.home"), "ghidra_11.2").absolutePath)
+    commonPaths.add("/opt/ghidra")
+    commonPaths.add("/usr/local/ghidra")
+    
+    // Check for relative path (e.g., ../ghidra)
+    def projectRoot = project.projectDir.parentFile
+    if (projectRoot != null) {
+        def relativeGhidra = new File(projectRoot, "ghidra")
+        if (relativeGhidra.exists()) {
+            commonPaths.add(relativeGhidra.absolutePath)
+        }
+    }
+    
+    // Try each path until we find a valid Ghidra installation
+    for (path in commonPaths) {
+        if (path != null) {
+            def testFile = new File(path, "application.properties")
+            if (testFile.exists()) {
+                ghidraInstallDir = path
+                println "Auto-detected Ghidra installation: ${ghidraInstallDir}"
+                break
+            }
+        }
+    }
+}
+
+if (ghidraInstallDir == null) {
+    def errorMsg = """
+GHIDRA_INSTALL_DIR is not set!
+
+Please set it using one of the following methods:
+
+1. Environment variable:
+   export GHIDRA_INSTALL_DIR=/path/to/ghidra
+
+2. Gradle property (in gradle.properties):
+   GHIDRA_INSTALL_DIR=/path/to/ghidra
+
+3. Command line:
+   ./gradlew -PGHIDRA_INSTALL_DIR=/path/to/ghidra buildExtension
+
+The path should point to the directory containing the 'Ghidra' folder.
+For example, if Ghidra is installed at /Applications/ghidra_11.2/,
+then GHIDRA_INSTALL_DIR should be /Applications/ghidra_11.2
+"""
+    throw new GradleException(errorMsg)
+}
+
+// Verify the installation directory exists
+if (!new File(ghidraInstallDir).exists()) {
+    throw new GradleException("Ghidra installation directory does not exist: " + ghidraInstallDir)
+}
+
+// Extract Ghidra version from application.properties
+def ghidraVersionLine = file(ghidraInstallDir + "/Ghidra/application.properties").readLines()
+    .find { it.startsWith("application.version=") }
+
+if (ghidraVersionLine == null) {
+    throw new GradleException("Could not find 'application.version=' in " + ghidraInstallDir + "/Ghidra/application.properties")
+}
+
+def ghidraVersion = ghidraVersionLine.split("=")[1].trim()
+
+// Extract Ghidra module version from Module.manifest
+// Try multiple possible locations for the Module.manifest file
+def moduleManifestPaths = [
+    ghidraInstallDir + "/Extensions/Ghidra/Skeleton/Module.manifest",
+    ghidraInstallDir + "/Ghidra/Extensions/Ghidra/Module.manifest",
+    ghidraInstallDir + "/Ghidra/Configurations/Public_Release/Module.manifest"
+]
+
+def ghidraModuleVersion = null
+def moduleManifestFile = null
+
+for (manifestPath in moduleManifestPaths) {
+    def testFile = new File(manifestPath)
+    if (testFile.exists() && testFile.length() > 0) {
+        moduleManifestFile = testFile
+        def moduleVersionLine = testFile.readLines().find { it.startsWith("MODULE_VERSION FILE=") }
+        if (moduleVersionLine != null) {
+            ghidraModuleVersion = moduleVersionLine.split("=")[1].trim()
+            break
+        }
+    }
+}
+
+// If we still don't have a module version, try to extract it from the version string
+if (ghidraModuleVersion == null) {
+    // Fallback: use the Ghidra version as the module version
+    // This is a reasonable default for most cases
+    ghidraModuleVersion = ghidraVersion
+    println "Warning: Could not find MODULE_VERSION in Module.manifest, using Ghidra version ${ghidraVersion} as fallback"
+}
+
+//----------------------END "DO NOT MODIFY" SECTION------------------------------
+
+apply from: "$ghidraInstallDir/support/buildExtension.gradle"
+
+repositories {
+    mavenCentral()
+}
+
+// Ensure lib/ only contains jars from the current resolved runtimeClasspath
+tasks.named('copyDependencies').configure {
+    doFirst {
+        delete fileTree('lib') { include '*.jar' }
+    }
+}
+
+// Dependency analysis tasks read lib/, so ensure they run after copyDependencies
+['serviceLoaderMain', 'serviceLoaderTest', 'findInlineMembersMain', 'explodeJarMain', 'artifactsReportMain', 'artifactsReportTest'].each { taskName ->
+    tasks.matching { it.name == taskName }.configureEach {
+        dependsOn tasks.copyDependencies
+    }
+}
+
+// Dependency analysis tasks that read generated sources should run after OpenAPI generation
+tasks.matching { it.name == 'explodeCodeSourceMain' }.configureEach {
+    dependsOn tasks.openApiGenerate
+}
+
+dependencies {
+    // Ghidra dependencies are provided by the extension build system
+    // Add external dependencies here if needed
+    
+    // For HTTP client (Java 11+)
+    // Note: Java 11+ includes HttpClient, but we may want OkHttp for better features
+    // implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    
+    // For JSON processing
+    implementation 'com.google.code.gson:gson:2.10.1'
+    
+    // OpenAPI Generator dependencies (required by generated client)
+    api 'org.openapitools:jackson-databind-nullable:0.2.6'
+    api 'com.fasterxml.jackson.core:jackson-databind:2.20.1'
+    api 'com.fasterxml.jackson.core:jackson-annotations:2.20'
+    api 'com.fasterxml.jackson.core:jackson-core:2.20.1'
+    implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.20.1'
+    implementation 'org.apache.httpcomponents:httpmime:4.5.14'
+    implementation 'org.apache.httpcomponents:httpclient:4.5.14'
+    implementation 'org.apache.httpcomponents:httpcore:4.4.16'
+    
+    // For logging
+    runtimeOnly 'ch.qos.logback:logback-classic:1.4.14'
+    
+    // LangChain4j core (latest version 1.10.0)
+    // Check for latest version at https://github.com/langchain4j/langchain4j
+    implementation 'dev.langchain4j:langchain4j:1.10.0'
+    api 'dev.langchain4j:langchain4j-core:1.10.0'
+    implementation 'dev.langchain4j:langchain4j-open-ai:1.10.0'
+    implementation 'dev.langchain4j:langchain4j-anthropic:1.10.0'
+    // Note: vertex-ai module uses beta versions
+    implementation 'dev.langchain4j:langchain4j-vertex-ai-gemini:1.10.0-beta18'
+
+    // Explicit transitive dependencies used at runtime
+    api 'com.google.code.findbugs:jsr305:3.0.2'
+    implementation 'com.google.auth:google-auth-library-oauth2-http:1.37.1'
+    runtimeOnly 'dev.langchain4j:langchain4j-http-client-jdk:1.10.0'
+    
+    // Memory stores (for persistent memory if needed)
+    // Note: embeddings module may use different versioning
+    // (removed) langchain4j-embeddings-all-minilm-l6-v2 is unused in current codebase
+}
+
+// Configure Java compilation
+// Note: Ghidra's buildExtension.gradle will set the Java version from application.properties
+// We set these as defaults, but they may be overridden by Ghidra's build script
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+}
+
+compileJava {
+    options.encoding = 'UTF-8'
+    options.compilerArgs << '-parameters'
+}
+
+compileTestJava {
+    options.encoding = 'UTF-8'
+}
+
+// OpenAPI Generator configuration
+// Use openapi.json from project directory
+def openApiJsonFile = "${projectDir}/openapi.json"
+def openApiJsonUrl = System.getenv('OPENAPI_JSON_URL') ?: 'http://localhost:32304/openapi.json'
+
+// Task to download OpenAPI spec from local cluster (non-blocking)
+task downloadOpenApiSpecFromCluster {
+    description = 'Download OpenAPI specification file from local cluster if available (non-blocking)'
+    group = 'openapi'
+    def specFile = file(openApiJsonFile)
+    
+    doLast {
+        // Skip if file already exists and is not empty
+        if (specFile.exists() && specFile.length() > 0) {
+            println "OpenAPI spec file already exists at ${openApiJsonFile}, skipping download"
+            return
+        }
+        
+        println "Attempting to download OpenAPI spec from ${openApiJsonUrl}..."
+        
+        try {
+            // Use curl with timeout (10 seconds) to download the file
+            def process = ['curl', '--max-time', '10', '--connect-timeout', '5', '--silent', '--show-error', '--fail', '--output', openApiJsonFile, openApiJsonUrl].execute()
+            
+            // Wait for process with timeout
+            def finished = false
+            def timeout = 12000 // 12 seconds total timeout
+            def startTime = System.currentTimeMillis()
+            
+            while (!finished && (System.currentTimeMillis() - startTime) < timeout) {
+                try {
+                    process.exitValue()
+                    finished = true
+                } catch (IllegalThreadStateException e) {
+                    Thread.sleep(100)
+                }
+            }
+            
+            if (!finished) {
+                process.destroy()
+                println "Warning: Download timeout after 12 seconds. Using existing file if available."
+            } else {
+                def exitCode = process.exitValue()
+                if (exitCode == 0) {
+                    if (specFile.exists() && specFile.length() > 0) {
+                        println "✓ Successfully downloaded OpenAPI spec from ${openApiJsonUrl} to ${openApiJsonFile}"
+                    } else {
+                        println "Warning: Download completed but file is empty. Using existing file if available."
+                    }
+                } else {
+                    def errorOutput = process.err?.text ?: "Unknown error"
+                    println "Warning: Failed to download OpenAPI spec (exit code: ${exitCode}). Error: ${errorOutput}"
+                    println "Continuing with existing file if available..."
+                }
+            }
+        } catch (Exception e) {
+            println "Warning: Exception while downloading OpenAPI spec: ${e.message}"
+            println "Continuing with existing file if available..."
+        }
+        
+        // Verify file exists, if not, warn but don't fail
+        if (!specFile.exists() || specFile.length() == 0) {
+            println "Note: openapi.json not found at ${openApiJsonFile}. Please ensure the file exists or the cluster is running."
+        }
+    }
+}
+
+openApiGenerate {
+    generatorName = 'java'
+    library = 'native'
+    inputSpec = openApiJsonFile
+    outputDir = "${buildDir}/generated"
+    apiPackage = 'com.zenyard.decompai.ghidra.api.generated.api'
+    modelPackage = 'com.zenyard.decompai.ghidra.api.generated.model'
+    invokerPackage = 'com.zenyard.decompai.ghidra.api.generated'
+    groupId = 'com.zenyard.decompai.ghidra'
+    id = 'decompai-api-client'
+    skipValidateSpec = false
+    logToStderr = true
+    generateApiTests = false
+    generateModelTests = false
+    generateApiDocumentation = false
+    generateModelDocumentation = false
+    additionalProperties = [
+        'hideGenerationTimestamp': 'true',
+        'useJakartaEe': 'false',
+        'java11': 'true',
+        'dateLibrary': 'java8',
+        'disallowAdditionalPropertiesIfNotPresent': 'false'
+    ]
+}
+
+// Add generated sources to source sets
+sourceSets {
+    main {
+        java {
+            srcDirs += "${buildDir}/generated/src/main/java"
+        }
+    }
+}
+
+// Note: downloadOpenApiSpecFromCluster is available but not part of the default build flow
+// Run it explicitly with: ./gradlew downloadOpenApiSpecFromCluster
+
+// Verify openapi.json exists before generating
+tasks.openApiGenerate.doFirst {
+    def specFile = file(openApiJsonFile)
+    if (!specFile.exists()) {
+        throw new GradleException("OpenAPI spec file not found at ${openApiJsonFile}. Please ensure openapi.json exists in the project root directory or that the local cluster is running.")
+    }
+}
+
+// Task to fix Section.getClass() method name conflict
+task fixSectionClass(type: Exec) {
+    description = 'Fix Section.getClass() method name conflict in generated code'
+    group = 'openapi'
+    workingDir = projectDir
+    commandLine = ['bash', 'scripts/fix-section-class.sh']
+    onlyIf {
+        file("${buildDir}/generated/src/main/java/com/zenyard/decompai/ghidra/api/generated/model/Section.java").exists()
+    }
+}
+
+// Make sure fixSectionClass runs after openApiGenerate
+tasks.fixSectionClass.dependsOn tasks.openApiGenerate
+
+// Make sure openApiGenerate and fixSectionClass run before compilation
+compileJava.dependsOn tasks.fixSectionClass
+
+// Checkstyle configuration
+checkstyle {
+    toolVersion = '10.12.5'
+    configFile = file("${projectDir}/config/checkstyle/checkstyle.xml")
+    ignoreFailures = false
+    showViolations = true
+}
+
+// Use default Google checkstyle config if custom config doesn't exist
+tasks.named('checkstyleMain').configure {
+    doFirst {
+        def configFile = file("${projectDir}/config/checkstyle/checkstyle.xml")
+        if (!configFile.exists()) {
+            // Create default checkstyle config directory and use Google checks
+            configFile.parentFile.mkdirs()
+            // We'll use a standard Google checkstyle config
+            // For now, checkstyle will use the default if config file doesn't exist
+        }
+    }
+}
+
+// Exclude non-extension files from the packaged ZIP
+tasks.named('buildExtension').configure {
+    exclude(
+        '.github/**',
+        '.actrc',
+        'docs/**',
+        'IMPLEMENTATION_REVIEW.md',
+        'GITHUB_ACTIONS_SETUP.md',
+        'config/**',
+        'scripts/**',
+        'gradle/**',
+        'gradlew',
+        'gradlew.bat',
+        'README.md',
+        '**/.DS_Store'
+    )
+}
+
+// Note: The buildExtension task is defined by Ghidra's buildExtension.gradle
+// It automatically includes:
+// - The compiled jar
+// - extension.properties (with version/name token replacement)
+// - Module.manifest
+// - All project files (excluding build artifacts, source, etc.)
+// - Dependencies from lib/ directory (via copyDependencies task)
+
