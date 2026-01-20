@@ -2,6 +2,7 @@ package com.zenyard.decompai.ghidra.util;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 import com.zenyard.decompai.ghidra.util.ObjectGraph.Symbol;
 import ghidra.program.model.address.Address;
@@ -50,6 +51,29 @@ public class ObjectReader {
         symbols.addAll(getGlobalVariableSymbols(program));
         
         return symbols;
+    }
+
+    /**
+     * Get object symbol for a specific address, if the address belongs to a function
+     * or a global variable.
+     */
+    public static Optional<Symbol> getObjectSymbolForAddress(Program program, Address address) {
+        if (address == null) {
+            return Optional.empty();
+        }
+
+        FunctionManager funcManager = program.getFunctionManager();
+        Function function = funcManager.getFunctionContaining(address);
+        if (function != null && !function.isThunk()) {
+            return Optional.of(new Symbol(function.getEntryPoint(), "function"));
+        }
+
+        Address globalVarAddress = getGlobalVariableAddress(program, address);
+        if (globalVarAddress != null) {
+            return Optional.of(new Symbol(globalVarAddress, "global_variable"));
+        }
+
+        return Optional.empty();
     }
     
     /**
@@ -127,6 +151,42 @@ public class ObjectReader {
         }
         
         return symbols;
+    }
+
+    private static Address getGlobalVariableAddress(Program program, Address address) {
+        Listing listing = program.getListing();
+        Data data = listing.getDataContaining(address);
+        if (data == null) {
+            return null;
+        }
+
+        Address dataAddress = data.getAddress();
+        SymbolTable symbolTable = program.getSymbolTable();
+        ReferenceManager refManager = program.getReferenceManager();
+        FunctionManager funcManager = program.getFunctionManager();
+
+        if (funcManager.getFunctionAt(dataAddress) != null) {
+            return null;
+        }
+
+        ghidra.program.model.symbol.Symbol symbol = symbolTable.getPrimarySymbol(dataAddress);
+        String name = symbol != null ? symbol.getName() : null;
+
+        if (name == null || symbol == null || symbol.getSource() == SourceType.DEFAULT) {
+            for (Reference ref : refManager.getReferencesTo(dataAddress)) {
+                Function accessingFunction = funcManager.getFunctionContaining(ref.getFromAddress());
+                if (accessingFunction != null) {
+                    return dataAddress;
+                }
+            }
+            return null;
+        }
+
+        boolean isAutoString = name.startsWith("a") &&
+            data.getDataType().getDisplayName().contains("string") &&
+            symbol.getSource() == SourceType.DEFAULT;
+
+        return isAutoString ? null : dataAddress;
     }
 }
 

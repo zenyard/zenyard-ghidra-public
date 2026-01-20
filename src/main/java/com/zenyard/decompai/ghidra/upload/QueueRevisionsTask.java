@@ -202,21 +202,37 @@ public class QueueRevisionsTask extends Task implements EventConsumer, EventProd
      * Get all dirty object symbols (functions and global variables).
      */
     List<Symbol> getDirtyObjectSymbols(TaskMonitor monitor, SyncStatusStorage syncStatusStorage) {
-        List<Symbol> dirtySymbols = new ArrayList<>();
-        List<Symbol> allSymbols = ObjectReader.getAllObjectSymbols(program);
-        
-        for (Symbol symbol : allSymbols) {
+        Set<Symbol> dirtySymbols = new HashSet<>();
+        List<Address> dirtyAddresses = syncStatusStorage.getDirtyAddresses();
+        if (dirtyAddresses.isEmpty()) {
+            DecompaiProgramProperties props = new DecompaiProgramProperties(program);
+            String databaseDirty = props.getString("database_dirty");
+            if ("true".equals(databaseDirty)) {
+                for (Symbol symbol : ObjectReader.getAllObjectSymbols(program)) {
+                    if (monitor.isCancelled()) {
+                        break;
+                    }
+
+                    if (syncStatusStorage.isDirty(symbol.getAddress())) {
+                        dirtySymbols.add(symbol);
+                        syncStatusStorage.markDirty(symbol.getAddress());
+                    }
+                }
+
+                return new ArrayList<>(dirtySymbols);
+            }
+        }
+
+        for (Address address : dirtyAddresses) {
             if (monitor.isCancelled()) {
                 break;
             }
-            
-            // Check if this object is dirty
-            if (syncStatusStorage.isDirty(symbol.getAddress())) {
-                dirtySymbols.add(symbol);
-            }
+
+            ObjectReader.getObjectSymbolForAddress(program, address)
+                .ifPresent(dirtySymbols::add);
         }
-        
-        return dirtySymbols;
+
+        return new ArrayList<>(dirtySymbols);
     }
     
     /**
@@ -335,6 +351,9 @@ public class QueueRevisionsTask extends Task implements EventConsumer, EventProd
             }
             
             SyncStatusStorage syncStatusStorage = new SyncStatusStorage(program);
+            if (isInitialUpload && syncStatusStorage.getDirtyAddresses().isEmpty()) {
+                initializeSyncStatus(program);
+            }
             
             // Initialize pending inference manager
             InferenceStorage inferenceStorage = new InferenceStorage(program);
@@ -424,6 +443,19 @@ public class QueueRevisionsTask extends Task implements EventConsumer, EventProd
                 statusBarManager.unregisterTask(TASK_ID);
             }
         }
+    }
+
+    private static void initializeSyncStatus(Program program) {
+        if (program == null) {
+            return;
+        }
+        SyncStatusStorage syncStatusStorage = new SyncStatusStorage(program);
+        List<Symbol> symbols = ObjectReader.getAllObjectSymbols(program);
+        for (Symbol symbol : symbols) {
+            syncStatusStorage.markDirty(symbol.getAddress());
+        }
+        DecompaiProgramProperties props = new DecompaiProgramProperties(program);
+        props.setString("database_dirty", "true");
     }
     
     /**

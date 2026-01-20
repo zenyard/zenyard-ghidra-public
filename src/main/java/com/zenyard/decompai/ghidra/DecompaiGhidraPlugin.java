@@ -10,13 +10,13 @@ import docking.ActionContext;
 import docking.action.DockingAction;
 import docking.action.MenuData;
 import ghidra.app.events.FirstTimeAnalyzedPluginEvent;
+import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.plugin.ProgramPlugin;
 import ghidra.framework.plugintool.PluginEvent;
 import ghidra.framework.plugintool.PluginInfo;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.framework.plugintool.util.PluginStatus;
 import ghidra.program.model.listing.Program;
-import ghidra.program.util.GhidraProgramUtilities;
 import ghidra.util.Msg;
 import ghidra.util.Swing;
 // ProgramManagerListener removed in Ghidra 12.0 - ProgramPlugin handles program lifecycle
@@ -155,18 +155,18 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
         String alreadyCompleted = props.getString("initial_analysis_complete");
         
         if (!"true".equals(alreadyCompleted)) {
-            // Check if program has already been analyzed
-            if (GhidraProgramUtilities.isAnalyzed(program)) {
-                // Program was already analyzed - mark as complete and notify immediately
-                handleAnalysisComplete(program);
-            } else {
+            // // Check if program has already been analyzed
+            // if (GhidraProgramUtilities.isAnalyzed(program)) {
+            //     // Program was already analyzed - mark as complete and notify immediately
+            //     handleAnalysisComplete(program);
+            // } else {
                 // Analysis not complete - register status bar task to show "Waiting for Ghidra"
                 if (statusBarManager != null) {
                     statusBarManager.registerTask(WAITING_FOR_GHIDRA_TASK_ID, 
                         StatusBarPriorities.WAITING_FOR_GHIDRA);
                     statusBarManager.updateTaskStatus(WAITING_FOR_GHIDRA_TASK_ID, "Waiting for Ghidra", null, true);
                 }
-            }
+            // }
         } else if (trackChangesTaskManager != null) {
             // Analysis already complete from a previous session; re-enable change tracking.
             trackChangesTaskManager.setIgnoreEvents(false);
@@ -252,7 +252,7 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
         configAction.setMenuBarData(new MenuData(
             new String[] { "Tools", "DecompAI", "Configuration..." },
             null,
-            "DecompAI"
+            "Zenyard"
         ));
         configAction.setDescription("Configure DecompAI API key and server settings");
         tool.addAction(configAction);
@@ -332,7 +332,7 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
             SyncStatusStorage syncStatusStorage = new SyncStatusStorage(program);
             trackChangesTaskManager.start(program, syncStatusStorage);
         }
-        
+
         // Get event dispatcher
         EventDispatcher eventDispatcher = services.getEventDispatcher();
         
@@ -427,6 +427,8 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
             return;
         }
         
+        waitForAnalysisCompletion(program);
+
         DecompaiProgramProperties props = new DecompaiProgramProperties(program);
         
         // Check if we've already marked it as complete (avoid duplicate notifications)
@@ -453,6 +455,24 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
             }
         }
         trackChangesTaskManager.setIgnoreEvents(false);
+    }
+
+    private void waitForAnalysisCompletion(Program program) {
+        AutoAnalysisManager analysisManager = AutoAnalysisManager.getAnalysisManager(program);
+        if (analysisManager == null) {
+            return;
+        }
+
+        Msg.debug(this, "Waiting for analysis completion");
+        while (analysisManager.isAnalyzing() && !program.isClosed()) {
+            try {
+                Thread.sleep(250);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        Msg.debug(this, "Analysis completion complete");
     }
     
     @Override

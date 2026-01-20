@@ -15,6 +15,7 @@ import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceManager;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.Symbol;
+import ghidra.program.util.CodeUnitPropertyChangeRecord;
 import ghidra.program.util.ProgramChangeRecord;
 import ghidra.program.util.ProgramEvent;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
@@ -24,6 +25,7 @@ import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
 import com.zenyard.decompai.ghidra.storage.SyncStatusStorage;
 import ghidra.util.Msg;
 
+import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -40,6 +42,27 @@ public class TrackChangesTask implements EventProducer {
     
     private static final String EDIT_LABEL_TRANSACTION = "Edit Label";
     private static final String RENAME_LOCAL_VARIABLE_TRANSACTION = "Rename Local Variable";
+    private static final Set<ProgramEvent> PROPAGATE_NON_OBJECT_EVENTS = EnumSet.of(
+        FUNCTION_ADDED,
+        FUNCTION_REMOVED,
+        FUNCTION_BODY_CHANGED,
+        FUNCTION_CHANGED,
+        SYMBOL_ADDED,
+        SYMBOL_RENAMED,
+        SYMBOL_REMOVED,
+        CODE_ADDED,
+        CODE_REMOVED,
+        CODE_REPLACED,
+        REFERENCE_ADDED,
+        REFERENCE_REMOVED,
+        REFERENCE_TYPE_CHANGED,
+        VARIABLE_REFERENCE_ADDED,
+        VARIABLE_REFERENCE_REMOVED
+    );
+    private static final Set<ProgramEvent> IGNORE_IN_MID_OBJECT = EnumSet.of(
+        COMMENT_CHANGED
+    );
+    private static final String PROPERTY_PREFIX = "DecompAI.";
     
     private final SyncStatusStorage syncStatusStorage;
     private final Program program;
@@ -78,6 +101,11 @@ public class TrackChangesTask implements EventProducer {
             .with(ProgramChangeRecord.class)
                 .each(SYMBOL_ADDED, SYMBOL_RENAMED, SYMBOL_REMOVED)
                     .call(this::handleSymbolEvent)
+                .each(CODE_ADDED, CODE_REMOVED, CODE_REPLACED, COMMENT_CHANGED, REFERENCE_ADDED,
+                    REFERENCE_REMOVED, REFERENCE_TYPE_CHANGED, VARIABLE_REFERENCE_ADDED,
+                    VARIABLE_REFERENCE_REMOVED, FUNCTION_ADDED, FUNCTION_REMOVED,
+                    FUNCTION_BODY_CHANGED, FUNCTION_CHANGED)
+                    .call(this::handleProgramChange)
             .build();
     }
     
@@ -173,11 +201,6 @@ public class TrackChangesTask implements EventProducer {
             return;
         }
         
-        // Only track symbol events during "Edit Label" transactions
-        if (!trackingEditLabelTransaction) {
-            return;
-        }
-        
         Address address = null;
         Symbol symbol = null;
         
@@ -220,30 +243,151 @@ public class TrackChangesTask implements EventProducer {
                     address = symbolAddr;
                 }
             }
+        } else {
+            Object obj = record.getObject();
+            if (obj instanceof Symbol) {
+                symbol = (Symbol) obj;
+            } else {
+                Object newValue = record.getNewValue();
+                if (newValue instanceof Symbol) {
+                    symbol = (Symbol) newValue;
+                }
+            }
+            if (symbol != null) {
+                address = symbol.getAddress();
+            } else {
+                address = record.getStart();
+            }
         }
         
         if (address == null) {
             return;
         }
-        
-        // Track this address for marking as dirty when transaction completes
-        synchronized (editLabelAffectedAddresses) {
-            if (trackingEditLabelTransaction) {
-                // Check if this is a function or global variable we care about
-                FunctionManager funcManager = program.getFunctionManager();
-                Function function = funcManager.getFunctionAt(address);
-                
-                if (function != null) {
-                    // Function rename - track the function entry point
-                    if (eventType == SYMBOL_RENAMED) {
+
+        if (trackingEditLabelTransaction) {
+            // Track this address for marking as dirty when transaction completes
+            synchronized (editLabelAffectedAddresses) {
+                if (trackingEditLabelTransaction) {
+                    // Check if this is a function or global variable we care about
+                    FunctionManager funcManager = program.getFunctionManager();
+                    Function function = funcManager.getFunctionAt(address);
+                    
+                    if (function != null) {
+                        // Function rename - track the function entry point
+                        if (eventType == SYMBOL_RENAMED) {
+                            editLabelAffectedAddresses.add(address);
+                        }
+                    } else if (isGlobalVariable(program, address, symbol)) {
+                        // Global variable - track it
                         editLabelAffectedAddresses.add(address);
                     }
-                } else if (isGlobalVariable(program, address, symbol)) {
-                    // Global variable - track it
-                    editLabelAffectedAddresses.add(address);
                 }
             }
+            return;
         }
+
+        handleAddressChange(address, eventType, symbol);
+    }
+
+    /**
+     * Handle non-symbol program change events.
+     */
+    private void handleProgramChange(ProgramChangeRecord record) {
+        if (ignoreEvents) {
+            return;
+        }
+
+        ProgramEvent eventType = (ProgramEvent) record.getEventType();
+        if (isSymbolEvent(eventType)) {
+            return;
+        }
+
+        if (eventType == CODE_UNIT_PROPERTY_CHANGED && record instanceof CodeUnitPropertyChangeRecord) {
+            CodeUnitPropertyChangeRecord propertyRecord = (CodeUnitPropertyChangeRecord) record;
+            String propertyName = propertyRecord.getPropertyName();
+            if (propertyName != null && propertyName.startsWith(PROPERTY_PREFIX)) {
+                return;
+            }
+        }
+
+        Address address = record.getStart();
+        if (address == null) {
+            return;
+        }
+
+        handleAddressChange(address, eventType, null);
+    }
+
+    private void handleAddressChange(Address address, ProgramEvent eventType, Symbol symbol) {
+        Address objectAddress = getObjectAddress(address, eventType, symbol);
+        if (objectAddress != null) {
+            markObjectDirty(objectAddress);
+            return;
+        }
+
+        if (PROPAGATE_NON_OBJECT_EVENTS.contains(eventType)) {
+            propagateChangeToReferencingFunctions(address);
+        }
+    }
+
+    private Address getObjectAddress(Address address, ProgramEvent eventType, Symbol symbol) {
+        if (address == null) {
+            return null;
+        }
+
+        FunctionManager funcManager = program.getFunctionManager();
+        Function function = funcManager.getFunctionContaining(address);
+        if (function != null) {
+            Address entry = function.getEntryPoint();
+            if (IGNORE_IN_MID_OBJECT.contains(eventType) && !entry.equals(address)) {
+                return null;
+            }
+            return entry;
+        }
+
+        if (symbol != null) {
+            ghidra.program.model.symbol.Namespace parent = symbol.getParentNamespace();
+            if (parent instanceof Function) {
+                return ((Function) parent).getEntryPoint();
+            }
+        }
+
+        if (isGlobalVariable(program, address, symbol)) {
+            Listing listing = program.getListing();
+            Data data = listing.getDataContaining(address);
+            return data != null ? data.getAddress() : address;
+        }
+
+        return null;
+    }
+
+    private void propagateChangeToReferencingFunctions(Address address) {
+        if (address == null) {
+            return;
+        }
+
+        ReferenceManager refManager = program.getReferenceManager();
+        FunctionManager funcManager = program.getFunctionManager();
+        for (Reference ref : refManager.getReferencesTo(address)) {
+            Function function = funcManager.getFunctionContaining(ref.getFromAddress());
+            if (function != null) {
+                markObjectDirty(function.getEntryPoint());
+            }
+        }
+    }
+
+    private boolean isSymbolEvent(ProgramEvent eventType) {
+        return eventType == SYMBOL_ADDED ||
+            eventType == SYMBOL_RENAMED ||
+            eventType == SYMBOL_REMOVED ||
+            eventType == SYMBOL_SOURCE_CHANGED ||
+            eventType == SYMBOL_PRIMARY_STATE_CHANGED ||
+            eventType == SYMBOL_ANCHOR_FLAG_CHANGED ||
+            eventType == SYMBOL_SCOPE_CHANGED ||
+            eventType == SYMBOL_ASSOCIATION_ADDED ||
+            eventType == SYMBOL_ASSOCIATION_REMOVED ||
+            eventType == SYMBOL_DATA_CHANGED ||
+            eventType == SYMBOL_ADDRESS_CHANGED;
     }
     
     /**
@@ -264,23 +408,23 @@ public class TrackChangesTask implements EventProducer {
             }
         }
         
-        // Check if address has a function
         FunctionManager funcManager = program.getFunctionManager();
-        if (funcManager.getFunctionAt(address) != null) {
-            return false; // It's a function
-        }
-        
-        // Check if there's data at this address
+
         Listing listing = program.getListing();
-        Data data = listing.getDataAt(address);
+        Data data = listing.getDataContaining(address);
         if (data == null) {
             return false; // No data, not a global variable
+        }
+
+        Address dataAddress = data.getAddress();
+        if (funcManager.getFunctionAt(dataAddress) != null) {
+            return false; // It's a function
         }
         
         // Get symbol if not provided
         if (symbol == null) {
             ghidra.program.model.symbol.SymbolTable symbolTable = program.getSymbolTable();
-            symbol = symbolTable.getPrimarySymbol(address);
+            symbol = symbolTable.getPrimarySymbol(dataAddress);
         }
         
         String name = symbol != null ? symbol.getName() : null;
@@ -289,7 +433,7 @@ public class TrackChangesTask implements EventProducer {
         if (name == null || symbol == null || symbol.getSource() == SourceType.DEFAULT) {
             // Check if it's referenced from code
             ReferenceManager refManager = program.getReferenceManager();
-            for (Reference ref : refManager.getReferencesTo(address)) {
+            for (Reference ref : refManager.getReferencesTo(dataAddress)) {
                 Function accessingFunction = funcManager.getFunctionContaining(ref.getFromAddress());
                 if (accessingFunction != null) {
                     return true; // Referenced from code, treat as global variable
@@ -312,6 +456,12 @@ public class TrackChangesTask implements EventProducer {
      */
     private void markObjectDirty(Address address) {
         if (address == null) {
+            return;
+        }
+
+        if (syncStatusStorage.getSyncStatus(address)
+            .map(com.zenyard.decompai.ghidra.storage.SyncStatus::isDirty)
+            .orElse(false)) {
             return;
         }
         

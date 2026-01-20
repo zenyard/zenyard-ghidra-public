@@ -1,8 +1,11 @@
 package com.zenyard.decompai.ghidra.storage;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -18,11 +21,14 @@ import ghidra.util.Msg;
  */
 public class SyncStatusStorage {
     private static final String PROPERTY_PREFIX = "sync_status.";
+    private static final String DIRTY_LIST_KEY = "dirty_addresses";
     private static final Gson gson = new GsonBuilder().create();
     
+    private final Program program;
     private final DecompaiProgramProperties properties;
     
     public SyncStatusStorage(Program program) {
+        this.program = program;
         this.properties = new DecompaiProgramProperties(program);
     }
     
@@ -60,6 +66,8 @@ public class SyncStatusStorage {
         
         String json = gson.toJson(data);
         properties.setString(key, json);
+
+        updateDirtyAddressList(address, status.isDirty());
     }
     
     /**
@@ -68,10 +76,15 @@ public class SyncStatusStorage {
     public List<Address> getDirtyAddresses() {
         List<Address> dirtyAddresses = new ArrayList<>();
         
-        // We need to iterate through all possible addresses or maintain a separate list
-        // For now, we'll use a simpler approach: check all functions and global variables
-        // This will be optimized when we integrate with ObjectReader
-        // For now, return empty list - will be populated by TrackChangesTask
+        Set<String> dirtyAddressStrings = getDirtyAddressStrings();
+        for (String addressString : dirtyAddressStrings) {
+            Address address = program.getAddressFactory().getAddress(addressString);
+            if (address != null) {
+                dirtyAddresses.add(address);
+            } else {
+                Msg.warn(this, "Failed to parse dirty address: " + addressString);
+            }
+        }
         return dirtyAddresses;
     }
     
@@ -80,7 +93,7 @@ public class SyncStatusStorage {
      */
     public boolean isDirty(Address address) {
         Optional<SyncStatus> status = getSyncStatus(address);
-        return status.map(SyncStatus::isDirty).orElse(true); // Default to dirty if not found
+        return status.map(SyncStatus::isDirty).orElse(false);
     }
     
     /**
@@ -91,6 +104,7 @@ public class SyncStatusStorage {
         SyncStatus updated = current.orElse(new SyncStatus())
             .withDirty(true);
         setSyncStatus(address, updated);
+        Msg.info(this, "Marked address " + address + " as dirty");
     }
     
     /**
@@ -101,6 +115,44 @@ public class SyncStatusStorage {
         SyncStatus updated = current.orElse(new SyncStatus())
             .withDirty(false);
         setSyncStatus(address, updated);
+    }
+
+    private Set<String> getDirtyAddressStrings() {
+        String json = properties.getString(DIRTY_LIST_KEY);
+        if (json == null || json.isEmpty()) {
+            return new HashSet<>();
+        }
+
+        try {
+            String[] addresses = gson.fromJson(json, String[].class);
+            if (addresses == null) {
+                return new HashSet<>();
+            }
+            return new HashSet<>(Arrays.asList(addresses));
+        } catch (Exception e) {
+            Msg.warn(this, "Failed to parse dirty address list: " + e.getMessage());
+            return new HashSet<>();
+        }
+    }
+
+    private void setDirtyAddressStrings(Set<String> addresses) {
+        String json = gson.toJson(addresses);
+        properties.setString(DIRTY_LIST_KEY, json);
+    }
+
+    private void updateDirtyAddressList(Address address, boolean dirty) {
+        if (address == null) {
+            return;
+        }
+
+        Set<String> dirtyAddresses = getDirtyAddressStrings();
+        String addressString = address.toString();
+        if (dirty) {
+            dirtyAddresses.add(addressString);
+        } else {
+            dirtyAddresses.remove(addressString);
+        }
+        setDirtyAddressStrings(dirtyAddresses);
     }
     
     /**

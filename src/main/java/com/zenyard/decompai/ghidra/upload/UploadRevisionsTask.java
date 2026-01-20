@@ -54,6 +54,7 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
     private List<QueueRevisionsTask.Revision> revisions = new ArrayList<>();
     private UUID binaryId = null;
     private boolean isInitialUpload = false;
+    private volatile boolean binaryIdAvailable = false;
     
     public UploadRevisionsTask(PluginTool tool, BinariesApi binariesApi,
                                StatusBarManager statusBarManager, Program program, EventDispatcher eventDispatcher) {
@@ -69,6 +70,7 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
     public Set<DecompaiEvent.EventType> getSubscribedEventTypes() {
         Set<DecompaiEvent.EventType> types = new HashSet<>();
         types.add(DecompaiEvent.EventType.REVISIONS_QUEUED);
+        types.add(DecompaiEvent.EventType.BINARY_ID_AVAILABLE);
         types.add(DecompaiEvent.EventType.PROGRAM_DEACTIVATED);
         return types;
     }
@@ -106,6 +108,15 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
                     }
                 }
             }
+        } else if (event.getType() == DecompaiEvent.EventType.BINARY_ID_AVAILABLE) {
+            UUID eventBinaryId = event.getPayloadValue("binaryId", UUID.class);
+            if (eventBinaryId != null) {
+                synchronized (waitLock) {
+                    this.binaryId = eventBinaryId;
+                    this.binaryIdAvailable = true;
+                    waitLock.notify();
+                }
+            }
         } else if (event.getType() == DecompaiEvent.EventType.PROGRAM_DEACTIVATED) {
             Msg.info(this, "UploadRevisionsTask: Received PROGRAM_DEACTIVATED event");
             synchronized (waitLock) {
@@ -136,6 +147,7 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
             if (binaryIdStr != null && !binaryIdStr.isEmpty()) {
                 try {
                     this.binaryId = UUID.fromString(binaryIdStr);
+                    this.binaryIdAvailable = true;
                 } catch (IllegalArgumentException e) {
                     // Invalid UUID format
                 }
@@ -144,12 +156,23 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
             // Wait for REVISIONS_QUEUED event
             Msg.info(this, "UploadRevisionsTask: Waiting for REVISIONS_QUEUED event...");
             synchronized (waitLock) {
-                while (!revisionsQueued && !monitor.isCancelled() && !shouldStop) {
+                while ((!revisionsQueued || !binaryIdAvailable) && !monitor.isCancelled() && !shouldStop) {
                     try {
                         waitLock.wait(1000); // Wait up to 1 second, then check again
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                         return;
+                    }
+                    if (!binaryIdAvailable) {
+                        String binaryIdRetry = props.getString("binary_id");
+                        if (binaryIdRetry != null && !binaryIdRetry.isEmpty()) {
+                            try {
+                                this.binaryId = UUID.fromString(binaryIdRetry);
+                                this.binaryIdAvailable = true;
+                            } catch (IllegalArgumentException e) {
+                                // Invalid UUID format
+                            }
+                        }
                     }
                 }
             }
@@ -163,6 +186,7 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
                 if (binaryIdStrRetry != null && !binaryIdStrRetry.isEmpty()) {
                     try {
                         this.binaryId = UUID.fromString(binaryIdStrRetry);
+                        this.binaryIdAvailable = true;
                         Msg.info(this, "UploadRevisionsTask: Retrieved binaryId from properties: " + binaryId);
                     } catch (IllegalArgumentException e) {
                         Msg.error(this, "UploadRevisionsTask: Invalid binary_id format: " + binaryIdStrRetry);

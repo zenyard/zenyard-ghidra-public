@@ -22,6 +22,7 @@ import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.listing.Variable;
 import ghidra.program.model.pcode.HighFunction;
+import ghidra.program.model.pcode.HighFunctionDBUtil;
 import ghidra.program.model.pcode.HighSymbol;
 import ghidra.program.model.pcode.HighVariable;
 import ghidra.program.model.pcode.LocalSymbolMap;
@@ -330,6 +331,8 @@ public class InferenceApplier {
                 }
             }
             
+            boolean localsCommitted = false;
+
             // Apply renames using Variable.setName() from public Ghidra API
             // Reference: https://ghidra.re/ghidra_docs/api/ghidra/program/model/listing/Variable.html
             for (Map.Entry<String, String> rename : renames.entrySet()) {
@@ -369,6 +372,15 @@ public class InferenceApplier {
                             }
 
                             LocalVariable localVar = findLocalVariableByStorage(function, storage);
+                            if (localVar == null && !localsCommitted) {
+                                try {
+                                    HighFunctionDBUtil.commitLocalNamesToDatabase(highFunction, SourceType.ANALYSIS);
+                                    localsCommitted = true;
+                                    localVar = findLocalVariableByStorage(function, storage);
+                                } catch (Exception e) {
+                                    Msg.warn(this, "Failed to commit locals at " + address + ": " + e.getMessage(), e);
+                                }
+                            }
 
                             if (localVar != null) {
                                 try {
@@ -419,6 +431,53 @@ public class InferenceApplier {
         // Get parameter names
         Parameter[] parameters = function.getParameters();
         Map<String, String> parametersMapping = mapping.getParametersMapping();
+        if (parametersMapping == null || parametersMapping.isEmpty()) {
+            Msg.debug(this, "No parameters mapping data for " + address);
+            return;
+        }
+
+        // If function has no parameters in listing, commit decompiler params first
+        if (parameters.length == 0) {
+            DecompInterface decompiler = new DecompInterface();
+            decompiler.openProgram(program);
+            try {
+                DecompileOptions options = new DecompileOptions();
+                decompiler.setOptions(options);
+
+                DecompileResults results = decompiler.decompileFunction(
+                    function,
+                    30,
+                    TaskMonitor.DUMMY
+                );
+
+                if (!results.decompileCompleted()) {
+                    Msg.warn(this, "Failed to decompile function for params at " + address + ": " +
+                        (results.getErrorMessage() != null ? results.getErrorMessage() : "Unknown error"));
+                } else {
+                    HighFunction highFunction = results.getHighFunction();
+                    if (highFunction != null) {
+                        HighFunctionDBUtil.commitParamsToDatabase(
+                            highFunction,
+                            true,
+                            HighFunctionDBUtil.ReturnCommitOption.NO_COMMIT,
+                            SourceType.ANALYSIS
+                        );
+                        parameters = function.getParameters();
+                    }
+                }
+            } catch (Exception e) {
+                Msg.warn(this, "Failed to commit parameters for " + address + ": " + e.getMessage(), e);
+            } finally {
+                decompiler.closeProgram();
+            }
+        }
+
+        List<String> parameterNames = new ArrayList<>();
+        for (Parameter parameter : parameters) {
+            parameterNames.add(parameter.getName());
+        }
+        Msg.debug(this, "Apply params mapping at " + address + " keys=" + parametersMapping.keySet() +
+            " params=" + parameterNames);
         
         // Get last inferred parameter names from storage (if any)
         ParametersMapping lastMapping = inferenceStorage.getLastParametersMapping(address);
@@ -433,7 +492,7 @@ public class InferenceApplier {
         for (int i = 0; i < parameters.length; i++) {
             Parameter param = parameters[i];
             String originalName = param.getName();
-            String newName = parametersMapping.get(originalName);
+            String newName = resolveParameterMappingName(parametersMapping, originalName, i);
             
             if (newName == null || newName.equals(originalName)) {
                 continue;
@@ -460,7 +519,19 @@ public class InferenceApplier {
                     if (paramIndex >= 0 && paramIndex < parameters.length) {
                         Parameter param = parameters[paramIndex];
                         // Rename parameter using setName
-                        param.setName(newName, SourceType.ANALYSIS);
+                        String nameToApply = newName;
+                        if (!isValidName(nameToApply)) {
+                            nameToApply = "_" + nameToApply;
+                        }
+                        try {
+                            param.setName(nameToApply, SourceType.ANALYSIS);
+                        } catch (DuplicateNameException e) {
+                            Msg.warn(this, "Cannot rename parameter " + param.getName() + " to " + nameToApply +
+                                ": duplicate name at " + address);
+                        } catch (InvalidInputException e) {
+                            Msg.warn(this, "Cannot rename parameter " + param.getName() + " to " + nameToApply +
+                                ": invalid name at " + address + ": " + e.getMessage());
+                        }
                     }
                 }
                 
@@ -470,7 +541,38 @@ public class InferenceApplier {
             } catch (Exception e) {
                 Msg.warn(this, "Failed to apply parameters mapping at " + address + ": " + e.getMessage(), e);
             }
+        } else {
+            Msg.debug(this, "No parameter renames applied at " + address);
         }
+    }
+
+    /**
+     * Resolve parameter rename from mapping using name or index-based keys.
+     */
+    private String resolveParameterMappingName(Map<String, String> parametersMapping, String originalName, int index) {
+        if (originalName != null && !originalName.isEmpty()) {
+            String byName = parametersMapping.get(originalName);
+            if (byName != null) {
+                return byName;
+            }
+        }
+
+        String byParamKey = parametersMapping.get("param_" + (index + 1));
+        if (byParamKey != null) {
+            return byParamKey;
+        }
+
+        String byArgKey = parametersMapping.get("arg" + (index + 1));
+        if (byArgKey != null) {
+            return byArgKey;
+        }
+
+        String byZeroBasedIndex = parametersMapping.get(String.valueOf(index));
+        if (byZeroBasedIndex != null) {
+            return byZeroBasedIndex;
+        }
+
+        return parametersMapping.get(String.valueOf(index + 1));
     }
     
     /**
@@ -541,10 +643,8 @@ public class InferenceApplier {
                         return localVar;
                     }
 
-                    if (addressMatch ^ sizeMatch) {
-                        String reason = addressMatch
-                            ? "address match size mismatch"
-                            : "size match address mismatch";
+                    if (addressMatch && !sizeMatch && isLikelyDummyVariableName(localVar.getName())) {
+                        String reason = "address match size mismatch";
                         relaxedCandidates.putIfAbsent(localVar, reason);
                     }
                 }
@@ -570,6 +670,15 @@ public class InferenceApplier {
         }
 
         return null;
+    }
+
+    private boolean isLikelyDummyVariableName(String name) {
+        if (name == null || name.isEmpty()) {
+            return true;
+        }
+        return name.startsWith("uVar") ||
+               name.startsWith("local_") ||
+               name.matches("^[a-z]\\d+$");
     }
     
     /**

@@ -116,7 +116,7 @@ public class AnalysisProgressMonitor implements EventConsumer {
      * @return Formatted string like "2h 30m" or "45m"
      */
     private String formatEta(double seconds) {
-        // Convert to minutes (round up)
+        // Convert t minutes (round up)
         long minutes = (long) Math.ceil(seconds / 60.0);
         
         // Calculate hours and remaining minutes
