@@ -11,7 +11,6 @@ on:
 env:
   GHIDRA_VERSION: "12.0"
   GHIDRA_RELEASE: "PUBLIC"
-  GHIDRA_DIR: ${{ runner.temp }}/ghidra_${{ env.GHIDRA_VERSION }}_${{ env.GHIDRA_RELEASE }}
 
 jobs:
   build-and-test:
@@ -19,6 +18,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Define GHIDRA_DIR
+        run: |
+          echo "GHIDRA_DIR=${RUNNER_TEMP}/ghidra_${{ env.GHIDRA_VERSION }}_${{ env.GHIDRA_RELEASE }}" >> "$GITHUB_ENV"
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -179,6 +181,10 @@ jobs:
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
 
     steps:
+      - name: Define GHIDRA_DIR
+        run: |
+          echo "GHIDRA_DIR=${RUNNER_TEMP}/ghidra_${{ env.GHIDRA_VERSION }}_${{ env.GHIDRA_RELEASE }}" >> "$GITHUB_ENV"
+          
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -324,6 +330,10 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
+      - name: Define GHIDRA_DIR
+        run: |
+          echo "GHIDRA_DIR=${RUNNER_TEMP}/ghidra_${{ env.GHIDRA_VERSION }}_${{ env.GHIDRA_RELEASE }}" >> "$GITHUB_ENV"
+          
       - name: Set short SHA
         run: |
           SHORT_SHA="${GITHUB_SHA: -5}"
