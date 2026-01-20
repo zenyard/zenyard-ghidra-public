@@ -11,6 +11,7 @@ on:
 env:
   GHIDRA_VERSION: "12.0"
   GHIDRA_RELEASE: "PUBLIC"
+  VERSION_TAG: "v0.1"
 
 jobs:
   build-and-test:
@@ -18,11 +19,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Define GHIDRA_DIR
-        run: |
-          echo "GHIDRA_DIR=${RUNNER_TEMP}/ghidra_${{ env.GHIDRA_VERSION }}_${{ env.GHIDRA_RELEASE }}" >> "$GITHUB_ENV"
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Define GHIDRA_DIR
+        run: |
+          echo "GHIDRA_DIR=${RUNNER_TEMP}/ghidra_${GHIDRA_VERSION}_${GHIDRA_RELEASE}" >> "$GITHUB_ENV"
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -40,7 +42,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      # --- GHIDRA: resolve the exact release asset (id/name/url) ---
+      # --- GHIDRA: resolve exact build asset and cache by asset identity ---
       - name: Resolve Ghidra release asset
         id: ghidra-asset
         env:
@@ -64,7 +66,6 @@ jobs:
             a for a in assets
             if a.get("name","").startswith(prefix) and a.get("name","").endswith(".zip")
           ]
-          # Sort by updated_at then name to pick the newest asset deterministically
           matches.sort(key=lambda a: ((a.get("updated_at") or ""), (a.get("name") or "")))
           if not matches:
             print(f"Error: No asset matching {prefix}*.zip under release tag {tag}", file=sys.stderr)
@@ -79,7 +80,6 @@ jobs:
             print("Error: Missing id/name/download_url in matched asset", file=sys.stderr)
             sys.exit(1)
 
-          # Write outputs
           out = os.environ["GITHUB_OUTPUT"]
           with open(out, "a", encoding="utf-8") as f:
             f.write(f"asset_id={asset_id}\n")
@@ -87,7 +87,6 @@ jobs:
             f.write(f"download_url={dl}\n")
           PY
 
-      # Cache key includes the exact asset id so it changes if NSA re-uploads.
       - name: Restore Ghidra cache
         id: cache-ghidra
         uses: actions/cache/restore@v4
@@ -114,7 +113,6 @@ jobs:
           unzip -q "${GHIDRA_ZIP}"
           rm -f "${GHIDRA_ZIP}"
 
-          # Normalize: move content from extracted ghidra_* dir into GHIDRA_DIR root
           EXTRACTED_DIR="$(find . -maxdepth 1 -type d -name 'ghidra_*' | head -1 || true)"
           if [ -n "${EXTRACTED_DIR}" ]; then
             shopt -s dotglob
@@ -122,7 +120,6 @@ jobs:
             rmdir "${EXTRACTED_DIR}"
           fi
 
-      # Writer-only save avoids reservation collisions across PR/push runs.
       - name: Save Ghidra cache (writer only)
         if: >
           steps.cache-ghidra.outputs.cache-hit != 'true' &&
@@ -181,127 +178,24 @@ jobs:
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
 
     steps:
-      - name: Define GHIDRA_DIR
+      - name: Set short SHA
         run: |
-          echo "GHIDRA_DIR=${RUNNER_TEMP}/ghidra_${{ env.GHIDRA_VERSION }}_${{ env.GHIDRA_RELEASE }}" >> "$GITHUB_ENV"
-          
-      - name: Checkout code
-        uses: actions/checkout@v4
+          SHORT_SHA="${GITHUB_SHA: -5}"
+          SHORT_SHA="${SHORT_SHA//\"/}"
+          echo "SHORT_SHA=$SHORT_SHA" >> "$GITHUB_ENV"
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
         with:
-          java-version: '21'
-          distribution: 'temurin'
+          name: decompai-ghidra-${{ github.ref_name }}-${{ env.SHORT_SHA }}
+          path: build-artifact
 
-      - name: Cache Gradle dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
-      - name: Resolve Ghidra release asset
-        id: ghidra-asset
-        env:
-          GHIDRA_TAG: Ghidra_${{ env.GHIDRA_VERSION }}_build
-          GHIDRA_PREFIX: ghidra_${{ env.GHIDRA_VERSION }}_${{ env.GHIDRA_RELEASE }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json, os, sys, urllib.request
-
-          tag = os.environ["GHIDRA_TAG"]
-          prefix = os.environ["GHIDRA_PREFIX"]
-          url = f"https://api.github.com/repos/NationalSecurityAgency/ghidra/releases/tags/{tag}"
-
-          req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
-          with urllib.request.urlopen(req) as resp:
-            data = json.load(resp)
-
-          assets = data.get("assets", [])
-          matches = [
-            a for a in assets
-            if a.get("name","").startswith(prefix) and a.get("name","").endswith(".zip")
-          ]
-          matches.sort(key=lambda a: ((a.get("updated_at") or ""), (a.get("name") or "")))
-          if not matches:
-            print(f"Error: No asset matching {prefix}*.zip under release tag {tag}", file=sys.stderr)
-            sys.exit(1)
-
-          a = matches[-1]
-          asset_id = a.get("id")
-          asset_name = a.get("name")
-          dl = a.get("browser_download_url")
-
-          if not asset_id or not asset_name or not dl:
-            print("Error: Missing id/name/download_url in matched asset", file=sys.stderr)
-            sys.exit(1)
-
-          out = os.environ["GITHUB_OUTPUT"]
-          with open(out, "a", encoding="utf-8") as f:
-            f.write(f"asset_id={asset_id}\n")
-            f.write(f"asset_name={asset_name}\n")
-            f.write(f"download_url={dl}\n")
-          PY
-
-      - name: Restore Ghidra cache
-        id: cache-ghidra-release
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ env.GHIDRA_DIR }}
-          key: ghidra-${{ runner.os }}-${{ steps.ghidra-asset.outputs.asset_id }}-${{ steps.ghidra-asset.outputs.asset_name }}
-          restore-keys: |
-            ghidra-${{ runner.os }}-
-
-      - name: Download Ghidra (if not cached)
-        if: steps.cache-ghidra-release.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          mkdir -p "${GHIDRA_DIR}"
-          cd "${GHIDRA_DIR}"
-
-          GHIDRA_ZIP_URL="${{ steps.ghidra-asset.outputs.download_url }}"
-          GHIDRA_ZIP="$(basename "${GHIDRA_ZIP_URL}")"
-
-          echo "Downloading ${GHIDRA_ZIP_URL}"
-          curl -fL --retry 3 --retry-delay 2 -o "${GHIDRA_ZIP}" "${GHIDRA_ZIP_URL}"
-
-          unzip -tq "${GHIDRA_ZIP}"
-          unzip -q "${GHIDRA_ZIP}"
-          rm -f "${GHIDRA_ZIP}"
-
-          EXTRACTED_DIR="$(find . -maxdepth 1 -type d -name 'ghidra_*' | head -1 || true)"
-          if [ -n "${EXTRACTED_DIR}" ]; then
-            shopt -s dotglob
-            mv "${EXTRACTED_DIR}"/* .
-            rmdir "${EXTRACTED_DIR}"
-          fi
-
-      # IMPORTANT: no save here; build-and-test is the single "writer"
-      - name: Set Ghidra installation directory
-        run: |
-          echo "GHIDRA_INSTALL_DIR=${GHIDRA_DIR}" >> "$GITHUB_ENV"
-          test -d "${GHIDRA_DIR}" || (echo "Error: ${GHIDRA_DIR} not found" && exit 1)
-
-      - name: Make gradlew executable
-        run: chmod +x ./gradlew
-
-      - name: Generate OpenAPI client
-        run: ./gradlew openApiGenerate
-
-      - name: Build extension
-        run: ./gradlew buildExtension
-
-      - name: Get release ZIP file
+      - name: Locate extension ZIP
         id: get-zip
         run: |
-          ZIP_FILE=$(ls -t dist/ghidra_*_decompai-ghidra.zip | head -1)
+          ZIP_FILE=$(find build-artifact -name "ghidra_*_decompai-ghidra.zip" | head -1)
           if [ -z "$ZIP_FILE" ]; then
-            echo "Error: No extension ZIP found in dist/"
+            echo "Error: No extension ZIP found in artifact"
             exit 1
           fi
           echo "zip_file=$ZIP_FILE" >> $GITHUB_OUTPUT
@@ -330,10 +224,6 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
-      - name: Define GHIDRA_DIR
-        run: |
-          echo "GHIDRA_DIR=${RUNNER_TEMP}/ghidra_${{ env.GHIDRA_VERSION }}_${{ env.GHIDRA_RELEASE }}" >> "$GITHUB_ENV"
-          
       - name: Set short SHA
         run: |
           SHORT_SHA="${GITHUB_SHA: -5}"
