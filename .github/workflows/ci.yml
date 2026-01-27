@@ -182,17 +182,7 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     needs: [set-short-sha, build-and-test]
-<<<<<<< Updated upstream
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-=======
-<<<<<<< Updated upstream
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
->>>>>>> Stashed changes
-    env:
-      SHORT_SHA: ${{ needs.set-short-sha.outputs.short_sha }}
-=======
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
->>>>>>> Stashed changes
 
     steps:
       - name: Validate short SHA
@@ -223,18 +213,8 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: ${{ steps.get-zip.outputs.zip_file }}
-<<<<<<< Updated upstream
-          tag_name: ci-${{ env.SHORT_SHA }}
-          name: Decompai Ghidra ci-${{ env.SHORT_SHA }}
-=======
-<<<<<<< Updated upstream
-          tag_name: ${{ github.ref_name }}
-          name: Decompai Ghidra ${{ env.SHORT_SHA }}
-=======
           tag_name: ci-${{ needs.set-short-sha.outputs.short_sha }}
           name: Decompai Ghidra ci-${{ needs.set-short-sha.outputs.short_sha }}
->>>>>>> Stashed changes
->>>>>>> Stashed changes
           body: |
             CI release for `main` @ `${{ github.sha }}`.
 
