@@ -11,15 +11,14 @@ import com.zenyard.decompai.ghidra.api.generated.model.GetInferencesResponse;
 import com.zenyard.decompai.ghidra.api.generated.model.Inference;
 import com.zenyard.decompai.ghidra.api.generated.model.MaybeUnknownInference;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
-import com.zenyard.decompai.ghidra.events.EventConsumer;
 import com.zenyard.decompai.ghidra.events.EventDispatcher;
-import com.zenyard.decompai.ghidra.events.EventProducer;
+import com.zenyard.decompai.ghidra.tasks.EventAwareTask;
 import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
 import com.zenyard.decompai.ghidra.status.StatusBarManager;
+import com.zenyard.decompai.ghidra.util.DecompaiConstants;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
-import ghidra.util.task.Task;
 import ghidra.util.task.TaskMonitor;
 
 /**
@@ -30,12 +29,12 @@ import ghidra.util.task.TaskMonitor;
  * 
  * NOTE: mirrors decompai_ida/download_inferences_task.py
  */
-public class DownloadInferencesTask extends Task implements EventConsumer, EventProducer {
+public class DownloadInferencesTask extends EventAwareTask {
     
-    private static final int POLL_INTERVAL_MS = 1000; // 1 second
+    private static final int POLL_INTERVAL_MS = DecompaiConstants.POLL_INTERVAL_MS;
     private static final int MAX_INFERENCES_PER_REQUEST = 50;
-    private static final int MAX_BACKOFF_MS = 30000; // Maximum backoff of 30 seconds
-    private static final int INITIAL_BACKOFF_MS = 1000; // Initial backoff of 1 second
+    private static final int MAX_BACKOFF_MS = DecompaiConstants.MAX_BACKOFF_MS;
+    private static final int INITIAL_BACKOFF_MS = DecompaiConstants.INITIAL_BACKOFF_MS;
     private static final String TASK_ID = "download_inferences";
     private static final String LATEST_RESULTS_TASK_ID = "latest_results_applied";
     private static final int STATUS_BAR_PRIORITY = com.zenyard.decompai.ghidra.status.StatusBarPriorities.DOWNLOAD_INFERENCES;
@@ -45,7 +44,6 @@ public class DownloadInferencesTask extends Task implements EventConsumer, Event
     private final InferenceQueue inferenceQueue;
     private final StatusBarManager statusBarManager;
     private final Program program;
-    private final EventDispatcher eventDispatcher;
     private volatile boolean shouldStop = false;
     private int consecutiveConnectionFailures = 0;
     
@@ -57,13 +55,12 @@ public class DownloadInferencesTask extends Task implements EventConsumer, Event
     public DownloadInferencesTask(PluginTool tool, BinariesApi binariesApi,
                                   InferenceQueue inferenceQueue, StatusBarManager statusBarManager,
                                   Program program, EventDispatcher eventDispatcher) {
-        super("Download Inferences", true, false, false); // canCancel=true, hasProgress=false, isModal=false
+        super("Download Inferences", true, false, false, eventDispatcher);
         this.tool = tool;
         this.binariesApi = binariesApi;
         this.inferenceQueue = inferenceQueue;
         this.statusBarManager = statusBarManager;
         this.program = program;
-        this.eventDispatcher = eventDispatcher;
     }
     
     @Override
@@ -116,19 +113,7 @@ public class DownloadInferencesTask extends Task implements EventConsumer, Event
     }
     
     @Override
-    public void publishEvent(DecompaiEvent event) {
-        if (eventDispatcher != null) {
-            eventDispatcher.publish(event);
-        }
-    }
-    
-    @Override
-    public void run(TaskMonitor monitor) {
-        // Subscribe to events
-        if (eventDispatcher != null) {
-            eventDispatcher.subscribe(this);
-        }
-        
+    protected void doRun(TaskMonitor monitor) {
         try {
             // Wait for BINARY_ID_AVAILABLE event
             synchronized (waitLock) {
@@ -211,11 +196,6 @@ public class DownloadInferencesTask extends Task implements EventConsumer, Event
                 "Failed to download inferences: " + e.getMessage(), e);
             if (statusBarManager != null) {
                 statusBarManager.unregisterTask(TASK_ID);
-            }
-        } finally {
-            // Unsubscribe from events
-            if (eventDispatcher != null) {
-                eventDispatcher.unsubscribe(this);
             }
         }
     }

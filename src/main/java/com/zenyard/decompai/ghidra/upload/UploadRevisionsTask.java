@@ -13,19 +13,16 @@ import com.zenyard.decompai.ghidra.api.generated.model.CreateRevisionParams;
 import com.zenyard.decompai.ghidra.api.generated.model.FinishAndAnalyzeCurrentRevisionParams;
 import com.zenyard.decompai.ghidra.api.generated.model.Function;
 import com.zenyard.decompai.ghidra.api.generated.model.GlobalVariable;
-import com.zenyard.decompai.ghidra.api.generated.model.LineRange;
 import com.zenyard.decompai.ghidra.api.generated.model.ModelObject;
 import com.zenyard.decompai.ghidra.api.generated.model.Range;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
-import com.zenyard.decompai.ghidra.events.EventConsumer;
 import com.zenyard.decompai.ghidra.events.EventDispatcher;
-import com.zenyard.decompai.ghidra.events.EventProducer;
+import com.zenyard.decompai.ghidra.tasks.EventAwareTask;
 import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
 import com.zenyard.decompai.ghidra.status.StatusBarManager;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
-import ghidra.util.task.Task;
 import ghidra.util.task.TaskMonitor;
 
 /**
@@ -35,7 +32,7 @@ import ghidra.util.task.TaskMonitor;
  * 
  * NOTE: mirrors decompai_ida/upload_revisions_task.py
  */
-public class UploadRevisionsTask extends Task implements EventConsumer, EventProducer {
+public class UploadRevisionsTask extends EventAwareTask {
     
     private static final int MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10MB
     private static final String TASK_ID = "upload_revisions";
@@ -45,7 +42,6 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
     private final BinariesApi binariesApi;
     private final StatusBarManager statusBarManager;
     private final Program program;
-    private final EventDispatcher eventDispatcher;
     
     // Event waiting
     private final Object waitLock = new Object();
@@ -58,12 +54,11 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
     
     public UploadRevisionsTask(PluginTool tool, BinariesApi binariesApi,
                                StatusBarManager statusBarManager, Program program, EventDispatcher eventDispatcher) {
-        super("Upload Revisions", true, false, false); // canCancel=true, hasProgress=false, isModal=false
+        super("Upload Revisions", true, false, false, eventDispatcher);
         this.tool = tool;
         this.binariesApi = binariesApi;
         this.statusBarManager = statusBarManager;
         this.program = program;
-        this.eventDispatcher = eventDispatcher;
     }
     
     @Override
@@ -127,19 +122,7 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
     }
     
     @Override
-    public void publishEvent(DecompaiEvent event) {
-        if (eventDispatcher != null) {
-            eventDispatcher.publish(event);
-        }
-    }
-    
-    @Override
-    public void run(TaskMonitor monitor) {
-        // Subscribe to events
-        if (eventDispatcher != null) {
-            eventDispatcher.subscribe(this);
-        }
-        
+    protected void doRun(TaskMonitor monitor) {
         try {
             // Get binary ID from properties
             DecompaiProgramProperties props = new DecompaiProgramProperties(program);
@@ -327,14 +310,7 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
                 FinishAndAnalyzeCurrentRevisionParams finishParams = new FinishAndAnalyzeCurrentRevisionParams();
                 finishParams.setAnalyzeDependents(analyzeDependents);
                 
-                CompletableFuture.supplyAsync(() -> {
-                    try {
-                        binariesApi.finishAndAnalyzeCurrentRevision(binaryId, finishParams);
-                        return null;
-                    } catch (com.zenyard.decompai.ghidra.api.generated.ApiException e) {
-                        throw new RuntimeException(e);
-                    }
-                }).get();
+                finishAndAnalyzeWithRetry(binaryId, finishParams, currentRevision);
                 
                 // Update revision number
                 setCurrentRevision(currentRevision);
@@ -367,10 +343,39 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
                 statusBarManager.unregisterTask(TASK_ID);
             }
             throw new RuntimeException("Failed to upload revisions", e);
-        } finally {
-            // Unsubscribe from events
-            if (eventDispatcher != null) {
-                eventDispatcher.unsubscribe(this);
+        }
+    }
+
+    private void finishAndAnalyzeWithRetry(UUID binaryId, FinishAndAnalyzeCurrentRevisionParams finishParams,
+            int currentRevision) {
+        int attempt = 0;
+        int maxAttempts = 3;
+        while (true) {
+            attempt++;
+            try {
+                binariesApi.finishAndAnalyzeCurrentRevision(binaryId, finishParams);
+                return;
+            } catch (com.zenyard.decompai.ghidra.api.generated.ApiException e) {
+                String responseBody = e.getResponseBody();
+                Msg.warn(this, "Finish and analyze failed for revision " + currentRevision
+                    + " (attempt " + attempt + "/" + maxAttempts + ", code=" + e.getCode() + "): "
+                    + (responseBody != null ? responseBody : e.getMessage()));
+                if (attempt >= maxAttempts || e.getCode() < 500) {
+                    throw new RuntimeException(e);
+                }
+            } catch (Exception e) {
+                if (attempt >= maxAttempts) {
+                    throw new RuntimeException(e);
+                }
+                Msg.warn(this, "Finish and analyze error for revision " + currentRevision
+                    + " (attempt " + attempt + "/" + maxAttempts + "): " + e.getMessage());
+            }
+
+            try {
+                Thread.sleep(500L * attempt);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted during finish-and-analyze retry", ie);
             }
         }
     }
@@ -509,20 +514,10 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
      * Validate global variable object before uploading.
      */
     private boolean validateGlobalVariable(GlobalVariable gv) {
-        try {
-            // GlobalVariable requires address and name (both non-null per API)
-            if (gv.getAddress() == null || gv.getAddress().isEmpty()) {
-                return false;
-            }
-            
-            if (gv.getName() == null || gv.getName().isEmpty()) {
-                return false;
-            }
-            
-            return true;
-        } catch (Exception e) {
+        if (gv == null) {
             return false;
         }
+        return !gv.getAddress().isEmpty() && !gv.getName().isEmpty();
     }
     
     /**
@@ -533,82 +528,45 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
      * @return true if valid, false otherwise
      */
     private boolean validateFunction(Function func) {
-        try {
-            // Address is required
-            if (func.getAddress() == null || func.getAddress().isEmpty()) {
-                return false;
-            }
-            
-            // Code is required
-            if (func.getCode() == null || func.getCode().isEmpty()) {
-                return false;
-            }
-            
-            String code = func.getCode();
-            
-            // Validate ranges if present
-            List<Range> ranges = func.getRanges();
-            if (ranges != null && !ranges.isEmpty()) {
-                // Validate ranges are within code bounds
-                for (Range range : ranges) {
-                    if (range.getStart() == null || range.getLength() == null) {
-                        return false; // Range has null values
-                    }
-                    if (range.getStart() < 0 || range.getStart() + range.getLength() > code.length()) {
-                        return false; // Range out of code bounds
-                    }
-                }
-                
-                // Validate ranges do not overlap
-                List<Range> sortedRanges = new ArrayList<>(ranges);
-                sortedRanges.sort((r1, r2) -> Integer.compare(
-                    r1.getStart() != null ? r1.getStart() : 0,
-                    r2.getStart() != null ? r2.getStart() : 0
-                ));
-                
-                for (int i = 0; i < sortedRanges.size() - 1; i++) {
-                    Range r1 = sortedRanges.get(i);
-                    Range r2 = sortedRanges.get(i + 1);
-                    if (r1.getStart() != null && r1.getLength() != null 
-                        && r2.getStart() != null 
-                        && r2.getStart() < r1.getStart() + r1.getLength()) {
-                        return false; // Overlapping ranges
-                    }
-                }
-            }
-            
-            // If present, line ranges must cover the entire function
-            // Note: This validation matches IDA's validate_object() but may be optional
-            // Skip for now if getLineRanges() is not available in generated model
-            try {
-                List<LineRange> lineRanges = func.getLineRanges();
-                if (lineRanges != null && !lineRanges.isEmpty()) {
-                    int coveredLines = 0;
-                    for (LineRange lineRange : lineRanges) {
-                        if (lineRange.getLineCount() != null) {
-                            coveredLines += lineRange.getLineCount();
-                        }
-                    }
-                    // Count lines in code (remove trailing newlines first)
-                    String codeWithoutTrailingNewlines = code.replaceAll("\n+$", "");
-                    int codeLines = codeWithoutTrailingNewlines.isEmpty() ? 0 
-                        : codeWithoutTrailingNewlines.split("\n").length;
-                    if (codeLines == 0 && !code.isEmpty()) {
-                        codeLines = 1; // Single line of code
-                    }
-                    if (coveredLines != codeLines) {
-                        return false; // Line ranges don't cover entire function
-                    }
-                }
-            } catch (Exception e) {
-                // If line ranges validation fails, don't reject the function
-                // This allows functions without line ranges to pass validation
-            }
-            
-            return true;
-        } catch (Exception e) {
+        if (func == null) {
             return false;
         }
+        if (func.getAddress().isEmpty()) {
+            return false;
+        }
+        if (func.getCode().isEmpty()) {
+            return false;
+        }
+        List<Range> ranges = func.getRanges();
+        if (ranges == null || ranges.isEmpty()) {
+            return true;
+        }
+        String code = func.getCode();
+        List<Range> sortedRanges = new ArrayList<>(ranges);
+        sortedRanges.sort((r1, r2) -> Integer.compare(
+            r1.getStart() != null ? r1.getStart() : -1,
+            r2.getStart() != null ? r2.getStart() : -1
+        ));
+        int lastEnd = -1;
+        for (Range range : sortedRanges) {
+            Integer start = range.getStart();
+            Integer length = range.getLength();
+            if (start == null || length == null) {
+                return false;
+            }
+            if (start < 0 || length < 0) {
+                return false;
+            }
+            int end = start + length;
+            if (end > code.length()) {
+                return false;
+            }
+            if (start < lastEnd) {
+                return false;
+            }
+            lastEnd = end;
+        }
+        return true;
     }
     
     /**

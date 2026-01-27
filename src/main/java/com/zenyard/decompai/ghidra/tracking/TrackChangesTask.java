@@ -94,6 +94,7 @@ public class TrackChangesTask implements EventProducer {
     private DomainObjectListener symbolListener; // Only used to track addresses during "Edit Label" and "Rename Local Variable" transactions
     private TransactionListener transactionListener;
     private volatile boolean ignoreEvents = true;
+    private volatile boolean initialAnalysisComplete = false;
     private volatile boolean trackingEditLabelTransaction = false;
     private final Set<Address> editLabelAffectedAddresses = new HashSet<>();
     
@@ -103,6 +104,7 @@ public class TrackChangesTask implements EventProducer {
         this.eventDispatcher = eventDispatcher;
         this.symbolListener = createSymbolListener(); // Only tracks during "Edit Label" and "Rename Local Variable" transactions
         this.transactionListener = createTransactionListener();
+        this.initialAnalysisComplete = isInitialAnalysisComplete();
 
         Msg.info(this, "TrackChangesTask initialized: ignoreEvents=" + this.ignoreEvents);
     }
@@ -140,7 +142,7 @@ public class TrackChangesTask implements EventProducer {
         return new TransactionListener() {
             @Override
             public void transactionStarted(DomainObjectAdapterDB domainObj, TransactionInfo tx) {
-                if (ignoreEvents) {
+                if (!shouldProcessEvents()) {
                     return;
                 }
                 String description = tx.getDescription();
@@ -156,7 +158,7 @@ public class TrackChangesTask implements EventProducer {
             
             @Override
             public void transactionEnded(DomainObjectAdapterDB domainObj) {
-                if (ignoreEvents) {
+                if (!shouldProcessEvents()) {
                     return;
                 }
                 synchronized (editLabelAffectedAddresses) {
@@ -214,6 +216,13 @@ public class TrackChangesTask implements EventProducer {
     public boolean isIgnoringEvents() {
         return ignoreEvents;
     }
+
+    /**
+     * Set whether initial analysis has completed. Change tracking only starts once complete.
+     */
+    public void setInitialAnalysisComplete(boolean complete) {
+        this.initialAnalysisComplete = complete;
+    }
     
     /**
      * Handle SYMBOL_ADDED, SYMBOL_RENAMED, or SYMBOL_REMOVED events.
@@ -221,7 +230,7 @@ public class TrackChangesTask implements EventProducer {
      * After transaction completes, those addresses are marked as dirty.
      */
     private void handleSymbolEvent(ProgramChangeRecord record) {
-        if (ignoreEvents) {
+        if (!shouldProcessEvents()) {
             return;
         }
         
@@ -317,7 +326,7 @@ public class TrackChangesTask implements EventProducer {
      * Handle non-symbol program change events.
      */
     private void handleProgramChange(ProgramChangeRecord record) {
-        if (ignoreEvents) {
+        if (!shouldProcessEvents()) {
             return;
         }
 
@@ -483,19 +492,29 @@ public class TrackChangesTask implements EventProducer {
             return;
         }
 
-        if (syncStatusStorage.getSyncStatus(address)
+        boolean alreadyDirty = syncStatusStorage.getSyncStatus(address)
             .map(com.zenyard.decompai.ghidra.storage.SyncStatus::isDirty)
-            .orElse(false)) {
-            return;
+            .orElse(false);
+
+        if (!alreadyDirty) {
+            syncStatusStorage.markDirty(address);
         }
-        
-        syncStatusStorage.markDirty(address);
-        
+
         // Set database_dirty property (used by QueueRevisionsTask and other components)
         DecompaiProgramProperties props = new DecompaiProgramProperties(program);
         props.setString("database_dirty", "true");
-        
-        // Publish CHANGES_DETECTED event
+        props.setString("changes_detected", "true");
+
+        // Publish CHANGES_DETECTED event even if already dirty so UI updates.
         publishEvent(new DecompaiEvent(DecompaiEvent.EventType.CHANGES_DETECTED, "TrackChangesTask"));
+    }
+
+    private boolean shouldProcessEvents() {
+        return !ignoreEvents && initialAnalysisComplete && program != null && !program.isClosed();
+    }
+
+    private boolean isInitialAnalysisComplete() {
+        DecompaiProgramProperties props = new DecompaiProgramProperties(program);
+        return "true".equals(props.getString("initial_analysis_complete"));
     }
 }

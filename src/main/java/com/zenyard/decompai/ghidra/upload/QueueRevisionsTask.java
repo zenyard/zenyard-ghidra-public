@@ -11,9 +11,8 @@ import java.util.Set;
 import com.zenyard.decompai.ghidra.api.generated.model.GlobalVariable;
 import com.zenyard.decompai.ghidra.api.generated.model.ModelObject;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
-import com.zenyard.decompai.ghidra.events.EventConsumer;
 import com.zenyard.decompai.ghidra.events.EventDispatcher;
-import com.zenyard.decompai.ghidra.events.EventProducer;
+import com.zenyard.decompai.ghidra.tasks.EventAwareTask;
 import com.zenyard.decompai.ghidra.inferences.PendingInferenceManager;
 import com.zenyard.decompai.ghidra.illum.FunctionOverviewAnnotator;
 import com.zenyard.decompai.ghidra.illum.InferenceApplier;
@@ -45,7 +44,7 @@ import ghidra.util.task.TaskMonitor;
  * 
  * NOTE: mirrors decompai_ida/queue_revisions_task.py
  */
-public class QueueRevisionsTask extends Task implements EventConsumer, EventProducer {
+public class QueueRevisionsTask extends EventAwareTask {
     
     private static final int MAX_OBJECTS_IN_REVISION = 100; // Configurable
     private static final String TASK_ID = "queue_revisions";
@@ -54,7 +53,6 @@ public class QueueRevisionsTask extends Task implements EventConsumer, EventProd
     private final PluginTool tool;
     private final Program program;
     private final StatusBarManager statusBarManager;
-    private final EventDispatcher eventDispatcher;
     private final boolean forceQueue;
     private List<Revision> revisions = new ArrayList<>();
     
@@ -69,11 +67,10 @@ public class QueueRevisionsTask extends Task implements EventConsumer, EventProd
 
     public QueueRevisionsTask(PluginTool tool, Program program, StatusBarManager statusBarManager,
         EventDispatcher eventDispatcher, boolean forceQueue) {
-        super("Queue Revisions", true, true, false); // canCancel=true, hasProgress=true, isModal=false (background task, uses status bar)
+        super("Queue Revisions", true, true, false, eventDispatcher);
         this.tool = tool;
         this.program = program;
         this.statusBarManager = statusBarManager;
-        this.eventDispatcher = eventDispatcher;
         this.forceQueue = forceQueue;
     }
     
@@ -102,13 +99,6 @@ public class QueueRevisionsTask extends Task implements EventConsumer, EventProd
         }
     }
     
-    @Override
-    public void publishEvent(DecompaiEvent event) {
-        if (eventDispatcher != null) {
-            eventDispatcher.publish(event);
-        }
-    }
-    
     /**
      * Get the list of revisions that were queued.
      * @return List of revisions
@@ -118,12 +108,7 @@ public class QueueRevisionsTask extends Task implements EventConsumer, EventProd
     }
     
     @Override
-    public void run(TaskMonitor monitor) {
-        // Subscribe to events
-        if (eventDispatcher != null) {
-            eventDispatcher.subscribe(this);
-        }
-        
+    protected void doRun(TaskMonitor monitor) {
         try {
             DecompaiProgramProperties props = new DecompaiProgramProperties(program);
 
@@ -167,14 +152,10 @@ public class QueueRevisionsTask extends Task implements EventConsumer, EventProd
             
             final boolean isInitialUpload = !"true".equals(uploaded);
             
-            // Now that we're ready to process, launch a modal task to show the dialog
-            // This ensures the dialog only appears when actual work begins
-            // Must launch from EDT for modal dialogs to work correctly
-            javax.swing.SwingUtilities.invokeLater(() -> {
-                ProcessRevisionsTask processTask = new ProcessRevisionsTask(
-                    tool, program, statusBarManager, isInitialUpload, revisions, eventDispatcher, this);
-                new ghidra.util.task.TaskLauncher(processTask, tool.getActiveWindow());
-            });
+            // Launch background task without modal dialog
+            ProcessRevisionsTask processTask = new ProcessRevisionsTask(
+                tool, program, statusBarManager, isInitialUpload, revisions, getEventDispatcher(), this);
+            com.zenyard.decompai.ghidra.DecompaiGhidraPlugin.executeBackgroundTask(processTask);
             
             // Processing is now handled by ProcessRevisionsTask, which will publish events
             
@@ -186,11 +167,6 @@ public class QueueRevisionsTask extends Task implements EventConsumer, EventProd
             }
             throw new RuntimeException("Failed to queue revisions", e);
         } finally {
-            // Unsubscribe from events
-            if (eventDispatcher != null) {
-                eventDispatcher.unsubscribe(this);
-            }
-            
             // Unregister status bar
             if (statusBarManager != null) {
                 statusBarManager.unregisterTask(TASK_ID);
@@ -323,6 +299,7 @@ public class QueueRevisionsTask extends Task implements EventConsumer, EventProd
      * This task is launched only when processing actually begins.
      */
     private static class ProcessRevisionsTask extends Task {
+        private final PluginTool tool;
         private final Program program;
         private final StatusBarManager statusBarManager;
         private final boolean isInitialUpload;
@@ -334,6 +311,7 @@ public class QueueRevisionsTask extends Task implements EventConsumer, EventProd
                                    boolean isInitialUpload, List<Revision> revisions,
                                    EventDispatcher eventDispatcher, QueueRevisionsTask parentTask) {
             super("Zenyard is Preparing", true, true, true); // canCancel=true, hasProgress=true, isModal=true
+            this.tool = tool;
             this.program = program;
             this.statusBarManager = statusBarManager;
             this.isInitialUpload = isInitialUpload;
@@ -358,7 +336,7 @@ public class QueueRevisionsTask extends Task implements EventConsumer, EventProd
             // Initialize pending inference manager
             InferenceStorage inferenceStorage = new InferenceStorage(program);
             FunctionOverviewAnnotator overviewAnnotator = new FunctionOverviewAnnotator();
-            InferenceApplier inferenceApplier = new InferenceApplier(overviewAnnotator, inferenceStorage);
+            InferenceApplier inferenceApplier = new InferenceApplier(overviewAnnotator, inferenceStorage, tool);
             PendingInferenceManager pendingInferenceManager = new PendingInferenceManager(program, inferenceStorage, inferenceApplier);
             
             // Phase 1: Scan for dirty objects

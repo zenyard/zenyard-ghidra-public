@@ -14,11 +14,19 @@ import com.zenyard.decompai.ghidra.config.DecompaiOptions;
 import com.zenyard.decompai.ghidra.copilot.CopilotController;
 import com.zenyard.decompai.ghidra.copilot.CopilotProvider;
 import com.zenyard.decompai.ghidra.copilot.CopilotViewModel;
+import com.zenyard.decompai.ghidra.events.DecompaiEvent;
 import com.zenyard.decompai.ghidra.illum.IlluminatorController;
+import com.zenyard.decompai.ghidra.initialization.InitialQuestionsDialog;
 import com.zenyard.decompai.ghidra.status.AnalysisProgressMonitor;
+import com.zenyard.decompai.ghidra.status.StatusBarActions;
 import com.zenyard.decompai.ghidra.status.StatusBarManager;
+import com.zenyard.decompai.ghidra.status.StatusBarState;
+import com.zenyard.decompai.ghidra.status.StatusBarViewModel;
+import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
 import com.zenyard.decompai.ghidra.tracking.TrackChangesTaskManager;
 import com.zenyard.decompai.ghidra.tasks.ForegroundTask;
+import com.zenyard.decompai.ghidra.upload.QueueRevisionsTask;
+import com.zenyard.decompai.ghidra.upload.UploadRevisionsTask;
 import com.zenyard.decompai.ghidra.util.LoggerUtil;
 import com.zenyard.decompai.ghidra.events.EventDispatcher;
 
@@ -83,10 +91,9 @@ public class DecompaiServices {
         
         // Initialize status bar manager
         this.statusBarManager = new StatusBarManager(plugin.getTool());
-        // Set services reference so status bar can check program state
-        this.statusBarManager.setServices(this);
         // Set event dispatcher so status bar component can subscribe to events
         this.statusBarManager.setEventDispatcher(eventDispatcher);
+        this.statusBarManager.setActions(createStatusBarActions());
         
         // Track changes task manager is initialized by the plugin when a program is activated
         this.trackChangesTaskManager = null;
@@ -317,6 +324,79 @@ public class DecompaiServices {
     
     public EventDispatcher getEventDispatcher() {
         return eventDispatcher;
+    }
+
+    private StatusBarActions createStatusBarActions() {
+        return new StatusBarActions() {
+            @Override
+            public void onRerun() {
+                Program program = getCurrentProgram();
+                if (program == null || program.isClosed()) {
+                    Msg.warn(this, "Status bar rerun ignored: no active program");
+                    return;
+                }
+                if (statusBarManager == null || eventDispatcher == null) {
+                    Msg.warn(this, "Status bar rerun ignored: missing dependencies");
+                    return;
+                }
+                QueueRevisionsTask queueRevisionsTask = new QueueRevisionsTask(
+                    plugin.getTool(), program, statusBarManager, eventDispatcher, true);
+                DecompaiGhidraPlugin.executeBackgroundTask(queueRevisionsTask);
+
+                BinariesApi api = binariesApi;
+                if (api == null) {
+                    Msg.warn(this, "Status bar rerun ignored: binaries API unavailable");
+                    return;
+                }
+                UploadRevisionsTask uploadRevisionsTask = new UploadRevisionsTask(
+                    plugin.getTool(), api, statusBarManager, program, eventDispatcher);
+                DecompaiGhidraPlugin.executeBackgroundTask(uploadRevisionsTask);
+
+                DecompaiProgramProperties props = new DecompaiProgramProperties(program);
+                props.setString("changes_detected", "false");
+
+                StatusBarViewModel viewModel = statusBarManager.getViewModel();
+                if (viewModel != null) {
+                    StatusBarState current = viewModel.getStateSnapshot();
+                    viewModel.updateState(current.withShowRerun(false));
+                }
+            }
+
+            @Override
+            public void onInitialUpload() {
+                Program program = getCurrentProgram();
+                if (program == null || program.isClosed()) {
+                    Msg.warn(this, "Status bar initial upload ignored: no active program");
+                    return;
+                }
+                if (statusBarManager == null || eventDispatcher == null) {
+                    Msg.warn(this, "Status bar initial upload ignored: missing dependencies");
+                    return;
+                }
+
+                InitialQuestionsDialog.InitialQuestionsResult result =
+                    InitialQuestionsDialog.showDialog(plugin.getTool(), options, program, true);
+                if (result == null || !result.isAccepted()) {
+                    statusBarManager.refreshDisplayNow();
+                    return;
+                }
+
+                DecompaiProgramProperties props = new DecompaiProgramProperties(program);
+                props.setString("asked_initial_questions", "true");
+                props.setString("auto_apply_results", String.valueOf(result.isAutoApplyResults()));
+                props.setString("allow_preprocessing", String.valueOf(result.isAllowPreprocessing()));
+                if (result.getBinaryInstructions() != null) {
+                    props.setString("binary_instructions", result.getBinaryInstructions());
+                }
+                props.setString("ready_for_analysis", "true");
+                props.setString("initial_questions_deferred", "false");
+
+                eventDispatcher.publish(new DecompaiEvent(
+                    DecompaiEvent.EventType.INITIAL_DIALOG_CONFIRMED, "StatusBar"));
+
+                statusBarManager.refreshDisplayNow();
+            }
+        };
     }
     
     public AnalysisProgressMonitor getAnalysisProgressMonitor() {

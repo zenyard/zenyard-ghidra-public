@@ -103,7 +103,9 @@ public class EventDispatcher {
         // Distribute event to all subscribers synchronously
         for (EventConsumer consumer : consumers) {
             try {
-                consumer.handleEvent(event);
+                if (consumer.shouldHandle(event)) {
+                    consumer.handleEvent(event);
+                }
             } catch (Exception e) {
                 Msg.error(this, "Error handling event " + event.getType() + " in consumer " 
                     + consumer.getClass().getSimpleName(), e);

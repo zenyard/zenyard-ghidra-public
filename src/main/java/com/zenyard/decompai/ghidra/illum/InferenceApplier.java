@@ -13,11 +13,14 @@ import com.zenyard.decompai.ghidra.api.generated.model.ParametersMapping;
 import com.zenyard.decompai.ghidra.api.generated.model.SwiftFunction;
 import com.zenyard.decompai.ghidra.api.generated.model.VariablesMapping;
 import com.zenyard.decompai.ghidra.storage.InferenceStorage;
+import com.zenyard.decompai.ghidra.util.DecompaiConstants;
+import com.zenyard.decompai.ghidra.util.TransactionUtils;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
+import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressFactory;
 import ghidra.program.model.listing.Function;
@@ -50,10 +53,20 @@ public class InferenceApplier {
     
     private final FunctionOverviewAnnotator overviewAnnotator;
     private final InferenceStorage inferenceStorage;
+    private final VariableRenamer variableRenamer;
+    private final ParameterRenamer parameterRenamer;
+    private final PluginTool tool;
     
     public InferenceApplier(FunctionOverviewAnnotator overviewAnnotator, InferenceStorage inferenceStorage) {
+        this(overviewAnnotator, inferenceStorage, null);
+    }
+    
+    public InferenceApplier(FunctionOverviewAnnotator overviewAnnotator, InferenceStorage inferenceStorage, PluginTool tool) {
         this.overviewAnnotator = overviewAnnotator;
         this.inferenceStorage = inferenceStorage;
+        this.variableRenamer = new VariableRenamer(inferenceStorage);
+        this.parameterRenamer = new ParameterRenamer();
+        this.tool = tool;
     }
     
     /**
@@ -89,8 +102,7 @@ public class InferenceApplier {
      * Apply inferences for a specific address.
      */
     private void applyInferencesForAddress(Program program, Address address, List<Inference> inferences) {
-        int transactionId = program.startTransaction("DecompAI: Apply inferences");
-        try {
+        TransactionUtils.runInTransaction(program, "DecompAI: Apply inferences", () -> {
             for (Inference inference : inferences) {
                 try {
                     applyInference(program, address, inference);
@@ -115,14 +127,7 @@ public class InferenceApplier {
                     // Continue with other inferences
                 }
             }
-        } catch (Exception e) {
-            program.endTransaction(transactionId, false); // rollback
-            throw e;
-        } finally {
-            if (transactionId >= 0) {
-                program.endTransaction(transactionId, true); // commit
-            }
-        }
+        });
     }
     
     /**
@@ -141,6 +146,9 @@ public class InferenceApplier {
             return "params";
         } else if (actual instanceof SwiftFunction) {
             return "swift_function";
+        } else if (actual instanceof java.util.Map) {
+            Object type = ((java.util.Map<?, ?>) actual).get("type");
+            return type != null ? String.valueOf(type) : "unknown";
         }
         return "unknown";
     }
@@ -160,6 +168,17 @@ public class InferenceApplier {
             return ((ParametersMapping) actual).getAddress();
         } else if (actual instanceof SwiftFunction) {
             return ((SwiftFunction) actual).getAddress();
+        } else if (actual instanceof java.util.Map) {
+            Object address = ((java.util.Map<?, ?>) actual).get("address");
+            if (address instanceof String) {
+                return (String) address;
+            }
+            if (address instanceof java.util.Map) {
+                Object root = ((java.util.Map<?, ?>) address).get("root");
+                if (root != null) {
+                    return String.valueOf(root);
+                }
+            }
         }
         return null;
     }
@@ -173,6 +192,7 @@ public class InferenceApplier {
         if (actual instanceof FunctionOverview) {
             applyFunctionOverview(program, address, (FunctionOverview) actual);
         } else if (actual instanceof Name) {
+            Msg.debug(this, "Applying name inference at " + address);
             applyName(program, address, (Name) actual);
         } else if (actual instanceof VariablesMapping) {
             applyVariablesMapping(program, address, (VariablesMapping) actual);
@@ -181,9 +201,29 @@ public class InferenceApplier {
         } else if (actual instanceof SwiftFunction) {
             // SwiftFunction is read-only, nothing to apply
             // Just store it for later retrieval
+        } else if (actual instanceof java.util.Map) {
+            applyMapInference(program, address, (java.util.Map<?, ?>) actual);
         } else {
             Msg.warn(this, "Unknown inference type: " + actual.getClass().getSimpleName());
         }
+    }
+
+    private void applyMapInference(Program program, Address address, java.util.Map<?, ?> actual) {
+        Object type = actual.get("type");
+        if (type == null) {
+            Msg.warn(this, "Unknown inference map with no type at " + address);
+            return;
+        }
+        String typeValue = String.valueOf(type);
+        if ("name".equals(typeValue)) {
+            Object nameValue = actual.get("name");
+            if (nameValue != null) {
+                Msg.debug(this, "Applying map-based name inference at " + address);
+                applyNameString(program, address, String.valueOf(nameValue));
+            }
+            return;
+        }
+        Msg.warn(this, "Unhandled inference map type '" + typeValue + "' at " + address);
     }
     
     /**
@@ -213,6 +253,7 @@ public class InferenceApplier {
     private void applyName(Program program, Address address, Name name) {
         // Check if user has defined a name
         if (hasUserDefinedName(program, address)) {
+            Msg.debug(this, "Skipping name inference at " + address + ": user-defined name");
             return; // Don't override user names
         }
         
@@ -229,18 +270,55 @@ public class InferenceApplier {
         Function function = funcManager.getFunctionAt(address);
         if (function != null && function.isThunk()) {
             // Don't rename thunks - let Ghidra manage them
+            Msg.debug(this, "Skipping name inference at " + address + ": thunk function");
             return;
         }
         
         // Apply name
         String nameToApply = name.getName();
+        applyNameString(program, address, nameToApply);
+    }
+
+    private void applyNameString(Program program, Address address, String nameToApply) {
+        if (hasUserDefinedName(program, address)) {
+            Msg.debug(this, "Skipping name inference at " + address + ": user-defined name");
+            return;
+        }
+        if (nameToApply == null || nameToApply.isEmpty()) {
+            Msg.debug(this, "Skipping name inference at " + address + ": empty name");
+            return;
+        }
+        SymbolTable symbolTable = program.getSymbolTable();
+        Symbol symbol = symbolTable.getPrimarySymbol(address);
+        if (symbol == null) {
+            Msg.warn(this, "No symbol at address " + address);
+            return;
+        }
+        FunctionManager funcManager = program.getFunctionManager();
+        Function function = funcManager.getFunctionAt(address);
+        if (function != null && function.isThunk()) {
+            Msg.debug(this, "Skipping name inference at " + address + ": thunk function");
+            return;
+        }
         // Add leading underscore if name is a reserved prefix
         if (!isValidName(nameToApply)) {
             nameToApply = "_" + nameToApply;
         }
+
+        String currentName = symbol.getName();
+        if (currentName != null && currentName.equals(nameToApply)) {
+            Msg.debug(this, "Skipping name inference at " + address + ": no change (" + currentName + ")");
+            return;
+        }
         
         try {
             symbol.setName(nameToApply, SourceType.ANALYSIS);
+            Msg.info(this, "Renamed function at " + address + " to " + nameToApply);
+            if (function != null) {
+                FunctionListHighlighter.markFunctionRenamed(function);
+                FunctionListHighlighter.installRenderer(tool);
+                SymbolTreeHighlighter.installRenderer(tool);
+            }
         } catch (Exception e) {
             Msg.warn(this, "Failed to rename symbol at " + address + ": " + e.getMessage(), e);
         }
@@ -250,6 +328,10 @@ public class InferenceApplier {
      * Apply variables mapping inference.
      */
     private void applyVariablesMapping(Program program, Address address, VariablesMapping mapping) {
+        if (variableRenamer != null) {
+            variableRenamer.applyVariablesMapping(program, address, mapping);
+            return;
+        }
         FunctionManager funcManager = program.getFunctionManager();
         Function function = funcManager.getFunctionAt(address);
         
@@ -268,7 +350,7 @@ public class InferenceApplier {
             
             DecompileResults results = decompiler.decompileFunction(
                 function,
-                30,
+                DecompaiConstants.DECOMPILER_TIMEOUT_SECONDS,
                 TaskMonitor.DUMMY
             );
             
@@ -425,6 +507,10 @@ public class InferenceApplier {
      * Apply parameters mapping inference.
      */
     private void applyParametersMapping(Program program, Address address, ParametersMapping mapping) {
+        if (parameterRenamer != null) {
+            parameterRenamer.applyParametersMapping(program, address, mapping);
+            return;
+        }
         FunctionManager funcManager = program.getFunctionManager();
         Function function = funcManager.getFunctionAt(address);
         
@@ -451,7 +537,7 @@ public class InferenceApplier {
 
                 DecompileResults results = decompiler.decompileFunction(
                     function,
-                    30,
+                    DecompaiConstants.DECOMPILER_TIMEOUT_SECONDS,
                     TaskMonitor.DUMMY
                 );
 

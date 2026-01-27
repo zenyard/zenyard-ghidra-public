@@ -14,15 +14,12 @@ import com.zenyard.decompai.ghidra.api.generated.model.PostBinaryBody;
 import com.zenyard.decompai.ghidra.api.generated.model.PostBinaryResponse;
 import com.zenyard.decompai.ghidra.config.DecompaiOptions;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
-import com.zenyard.decompai.ghidra.events.EventConsumer;
-import com.zenyard.decompai.ghidra.events.EventDispatcher;
-import com.zenyard.decompai.ghidra.events.EventProducer;
+import com.zenyard.decompai.ghidra.tasks.EventAwareTask;
 import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
 import com.zenyard.decompai.ghidra.status.StatusBarManager;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
-import ghidra.util.task.Task;
 import ghidra.util.task.TaskMonitor;
 
 import com.zenyard.decompai.ghidra.DecompaiServices;
@@ -34,7 +31,7 @@ import com.zenyard.decompai.ghidra.DecompaiServices;
  * 
  * NOTE: mirrors decompai_ida/register_binary_task.py
  */
-public class RegisterBinaryTask extends Task implements EventConsumer, EventProducer {
+public class RegisterBinaryTask extends EventAwareTask {
     
     private static final String TASK_ID = "register_binary";
     private static final int STATUS_BAR_PRIORITY = com.zenyard.decompai.ghidra.status.StatusBarPriorities.REGISTER_BINARY;
@@ -45,8 +42,6 @@ public class RegisterBinaryTask extends Task implements EventConsumer, EventProd
     private final String binaryInstructions;
     private final StatusBarManager statusBarManager;
     private final Program program;
-    private final DecompaiServices services;
-    private final EventDispatcher eventDispatcher;
     private UUID binaryId;
     
     // Event waiting
@@ -64,15 +59,14 @@ public class RegisterBinaryTask extends Task implements EventConsumer, EventProd
     public RegisterBinaryTask(PluginTool tool, BinariesApi binariesApi,
                              DecompaiOptions options, String binaryInstructions, StatusBarManager statusBarManager,
                              Program program, DecompaiServices services) {
-        super("Register Binary with DecompAI", true, false, false); // canCancel=true, hasProgress=false, isModal=false
+        super("Register Binary with DecompAI", true, false, false,
+            services != null ? services.getEventDispatcher() : null);
         this.tool = tool;
         this.binariesApi = binariesApi;
         this.options = options;
         this.binaryInstructions = binaryInstructions;
         this.statusBarManager = statusBarManager;
         this.program = program;
-        this.services = services;
-        this.eventDispatcher = services != null ? services.getEventDispatcher() : null;
     }
     
     @Override
@@ -105,19 +99,7 @@ public class RegisterBinaryTask extends Task implements EventConsumer, EventProd
     }
     
     @Override
-    public void publishEvent(DecompaiEvent event) {
-        if (eventDispatcher != null) {
-            eventDispatcher.publish(event);
-        }
-    }
-    
-    @Override
-    public void run(TaskMonitor monitor) {
-        // Subscribe to events
-        if (eventDispatcher != null) {
-            eventDispatcher.subscribe(this);
-        }
-        
+    protected void doRun(TaskMonitor monitor) {
         try {
             // Check if already registered (initial state check)
             DecompaiProgramProperties props = new DecompaiProgramProperties(program);
@@ -298,11 +280,6 @@ public class RegisterBinaryTask extends Task implements EventConsumer, EventProd
                 statusBarManager.unregisterTask(TASK_ID);
             }
             throw new RuntimeException("Failed to register binary", e);
-        } finally {
-            // Unsubscribe from events
-            if (eventDispatcher != null) {
-                eventDispatcher.unsubscribe(this);
-            }
         }
     }
     

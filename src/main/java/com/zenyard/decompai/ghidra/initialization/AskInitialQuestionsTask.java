@@ -6,14 +6,11 @@ import java.util.Set;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
-import ghidra.util.task.Task;
 import ghidra.util.task.TaskMonitor;
 
 import com.zenyard.decompai.ghidra.DecompaiServices;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
-import com.zenyard.decompai.ghidra.events.EventConsumer;
-import com.zenyard.decompai.ghidra.events.EventDispatcher;
-import com.zenyard.decompai.ghidra.events.EventProducer;
+import com.zenyard.decompai.ghidra.tasks.EventAwareTask;
 import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
 
 /**
@@ -23,12 +20,10 @@ import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
  * Similar to IDA's AskInitialQuestions task.
  * Uses event-driven architecture to wait for analysis completion.
  */
-public class AskInitialQuestionsTask extends Task implements EventConsumer, EventProducer {
+public class AskInitialQuestionsTask extends EventAwareTask {
     
     private final PluginTool tool;
     private final Program program;
-    private final DecompaiServices services;
-    private final EventDispatcher eventDispatcher;
     
     // Event waiting
     private final Object waitLock = new Object();
@@ -37,11 +32,10 @@ public class AskInitialQuestionsTask extends Task implements EventConsumer, Even
     
     public AskInitialQuestionsTask(PluginTool tool, Program program, 
                                    DecompaiServices services) {
-        super("Ask Initial Questions", true, false, false); // canCancel=true, hasProgress=false, isModal=false
+        super("Ask Initial Questions", true, false, false,
+            services != null ? services.getEventDispatcher() : null);
         this.tool = tool;
         this.program = program;
-        this.services = services;
-        this.eventDispatcher = services != null ? services.getEventDispatcher() : null;
     }
     
     @Override
@@ -68,19 +62,7 @@ public class AskInitialQuestionsTask extends Task implements EventConsumer, Even
     }
     
     @Override
-    public void publishEvent(DecompaiEvent event) {
-        if (eventDispatcher != null) {
-            eventDispatcher.publish(event);
-        }
-    }
-    
-    @Override
-    public void run(TaskMonitor monitor) {
-        // Subscribe to events
-        if (eventDispatcher != null) {
-            eventDispatcher.subscribe(this);
-        }
-        
+    protected void doRun(TaskMonitor monitor) {
         try {
             DecompaiProgramProperties props = new DecompaiProgramProperties(program);
             
@@ -137,11 +119,6 @@ public class AskInitialQuestionsTask extends Task implements EventConsumer, Even
         } catch (Exception e) {
             Msg.showError(this, tool.getActiveWindow(), "Ask Initial Questions Error",
                 "Failed to check initial questions: " + e.getMessage(), e);
-        } finally {
-            // Unsubscribe from events
-            if (eventDispatcher != null) {
-                eventDispatcher.unsubscribe(this);
-            }
         }
     }
     

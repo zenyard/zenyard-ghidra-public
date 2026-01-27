@@ -7,15 +7,13 @@ import java.util.concurrent.CompletableFuture;
 
 import com.zenyard.decompai.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
-import com.zenyard.decompai.ghidra.events.EventConsumer;
 import com.zenyard.decompai.ghidra.events.EventDispatcher;
-import com.zenyard.decompai.ghidra.events.EventProducer;
+import com.zenyard.decompai.ghidra.tasks.EventAwareTask;
 import com.zenyard.decompai.ghidra.status.StatusBarManager;
 import com.zenyard.decompai.ghidra.util.BinarySerializer;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
-import ghidra.util.task.Task;
 import ghidra.util.task.TaskMonitor;
 
 /**
@@ -24,7 +22,7 @@ import ghidra.util.task.TaskMonitor;
  * 
  * NOTE: mirrors decompai_ida/upload_original_files_task.py
  */
-public class UploadOriginalFilesTask extends Task implements EventConsumer, EventProducer {
+public class UploadOriginalFilesTask extends EventAwareTask {
     
     private static final String TASK_ID = "upload_original_files";
     private static final int STATUS_BAR_PRIORITY = com.zenyard.decompai.ghidra.status.StatusBarPriorities.UPLOAD_ORIGINAL_FILES;
@@ -33,7 +31,6 @@ public class UploadOriginalFilesTask extends Task implements EventConsumer, Even
     private final BinariesApi binariesApi;
     private final StatusBarManager statusBarManager;
     private final Program program;
-    private final EventDispatcher eventDispatcher;
     
     // Event waiting
     private final Object waitLock = new Object();
@@ -44,12 +41,11 @@ public class UploadOriginalFilesTask extends Task implements EventConsumer, Even
     public UploadOriginalFilesTask(PluginTool tool, 
                                   BinariesApi binariesApi, StatusBarManager statusBarManager,
                                   Program program, EventDispatcher eventDispatcher) {
-        super("Upload Original File", true, false, false); // canCancel=true, hasProgress=false, isModal=false
+        super("Upload Original File", true, false, false, eventDispatcher);
         this.tool = tool;
         this.binariesApi = binariesApi;
         this.statusBarManager = statusBarManager;
         this.program = program;
-        this.eventDispatcher = eventDispatcher;
     }
     
     @Override
@@ -96,19 +92,7 @@ public class UploadOriginalFilesTask extends Task implements EventConsumer, Even
     }
     
     @Override
-    public void publishEvent(DecompaiEvent event) {
-        if (eventDispatcher != null) {
-            eventDispatcher.publish(event);
-        }
-    }
-    
-    @Override
-    public void run(TaskMonitor monitor) {
-        // Subscribe to events
-        if (eventDispatcher != null) {
-            eventDispatcher.subscribe(this);
-        }
-        
+    protected void doRun(TaskMonitor monitor) {
         try {
             // Check if already uploaded
             com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties props = 
@@ -208,11 +192,6 @@ public class UploadOriginalFilesTask extends Task implements EventConsumer, Even
                 statusBarManager.unregisterTask(TASK_ID);
             }
             throw new RuntimeException("Failed to upload original file", e);
-        } finally {
-            // Unsubscribe from events
-            if (eventDispatcher != null) {
-                eventDispatcher.unsubscribe(this);
-            }
         }
     }
     

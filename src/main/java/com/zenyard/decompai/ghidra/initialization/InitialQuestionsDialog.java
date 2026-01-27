@@ -171,6 +171,10 @@ public class InitialQuestionsDialog extends DialogComponentProvider {
             DecompaiProgramProperties props = new DecompaiProgramProperties(program);
             props.setString("dont_show_initial_questions_again", "true");
         }
+        if (program != null) {
+            DecompaiProgramProperties props = new DecompaiProgramProperties(program);
+            props.setString("initial_questions_deferred", "false");
+        }
         
         Msg.info(this, "DecompAI: User accepted initial questions");
         close();
@@ -185,6 +189,10 @@ public class InitialQuestionsDialog extends DialogComponentProvider {
             DecompaiProgramProperties props = new DecompaiProgramProperties(program);
             props.setString("dont_show_initial_questions_again", "true");
         }
+        if (program != null) {
+            DecompaiProgramProperties props = new DecompaiProgramProperties(program);
+            props.setString("initial_questions_deferred", "true");
+        }
         
         Msg.info(this, "DecompAI: User skipped initial questions");
         close();
@@ -195,12 +203,23 @@ public class InitialQuestionsDialog extends DialogComponentProvider {
      */
     public static InitialQuestionsResult showDialog(PluginTool tool, DecompaiOptions options, 
             Program program) {
+        return showDialog(tool, options, program, false);
+    }
+
+    /**
+     * Show the dialog and return the result.
+     * @param forceShow When true, bypasses the "don't show again" check.
+     */
+    public static InitialQuestionsResult showDialog(PluginTool tool, DecompaiOptions options,
+            Program program, boolean forceShow) {
         DecompaiProgramProperties props = new DecompaiProgramProperties(program);
         
         // Check "don't show again" property first (before other checks)
-        String dontShowAgain = props.getString("dont_show_initial_questions_again");
-        if ("true".equals(dontShowAgain)) {
-            return null; // User requested not to show again for this project
+        if (!forceShow) {
+            String dontShowAgain = props.getString("dont_show_initial_questions_again");
+            if ("true".equals(dontShowAgain)) {
+                return null; // User requested not to show again for this project
+            }
         }
         
         // Check if already asked

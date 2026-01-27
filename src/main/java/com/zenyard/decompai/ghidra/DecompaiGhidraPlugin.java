@@ -32,6 +32,8 @@ import com.zenyard.decompai.ghidra.initialization.InitialUploadMessageDialog;
 import com.zenyard.decompai.ghidra.initialization.AskInitialQuestionsTask;
 import com.zenyard.decompai.ghidra.initialization.ShowInitialQuestionsTask;
 import com.zenyard.decompai.ghidra.initialization.StartForegroundTasksTask;
+import com.zenyard.decompai.ghidra.illum.FunctionListHighlighter;
+import com.zenyard.decompai.ghidra.illum.SymbolTreeHighlighter;
 import com.zenyard.decompai.ghidra.polling.ApplyInferencesTask;
 import com.zenyard.decompai.ghidra.polling.DownloadInferencesTask;
 import com.zenyard.decompai.ghidra.polling.PollServerStatusTask;
@@ -94,6 +96,11 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
         
         // Register actions
         createActions();
+
+        SwingUtilities.invokeLater(() -> {
+            FunctionListHighlighter.installRenderer(tool);
+            SymbolTreeHighlighter.installRenderer(tool);
+        });
     }
     
     @Override
@@ -101,6 +108,10 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
         // Unsubscribe from events
         if (services != null && services.getEventDispatcher() != null) {
             services.getEventDispatcher().unsubscribe(this);
+        }
+
+        if (services != null && services.getStatusBarManager() != null) {
+            services.getStatusBarManager().dispose();
         }
         
         // Clear singleton instance when plugin is disposed
@@ -170,6 +181,7 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
             // }
         } else if (trackChangesTaskManager != null) {
             // Analysis already complete from a previous session; re-enable change tracking.
+            trackChangesTaskManager.setInitialAnalysisComplete(true);
             trackChangesTaskManager.setIgnoreEvents(false);
         }
         
@@ -443,7 +455,10 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
                 eventDispatcher.publish(event);
             }
         }
-        trackChangesTaskManager.setIgnoreEvents(false);
+        if (trackChangesTaskManager != null) {
+            trackChangesTaskManager.setInitialAnalysisComplete(true);
+            trackChangesTaskManager.setIgnoreEvents(false);
+        }
     }
 
     private void waitForAnalysisCompletion(Program program) {

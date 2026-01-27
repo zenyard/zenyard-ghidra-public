@@ -10,15 +10,12 @@ import javax.swing.SwingUtilities;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
-import ghidra.util.task.Task;
 import ghidra.util.task.TaskMonitor;
 
 import com.zenyard.decompai.ghidra.DecompaiServices;
 import com.zenyard.decompai.ghidra.config.DecompaiOptions;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
-import com.zenyard.decompai.ghidra.events.EventConsumer;
-import com.zenyard.decompai.ghidra.events.EventDispatcher;
-import com.zenyard.decompai.ghidra.events.EventProducer;
+import com.zenyard.decompai.ghidra.tasks.EventAwareTask;
 import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
 
 /**
@@ -28,12 +25,11 @@ import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
  * Similar to IDA's ShowInitialQuestionsTask.
  * Runs as background task using events instead of foreground task queue.
  */
-public class ShowInitialQuestionsTask extends Task implements EventConsumer, EventProducer {
+public class ShowInitialQuestionsTask extends EventAwareTask {
     
     private final PluginTool tool;
     private final Program program;
     private final DecompaiServices services;
-    private final EventDispatcher eventDispatcher;
     
     // Event waiting
     private final Object waitLock = new Object();
@@ -41,11 +37,11 @@ public class ShowInitialQuestionsTask extends Task implements EventConsumer, Eve
     private volatile boolean shouldStop = false;
     
     public ShowInitialQuestionsTask(PluginTool tool, Program program, DecompaiServices services) {
-        super("Show Initial Questions", true, false, false); // canCancel=true, hasProgress=false, isModal=false
+        super("Show Initial Questions", true, false, false,
+            services != null ? services.getEventDispatcher() : null);
         this.tool = tool;
         this.program = program;
         this.services = services;
-        this.eventDispatcher = services != null ? services.getEventDispatcher() : null;
     }
     
     @Override
@@ -72,19 +68,7 @@ public class ShowInitialQuestionsTask extends Task implements EventConsumer, Eve
     }
     
     @Override
-    public void publishEvent(DecompaiEvent event) {
-        if (eventDispatcher != null) {
-            eventDispatcher.publish(event);
-        }
-    }
-    
-    @Override
-    public void run(TaskMonitor monitor) {
-        // Subscribe to events
-        if (eventDispatcher != null) {
-            eventDispatcher.subscribe(this);
-        }
-        
+    protected void doRun(TaskMonitor monitor) {
         try {
             // Wait for READY_FOR_QUESTIONS event
             synchronized (waitLock) {
@@ -136,6 +120,12 @@ public class ShowInitialQuestionsTask extends Task implements EventConsumer, Eve
             
             if (result == null || !result.isAccepted()) {
                 // User rejected or dialog was skipped
+                if (services != null) {
+                    com.zenyard.decompai.ghidra.status.StatusBarManager statusBarManager = services.getStatusBarManager();
+                    if (statusBarManager != null) {
+                        statusBarManager.refreshDisplayNow();
+                    }
+                }
                 return;
             }
             
@@ -159,11 +149,6 @@ public class ShowInitialQuestionsTask extends Task implements EventConsumer, Eve
         } catch (Exception e) {
             Msg.showError(this, tool.getActiveWindow(), "Show Initial Questions Error",
                 "Failed to show initial questions: " + e.getMessage(), e);
-        } finally {
-            // Unsubscribe from events
-            if (eventDispatcher != null) {
-                eventDispatcher.unsubscribe(this);
-            }
         }
     }
 }

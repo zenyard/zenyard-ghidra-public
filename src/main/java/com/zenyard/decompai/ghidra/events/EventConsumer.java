@@ -22,4 +22,12 @@ public interface EventConsumer {
      * @return Set of event types this consumer subscribes to
      */
     Set<DecompaiEvent.EventType> getSubscribedEventTypes();
+
+    /**
+     * Optional filter for events this consumer should handle.
+     * Default is true to preserve existing behavior.
+     */
+    default boolean shouldHandle(DecompaiEvent event) {
+        return true;
+    }
 }

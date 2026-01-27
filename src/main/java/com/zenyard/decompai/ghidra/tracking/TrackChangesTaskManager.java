@@ -65,4 +65,13 @@ public class TrackChangesTaskManager {
             trackChangesTask.setIgnoreEvents(ignore);
         }
     }
+
+    /**
+     * Set whether initial analysis has completed for the current program.
+     */
+    public void setInitialAnalysisComplete(boolean complete) {
+        if (trackChangesTask != null) {
+            trackChangesTask.setInitialAnalysisComplete(complete);
+        }
+    }
 }

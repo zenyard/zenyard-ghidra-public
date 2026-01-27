@@ -9,16 +9,15 @@ import com.zenyard.decompai.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.decompai.ghidra.api.generated.model.BinaryStatus;
 import com.zenyard.decompai.ghidra.api.generated.model.RevisionAnalysisStatus;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
-import com.zenyard.decompai.ghidra.events.EventConsumer;
 import com.zenyard.decompai.ghidra.events.EventDispatcher;
-import com.zenyard.decompai.ghidra.events.EventProducer;
+import com.zenyard.decompai.ghidra.tasks.EventAwareTask;
 import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
 import com.zenyard.decompai.ghidra.status.AnalysisStatus;
 import com.zenyard.decompai.ghidra.status.RemoteAnalysisStats;
+import com.zenyard.decompai.ghidra.util.DecompaiConstants;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
-import ghidra.util.task.Task;
 import ghidra.util.task.TaskMonitor;
 
 /**
@@ -26,11 +25,11 @@ import ghidra.util.task.TaskMonitor;
  * 
  * NOTE: mirrors decompai_ida/poll_server_status_task.py
  */
-public class PollServerStatusTask extends Task implements EventConsumer, EventProducer {
+public class PollServerStatusTask extends EventAwareTask {
     
-    private static final int POLL_INTERVAL_MS = 3000; // 3 seconds
-    private static final int MAX_BACKOFF_MS = 30000; // Maximum backoff of 30 seconds
-    private static final int INITIAL_BACKOFF_MS = 1000; // Initial backoff of 1 second
+    private static final int POLL_INTERVAL_MS = DecompaiConstants.STATUS_POLL_INTERVAL_MS;
+    private static final int MAX_BACKOFF_MS = DecompaiConstants.MAX_BACKOFF_MS;
+    private static final int INITIAL_BACKOFF_MS = DecompaiConstants.INITIAL_BACKOFF_MS;
     private static final long ETA_CALCULATION_TIME_MS = 30_000L; // 30 seconds in milliseconds
     private static final long ETA_MIN_TIME_MS = 5_000L; // 5 seconds in milliseconds
     private static final double ETA_MIN_PROGRESS = 0.05; // 5% progress to allow early ETA
@@ -39,7 +38,6 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
     private final PluginTool tool;
     private final BinariesApi binariesApi;
     private final Program program;
-    private final EventDispatcher eventDispatcher;
     private volatile boolean shouldStop = false;
     private Integer maxServerRevision = null;
     private int consecutiveConnectionFailures = 0;
@@ -50,11 +48,10 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
     private UUID binaryId = null;
     
     public PollServerStatusTask(PluginTool tool, BinariesApi binariesApi, Program program, EventDispatcher eventDispatcher) {
-        super("Poll Server Status", true, false, false); // canCancel=true, hasProgress=false, isModal=false
+        super("Poll Server Status", true, false, false, eventDispatcher);
         this.tool = tool;
         this.binariesApi = binariesApi;
         this.program = program;
-        this.eventDispatcher = eventDispatcher;
     }
     
     @Override
@@ -98,19 +95,7 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
     }
     
     @Override
-    public void publishEvent(DecompaiEvent event) {
-        if (eventDispatcher != null) {
-            eventDispatcher.publish(event);
-        }
-    }
-    
-    @Override
-    public void run(TaskMonitor monitor) {
-        // Subscribe to events
-        if (eventDispatcher != null) {
-            eventDispatcher.subscribe(this);
-        }
-        
+    protected void doRun(TaskMonitor monitor) {
         try {
             // Wait for BINARY_ID_AVAILABLE event
             synchronized (waitLock) {
@@ -292,15 +277,9 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
                     }
                 }
             }
-            
         } catch (Exception e) {
             Msg.showError(this, tool.getActiveWindow(), "Polling Error",
                 "Failed to poll server status: " + e.getMessage(), e);
-        } finally {
-            // Unsubscribe from events
-            if (eventDispatcher != null) {
-                eventDispatcher.unsubscribe(this);
-            }
         }
     }
     
@@ -344,14 +323,6 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
             return revision;
         }
         return 1;
-    }
-    
-    /**
-     * Get server revision number (derived from fractional value).
-     * This method exists for backward compatibility with code that expects integer.
-     */
-    private int getServerRevision() {
-        return (int) getServerRevisionFractional();
     }
     
     /**

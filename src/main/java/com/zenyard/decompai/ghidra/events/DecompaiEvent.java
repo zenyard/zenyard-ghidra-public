@@ -85,6 +85,13 @@ public class DecompaiEvent {
         this.timestamp = System.currentTimeMillis();
         this.payload = payload != null ? Collections.unmodifiableMap(new HashMap<>(payload)) : Collections.emptyMap();
     }
+
+    /**
+     * Create a new builder for an event type and source.
+     */
+    public static Builder builder(EventType type, String source) {
+        return new Builder(type, source);
+    }
     
     /**
      * Gets the event type.
@@ -152,5 +159,30 @@ public class DecompaiEvent {
     public String toString() {
         return String.format("DecompaiEvent{type=%s, source='%s', timestamp=%d, payloadSize=%d}",
             type, source, timestamp, payload.size());
+    }
+
+    /**
+     * Builder for DecompaiEvent payloads.
+     */
+    public static class Builder {
+        private final EventType type;
+        private final String source;
+        private final Map<String, Object> payload = new HashMap<>();
+
+        private Builder(EventType type, String source) {
+            this.type = type;
+            this.source = source;
+        }
+
+        public Builder withPayload(String key, Object value) {
+            if (key != null && value != null) {
+                payload.put(key, value);
+            }
+            return this;
+        }
+
+        public DecompaiEvent build() {
+            return new DecompaiEvent(type, source, payload);
+        }
     }
 }

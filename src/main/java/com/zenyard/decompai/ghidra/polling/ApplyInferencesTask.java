@@ -8,8 +8,8 @@ import java.util.Set;
 
 import com.zenyard.decompai.ghidra.api.generated.model.Inference;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
-import com.zenyard.decompai.ghidra.events.EventConsumer;
 import com.zenyard.decompai.ghidra.events.EventDispatcher;
+import com.zenyard.decompai.ghidra.tasks.EventAwareTask;
 import com.zenyard.decompai.ghidra.illum.InferenceApplier;
 import com.zenyard.decompai.ghidra.illum.FunctionOverviewAnnotator;
 import com.zenyard.decompai.ghidra.storage.InferenceStorage;
@@ -19,7 +19,6 @@ import com.zenyard.decompai.ghidra.tracking.TrackChangesTaskManager;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
-import ghidra.util.task.Task;
 import ghidra.util.task.TaskMonitor;
 
 /**
@@ -30,7 +29,7 @@ import ghidra.util.task.TaskMonitor;
  * 
  * NOTE: mirrors decompai_ida/trigger_apply_inferences_task.py and apply_inferences_task.py
  */
-public class ApplyInferencesTask extends Task implements EventConsumer {
+public class ApplyInferencesTask extends EventAwareTask {
     
     private static final int BATCH_SIZE = 50; // Apply inferences in batches
     private static final String TASK_ID = "apply_inferences";
@@ -42,7 +41,7 @@ public class ApplyInferencesTask extends Task implements EventConsumer {
     private final TrackChangesTaskManager trackChangesTaskManager;
     private final StatusBarManager statusBarManager;
     private final Program program;
-    private final EventDispatcher eventDispatcher;
+    private final PluginTool tool;
     
     // Synchronization for waiting/notifying
     private final Object waitLock = new Object();
@@ -55,13 +54,12 @@ public class ApplyInferencesTask extends Task implements EventConsumer {
                               StatusBarManager statusBarManager,
                               Program program,
                               EventDispatcher eventDispatcher) {
-        super("Apply Inferences", true, true, false); // canCancel=true, hasProgress=true, isModal=false
-        // Note: tool parameter kept for API compatibility but not stored
+        super("Apply Inferences", true, true, false, eventDispatcher);
+        this.tool = tool;
         this.inferenceQueue = inferenceQueue;
         this.trackChangesTaskManager = trackChangesTaskManager;
         this.statusBarManager = statusBarManager;
         this.program = program;
-        this.eventDispatcher = eventDispatcher;
         
         // Note: TrackChangesTask event listener is already active and doesn't need to be restarted
         // The listener is registered when the program is activated and remains active
@@ -93,17 +91,12 @@ public class ApplyInferencesTask extends Task implements EventConsumer {
     }
     
     @Override
-    public void run(TaskMonitor monitor) {
-        // Subscribe to events
-        if (eventDispatcher != null) {
-            eventDispatcher.subscribe(this);
-        }
-        
+    protected void doRun(TaskMonitor monitor) {
         try {
             Msg.info(this, "ApplyInferencesTask: Starting, waiting for new inferences");
             FunctionOverviewAnnotator overviewAnnotator = new FunctionOverviewAnnotator();
             InferenceStorage inferenceStorage = new InferenceStorage(program);
-            InferenceApplier inferenceApplier = new InferenceApplier(overviewAnnotator, inferenceStorage);
+            InferenceApplier inferenceApplier = new InferenceApplier(overviewAnnotator, inferenceStorage, tool);
             
             // Main loop: wait for notifications and apply inferences
             while (!shouldStop && !monitor.isCancelled()) {
@@ -145,11 +138,6 @@ public class ApplyInferencesTask extends Task implements EventConsumer {
         }
         
         } finally {
-            // Unsubscribe from events
-            if (eventDispatcher != null) {
-                eventDispatcher.unsubscribe(this);
-            }
-            
             // Cleanup: unregister status bar
             if (statusBarManager != null) {
                 statusBarManager.unregisterTask(TASK_ID);
@@ -217,12 +205,11 @@ public class ApplyInferencesTask extends Task implements EventConsumer {
         } finally {
             // Re-enable change tracking
             if (trackChangesTaskManager != null) {
-                try {
-                    Thread.sleep(1000); // Wait until all current events fired.
-                    trackChangesTaskManager.setIgnoreEvents(false);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
+                if (program != null && !program.isClosed()) {
+                    // Drain pending domain-object events while still ignoring changes.
+                    program.flushEvents();
                 }
+                trackChangesTaskManager.setIgnoreEvents(false);
             }
             
             // Unregister status bar when done (ensures cleanup even on error or early return)

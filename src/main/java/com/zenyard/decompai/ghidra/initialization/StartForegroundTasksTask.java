@@ -6,15 +6,13 @@ import java.util.Set;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
-import ghidra.util.task.Task;
 import ghidra.util.task.TaskMonitor;
 
 import com.zenyard.decompai.ghidra.DecompaiServices;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
-import com.zenyard.decompai.ghidra.events.EventConsumer;
-import com.zenyard.decompai.ghidra.events.EventDispatcher;
 import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
 import com.zenyard.decompai.ghidra.tasks.ForegroundTask;
+import com.zenyard.decompai.ghidra.tasks.EventAwareTask;
 
 /**
  * Background task that continuously monitors the foreground task queue and processes
@@ -23,20 +21,19 @@ import com.zenyard.decompai.ghidra.tasks.ForegroundTask;
  * Similar to IDA's StartForegroundTasksTask.
  * Uses event/callback to wait for queue updates instead of polling.
  */
-public class StartForegroundTasksTask extends Task implements EventConsumer {
+public class StartForegroundTasksTask extends EventAwareTask {
     
     private final PluginTool tool;
     private final Program program;
     private final DecompaiServices services;
-    private final EventDispatcher eventDispatcher;
     private volatile boolean shouldStop = false;
     
     public StartForegroundTasksTask(PluginTool tool, Program program, DecompaiServices services) {
-        super("Start Foreground Tasks", true, false, false); // canCancel=true, hasProgress=false, isModal=false
+        super("Start Foreground Tasks", true, false, false,
+            services != null ? services.getEventDispatcher() : null);
         this.tool = tool;
         this.program = program;
         this.services = services;
-        this.eventDispatcher = services != null ? services.getEventDispatcher() : null;
     }
     
     @Override
@@ -58,12 +55,7 @@ public class StartForegroundTasksTask extends Task implements EventConsumer {
     }
     
     @Override
-    public void run(TaskMonitor monitor) {
-        // Subscribe to events
-        if (eventDispatcher != null) {
-            eventDispatcher.subscribe(this);
-        }
-        
+    protected void doRun(TaskMonitor monitor) {
         try {
             DecompaiProgramProperties props = new DecompaiProgramProperties(program);
             
@@ -108,11 +100,6 @@ public class StartForegroundTasksTask extends Task implements EventConsumer {
         } catch (Exception e) {
             Msg.showError(this, tool.getActiveWindow(), "Start Foreground Tasks Error",
                 "Failed to process foreground tasks: " + e.getMessage(), e);
-        } finally {
-            // Unsubscribe from events
-            if (eventDispatcher != null) {
-                eventDispatcher.unsubscribe(this);
-            }
         }
     }
     

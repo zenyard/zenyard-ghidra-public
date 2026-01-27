@@ -4,6 +4,7 @@ import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.listing.CodeUnit;
+import com.zenyard.decompai.ghidra.util.TransactionUtils;
 
 /**
  * Adds overview descriptions as plate comments or EOL comments in listing/decompiler views.
@@ -24,22 +25,12 @@ public class FunctionOverviewAnnotator {
         }
         
         Address entryPoint = function.getEntryPoint();
-        int transactionId = program.startTransaction("DecompAI: Add function overview");
-        try {
+        TransactionUtils.runInTransaction(program, "DecompAI: Add function overview", () -> {
             CodeUnit codeUnit = program.getListing().getCodeUnitAt(entryPoint);
-            
             if (codeUnit != null) {
-                // Add as plate comment (pre-comment)
                 program.getListing().setComment(entryPoint, CodeUnit.PLATE_COMMENT, overview);
             }
-        } catch (Exception e) {
-            program.endTransaction(transactionId, false); // rollback
-            throw e;
-        } finally {
-            if (transactionId >= 0) {
-                program.endTransaction(transactionId, true); // commit
-            }
-        }
+        });
     }
     
     /**
@@ -48,21 +39,12 @@ public class FunctionOverviewAnnotator {
      */
     public void removeOverview(Program program, Function function) {
         Address entryPoint = function.getEntryPoint();
-        int transactionId = program.startTransaction("DecompAI: Remove function overview");
-        try {
+        TransactionUtils.runInTransaction(program, "DecompAI: Remove function overview", () -> {
             CodeUnit codeUnit = program.getListing().getCodeUnitAt(entryPoint);
-            
             if (codeUnit != null) {
                 program.getListing().setComment(entryPoint, CodeUnit.PLATE_COMMENT, null);
             }
-        } catch (Exception e) {
-            program.endTransaction(transactionId, false); // rollback
-            throw e;
-        } finally {
-            if (transactionId >= 0) {
-                program.endTransaction(transactionId, true); // commit
-            }
-        }
+        });
     }
 }
 
