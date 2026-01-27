@@ -5,6 +5,8 @@ import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Program;
+import ghidra.app.services.CodeViewerService;
+import ghidra.program.util.ProgramLocation;
 
 import com.zenyard.decompai.ghidra.copilot.tools.models.Function;
 
@@ -23,41 +25,55 @@ public class GetCurrentFunctionTool {
     
     @Tool("Returns the current function address and name, or null if not currently in a function")
     public Function getCurrentFunction() {
-        try {
-            context.checkCancelled();
-            
-            Program program = context.getProgram();
-            if (program == null) {
-                throw new ToolExecutionException("No program is currently loaded");
+        return ToolUtils.executeTool(context, "get_current_function", java.util.Collections.emptyMap(), () -> {
+            try {
+                context.checkCancelled();
+
+                Program program = context.getProgram();
+                if (program == null) {
+                    throw new ToolExecutionException("No program is currently loaded");
+                }
+
+                if (tool == null) {
+                    throw new ToolExecutionException("Plugin tool not available");
+                }
+
+                CodeViewerService codeViewer = tool.getService(CodeViewerService.class);
+                if (codeViewer == null) {
+                    throw new ToolExecutionException("Code viewer service not available");
+                }
+
+                ProgramLocation location = codeViewer.getCurrentLocation();
+                if (location == null) {
+                    return null;
+                }
+
+                Address currentAddress = location.getAddress();
+                if (currentAddress == null) {
+                    return null;
+                }
+
+                FunctionManager functionManager = program.getFunctionManager();
+                ghidra.program.model.listing.Function function = functionManager.getFunctionContaining(currentAddress);
+
+                if (function == null) {
+                    return null;
+                }
+
+                // Check if Swift source is available using SwiftUtils
+                boolean swiftSourceAvailable = SwiftUtils.hasSwiftSource(program, function.getEntryPoint());
+
+                return new Function(
+                    function.getName(),
+                    ToolUtils.formatAddress(function.getEntryPoint()),
+                    swiftSourceAvailable
+                );
+            } catch (ToolExecutionException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new ToolExecutionException("Failed to get current function: " + e.getMessage(), e);
             }
-            
-            // Get current address from tool using LocationProvider
-            Address currentAddress = com.zenyard.decompai.ghidra.util.GhidraProgramUtils.getCurrentAddress(tool);
-            
-            if (currentAddress == null) {
-                return null;
-            }
-            
-            FunctionManager functionManager = program.getFunctionManager();
-            ghidra.program.model.listing.Function function = functionManager.getFunctionContaining(currentAddress);
-            
-            if (function == null) {
-                return null;
-            }
-            
-            // Check if Swift source is available using SwiftUtils
-            boolean swiftSourceAvailable = SwiftUtils.hasSwiftSource(program, function.getEntryPoint());
-            
-            return new Function(
-                function.getName(),
-                ToolUtils.formatAddress(function.getEntryPoint()),
-                swiftSourceAvailable
-            );
-        } catch (ToolExecutionException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new ToolExecutionException("Failed to get current function: " + e.getMessage(), e);
-        }
+        });
     }
 }
 

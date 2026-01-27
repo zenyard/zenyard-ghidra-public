@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Copilot</title>
+  <link rel="stylesheet" href="ui.css" />
+  <link rel="stylesheet" href="prism.css" />
+</head>
+<body>
+  <div id="app" class="app">
+    <main id="chat" class="chat"></main>
+
+    <div id="typingIndicator" class="typing hidden">
+      <span class="dot"></span>
+      <span class="dot"></span>
+      <span class="dot"></span>
+      <span class="typing-label">Thinking...</span>
+    </div>
+
+    <footer class="input-bar">
+      <textarea id="input" class="input" rows="2" placeholder="Ask Copilot..."></textarea>
+      <button id="stopBtn" class="btn btn-secondary btn-icon hidden" title="Stop">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="2"/>
+          <rect x="5" y="5" width="6" height="6" fill="currentColor"/>
+        </svg>
+      </button>
+      <button id="sendBtn" class="btn btn-primary btn-icon" title="Send">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M4 12L20 4L16 20L12 12L4 12Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <path d="M12 12L16 20L20 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+      </button>
+    </footer>
+  </div>
+  <div id="dom-bridge" data-state="" data-payload="" hidden></div>
+
+  <script src="vendor/marked.umd.js"></script>
+  <script src="vendor/purify.min.js"></script>
+  <script src="vendor/prism.min.js"></script>
+  <script src="vendor/prism-clike.min.js"></script>
+  <script src="vendor/prism-c.min.js"></script>
+  <script src="vendor/prism-cpp.min.js"></script>
+  <script src="vendor/prism-java.min.js"></script>
+  <script src="vendor/prism-python.min.js"></script>
+  <script src="vendor/prism-json.min.js"></script>
+  <script src="vendor/prism-bash.min.js"></script>
+  <script src="vendor/prism-go.min.js"></script>
+  <script src="vendor/prism-rust.min.js"></script>
+
+  <script src="ui.js"></script>
+</body>
+</html>

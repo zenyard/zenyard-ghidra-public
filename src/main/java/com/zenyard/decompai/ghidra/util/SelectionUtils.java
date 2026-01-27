@@ -4,7 +4,6 @@ import java.util.ArrayList;
 import java.util.List;
 
 import ghidra.framework.plugintool.PluginTool;
-import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressRange;
 import ghidra.program.model.listing.CodeUnit;
 import ghidra.program.model.listing.Function;

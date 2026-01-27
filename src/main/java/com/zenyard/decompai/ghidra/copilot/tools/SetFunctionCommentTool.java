@@ -17,31 +17,37 @@ public class SetFunctionCommentTool {
     
     @Tool("Sets the function documentation for the given function. Use 80 character lines and format this like a function documentation.")
     public void setFunctionComment(String address, String comment) {
-        try {
-            context.checkCancelled();
-            
-            Program program = context.getProgram();
-            if (program == null) {
-                throw new ToolExecutionException("No program is currently loaded");
-            }
-            
-            Function function = ToolUtils.getFunction(program, address);
-            if (function == null) {
-                throw new ToolExecutionException("Failed to retrieve function from address: " + address);
-            }
-            
-            // Use transaction for program modification
-            int transactionId = program.startTransaction("DecompAI: Set function comment");
+        java.util.Map<String, Object> args = new java.util.HashMap<>();
+        args.put("address", address);
+        args.put("comment", comment);
+        ToolUtils.executeTool(context, "set_function_comment", args, () -> {
             try {
-                function.setComment(comment != null ? comment : "");
-            } finally {
-                program.endTransaction(transactionId, true);
+                context.checkCancelled();
+
+                Program program = context.getProgram();
+                if (program == null) {
+                    throw new ToolExecutionException("No program is currently loaded");
+                }
+
+                Function function = ToolUtils.getFunction(program, address);
+                if (function == null) {
+                    throw new ToolExecutionException("Failed to retrieve function from address: " + address);
+                }
+
+                // Use transaction for program modification
+                int transactionId = program.startTransaction("DecompAI: Set function comment");
+                try {
+                    function.setComment(comment != null ? comment : "");
+                } finally {
+                    program.endTransaction(transactionId, true);
+                }
+                return null;
+            } catch (ToolExecutionException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new ToolExecutionException("Failed to set function comment: " + e.getMessage(), e);
             }
-        } catch (ToolExecutionException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new ToolExecutionException("Failed to set function comment: " + e.getMessage(), e);
-        }
+        });
     }
 }
 

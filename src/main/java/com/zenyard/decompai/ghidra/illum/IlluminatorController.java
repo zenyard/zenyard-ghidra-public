@@ -190,8 +190,8 @@ public class IlluminatorController {
                     monitor.setProgress(100);
                     monitor.setMessage("Analysis complete");
                     
-                    Msg.info(this, "DecompAI: Successfully analyzed function " + function.getName() + 
-                        " at " + function.getEntryPoint() + " (revision " + nextRevision + ")");
+                    Msg.info(this, "DecompAI: Successfully analyzed function " + function.getName() 
+                        + " at " + function.getEntryPoint() + " (revision " + nextRevision + ")");
                 } catch (CancelledException e) {
                     // User cancelled
                 } catch (Exception e) {

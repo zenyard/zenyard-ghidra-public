@@ -5,7 +5,8 @@ package com.zenyard.decompai.ghidra.status;
  * Similar to decompai_ida/model.py RemoteAnalysisStats.
  * 
  * Stores:
- * - startTime: when analysis started (nanoseconds from System.nanoTime())
+ * - startTime: when analysis started (milliseconds since epoch from System.currentTimeMillis())
+ *   Uses wall-clock time to persist correctly across program restarts.
  * - startRevision: server revision when analysis started (fractional)
  */
 public class RemoteAnalysisStats {

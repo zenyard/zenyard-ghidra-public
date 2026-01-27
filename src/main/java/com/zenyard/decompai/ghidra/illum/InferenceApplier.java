@@ -6,7 +6,12 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
-import com.zenyard.decompai.ghidra.api.generated.model.*;
+import com.zenyard.decompai.ghidra.api.generated.model.FunctionOverview;
+import com.zenyard.decompai.ghidra.api.generated.model.Inference;
+import com.zenyard.decompai.ghidra.api.generated.model.Name;
+import com.zenyard.decompai.ghidra.api.generated.model.ParametersMapping;
+import com.zenyard.decompai.ghidra.api.generated.model.SwiftFunction;
+import com.zenyard.decompai.ghidra.api.generated.model.VariablesMapping;
 import com.zenyard.decompai.ghidra.storage.InferenceStorage;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -268,8 +273,8 @@ public class InferenceApplier {
             );
             
             if (!results.decompileCompleted()) {
-                throw new RuntimeException("Failed to decompile function: " + 
-                    (results.getErrorMessage() != null ? results.getErrorMessage() : "Unknown error"));
+                throw new RuntimeException("Failed to decompile function: " 
+                    + (results.getErrorMessage() != null ? results.getErrorMessage() : "Unknown error"));
             }
             
             HighFunction highFunction = results.getHighFunction();
@@ -322,9 +327,9 @@ public class InferenceApplier {
                 }
                 
                 // Check if variable is dummy (auto-generated) or was previously inferred
-                boolean isDummy = var.getName().startsWith("uVar") || 
-                                 var.getName().startsWith("local_") ||
-                                 var.getName().matches("^[a-z]\\d+$"); // Pattern like "v3", "v4"
+                boolean isDummy = var.getName().startsWith("uVar") 
+                                 || var.getName().startsWith("local_") 
+                                 || var.getName().matches("^[a-z]\\d+$"); // Pattern like "v3", "v4"
                 
                 if (isDummy || lastInferredNames.contains(originalName)) {
                     renames.put(originalName, newName);
@@ -353,21 +358,21 @@ public class InferenceApplier {
                         if (highVar != null) {
                             ghidra.program.model.pcode.Varnode storage = highVar.getRepresentative();
                             if (storage == null) {
-                                Msg.debug(this, "Skipping rename for " + fromName + " at " + address +
-                                    ": no representative storage");
+                                Msg.debug(this, "Skipping rename for " + fromName + " at " + address 
+                                    + ": no representative storage");
                                 continue;
                             }
 
                             Address storageAddress = storage.getAddress();
                             if (storageAddress.isUniqueAddress()) {
-                                Msg.debug(this, "Skipping rename for " + fromName + " at " + address +
-                                    ": temporary unique storage");
+                                Msg.debug(this, "Skipping rename for " + fromName + " at " + address 
+                                    + ": temporary unique storage");
                                 continue;
                             }
 
                             if (!storageAddress.isStackAddress() && !storageAddress.isRegisterAddress()) {
-                                Msg.debug(this, "Skipping rename for " + fromName + " at " + address +
-                                    ": non-local storage " + storageAddress);
+                                Msg.debug(this, "Skipping rename for " + fromName + " at " + address 
+                                    + ": non-local storage " + storageAddress);
                                 continue;
                             }
 
@@ -387,19 +392,19 @@ public class InferenceApplier {
                                     localVar.setName(nameToApply, SourceType.ANALYSIS);
                                     Msg.debug(this, "Renamed variable " + fromName + " -> " + nameToApply + " at " + address);
                                 } catch (DuplicateNameException e) {
-                                    Msg.warn(this, "Cannot rename variable " + fromName + " to " + nameToApply +
-                                        ": duplicate name at " + address);
+                                    Msg.warn(this, "Cannot rename variable " + fromName + " to " + nameToApply 
+                                        + ": duplicate name at " + address);
                                 } catch (InvalidInputException e) {
-                                    Msg.warn(this, "Cannot rename variable " + fromName + " to " + nameToApply +
-                                        ": invalid name at " + address + ": " + e.getMessage());
+                                    Msg.warn(this, "Cannot rename variable " + fromName + " to " + nameToApply 
+                                        + ": invalid name at " + address + ": " + e.getMessage());
                                 }
                             } else {
                                 Msg.debug(this, "No LocalVariable for storage of " + fromName + " at " + address);
                             }
                         }
                     } catch (Exception e) {
-                        Msg.warn(this, "Failed to rename variable " + fromName + " to " + toName + 
-                            " at " + address + ": " + e.getMessage(), e);
+                        Msg.warn(this, "Failed to rename variable " + fromName + " to " + toName 
+                            + " at " + address + ": " + e.getMessage(), e);
                     }
                 }
             }
@@ -451,8 +456,8 @@ public class InferenceApplier {
                 );
 
                 if (!results.decompileCompleted()) {
-                    Msg.warn(this, "Failed to decompile function for params at " + address + ": " +
-                        (results.getErrorMessage() != null ? results.getErrorMessage() : "Unknown error"));
+                    Msg.warn(this, "Failed to decompile function for params at " + address + ": " 
+                        + (results.getErrorMessage() != null ? results.getErrorMessage() : "Unknown error"));
                 } else {
                     HighFunction highFunction = results.getHighFunction();
                     if (highFunction != null) {
@@ -476,8 +481,8 @@ public class InferenceApplier {
         for (Parameter parameter : parameters) {
             parameterNames.add(parameter.getName());
         }
-        Msg.debug(this, "Apply params mapping at " + address + " keys=" + parametersMapping.keySet() +
-            " params=" + parameterNames);
+        Msg.debug(this, "Apply params mapping at " + address + " keys=" + parametersMapping.keySet() 
+            + " params=" + parameterNames);
         
         // Get last inferred parameter names from storage (if any)
         ParametersMapping lastMapping = inferenceStorage.getLastParametersMapping(address);
@@ -499,10 +504,10 @@ public class InferenceApplier {
             }
             
             // Check if parameter is dummy (auto-generated) or was previously inferred
-            boolean isDummy = originalName == null || originalName.isEmpty() ||
-                             originalName.startsWith("param_") ||
-                             originalName.startsWith("arg") ||
-                             originalName.matches("^[a-z]\\d+$"); // Pattern like "v3", "v4"
+            boolean isDummy = originalName == null || originalName.isEmpty() 
+                             || originalName.startsWith("param_") 
+                             || originalName.startsWith("arg") 
+                             || originalName.matches("^[a-z]\\d+$"); // Pattern like "v3", "v4"
             
             if (isDummy || lastInferredNames.contains(originalName)) {
                 renames.put(i, newName);
@@ -526,11 +531,11 @@ public class InferenceApplier {
                         try {
                             param.setName(nameToApply, SourceType.ANALYSIS);
                         } catch (DuplicateNameException e) {
-                            Msg.warn(this, "Cannot rename parameter " + param.getName() + " to " + nameToApply +
-                                ": duplicate name at " + address);
+                            Msg.warn(this, "Cannot rename parameter " + param.getName() + " to " + nameToApply 
+                                + ": duplicate name at " + address);
                         } catch (InvalidInputException e) {
-                            Msg.warn(this, "Cannot rename parameter " + param.getName() + " to " + nameToApply +
-                                ": invalid name at " + address + ": " + e.getMessage());
+                            Msg.warn(this, "Cannot rename parameter " + param.getName() + " to " + nameToApply 
+                                + ": invalid name at " + address + ": " + e.getMessage());
                         }
                     }
                 }
@@ -638,8 +643,8 @@ public class InferenceApplier {
                     boolean sizeMatch = storage.getSize() == varnode.getSize();
 
                     if (addressMatch && sizeMatch) {
-                        Msg.debug(this, "Strict storage match for " + localVar.getName() +
-                            " at " + storage.getAddress() + " size " + storage.getSize());
+                        Msg.debug(this, "Strict storage match for " + localVar.getName() 
+                            + " at " + storage.getAddress() + " size " + storage.getSize());
                         return localVar;
                     }
 
@@ -654,9 +659,9 @@ public class InferenceApplier {
         if (relaxedCandidates.size() == 1) {
             Map.Entry<LocalVariable, String> candidate = relaxedCandidates.entrySet().iterator().next();
             LocalVariable localVar = candidate.getKey();
-            Msg.debug(this, "Relaxed storage match for " + localVar.getName() +
-                " (" + candidate.getValue() + ") at " + storage.getAddress() +
-                " size " + storage.getSize());
+            Msg.debug(this, "Relaxed storage match for " + localVar.getName() 
+                + " (" + candidate.getValue() + ") at " + storage.getAddress() 
+                + " size " + storage.getSize());
             return localVar;
         }
 
@@ -665,8 +670,8 @@ public class InferenceApplier {
             for (LocalVariable candidate : relaxedCandidates.keySet()) {
                 names.add(candidate.getName());
             }
-            Msg.debug(this, "Ambiguous relaxed storage match at " + storage.getAddress() +
-                " size " + storage.getSize() + ": candidates " + names);
+            Msg.debug(this, "Ambiguous relaxed storage match at " + storage.getAddress() 
+                + " size " + storage.getSize() + ": candidates " + names);
         }
 
         return null;
@@ -676,9 +681,9 @@ public class InferenceApplier {
         if (name == null || name.isEmpty()) {
             return true;
         }
-        return name.startsWith("uVar") ||
-               name.startsWith("local_") ||
-               name.matches("^[a-z]\\d+$");
+        return name.startsWith("uVar") 
+               || name.startsWith("local_") 
+               || name.matches("^[a-z]\\d+$");
     }
     
     /**
@@ -686,10 +691,10 @@ public class InferenceApplier {
      */
     private boolean isValidName(String name) {
         // Check for common reserved prefixes
-        return !name.startsWith("byte_") && 
-               !name.startsWith("word_") && 
-               !name.startsWith("dword_") &&
-               !name.startsWith("qword_");
+        return !name.startsWith("byte_") 
+               && !name.startsWith("word_") 
+               && !name.startsWith("dword_") 
+               && !name.startsWith("qword_");
     }
     
     /**

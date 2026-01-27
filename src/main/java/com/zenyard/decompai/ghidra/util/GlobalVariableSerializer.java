@@ -52,8 +52,8 @@ public class GlobalVariableSerializer {
         String name = symbol != null ? symbol.getName() : "data_" + address.toString();
         
         // Check if name is user-defined
-        boolean hasKnownName = symbol != null && 
-            symbol.getSource() != SourceType.DEFAULT;
+        boolean hasKnownName = symbol != null 
+            && symbol.getSource() != SourceType.DEFAULT;
         
         // Get mangled name if available
         String mangledName = null;

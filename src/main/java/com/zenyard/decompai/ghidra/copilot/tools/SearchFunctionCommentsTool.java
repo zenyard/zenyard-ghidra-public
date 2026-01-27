@@ -21,47 +21,54 @@ public class SearchFunctionCommentsTool {
     
     @Tool("Returns a paginated list of functions with comments matching the given regex pattern")
     public PagedResults<Function> searchFunctionComments(String regex, String cursor) {
-        try {
-            context.checkCancelled();
-            
-            // Compile regex pattern
-            Pattern pattern;
-            try {
-                pattern = Pattern.compile(regex);
-            } catch (Exception e) {
-                throw new ToolExecutionException("Invalid regex pattern: " + e.getMessage());
-            }
-            
-            final Pattern finalPattern = pattern;
-            
-            // Create predicate to filter functions by comment
-            Predicate<ghidra.program.model.listing.Function> commentMatches = func -> {
-                String comment = func.getComment();
-                return comment != null && finalPattern.matcher(comment).find();
-            };
-            
-            // Map function to tool Function
-            java.util.function.Function<ghidra.program.model.listing.Function, com.zenyard.decompai.ghidra.copilot.tools.models.Function> mapper = func -> {
-                boolean swiftSourceAvailable = false; // TODO: Implement Swift detection
-                return new Function(
-                    func.getName(),
-                    ToolUtils.formatAddress(func.getEntryPoint()),
-                    swiftSourceAvailable
-                );
-            };
-            
-            return PaginationHelper.paginateFunctions(
-                context.getProgram(),
-                cursor,
-                null, // No name filter
-                mapper,
-                commentMatches
-            );
-        } catch (ToolExecutionException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new ToolExecutionException("Failed to search function comments: " + e.getMessage(), e);
+        java.util.Map<String, Object> args = new java.util.HashMap<>();
+        args.put("regex", regex);
+        if (cursor != null) {
+            args.put("cursor", cursor);
         }
+        return ToolUtils.executeTool(context, "search_function_comments", args, () -> {
+            try {
+                context.checkCancelled();
+
+                // Compile regex pattern
+                Pattern pattern;
+                try {
+                    pattern = Pattern.compile(regex);
+                } catch (Exception e) {
+                    throw new ToolExecutionException("Invalid regex pattern: " + e.getMessage());
+                }
+
+                final Pattern finalPattern = pattern;
+
+                // Create predicate to filter functions by comment
+                Predicate<ghidra.program.model.listing.Function> commentMatches = func -> {
+                    String comment = func.getComment();
+                    return comment != null && finalPattern.matcher(comment).find();
+                };
+
+                // Map function to tool Function
+                java.util.function.Function<ghidra.program.model.listing.Function, com.zenyard.decompai.ghidra.copilot.tools.models.Function> mapper = func -> {
+                    boolean swiftSourceAvailable = false; // TODO: Implement Swift detection
+                    return new Function(
+                        func.getName(),
+                        ToolUtils.formatAddress(func.getEntryPoint()),
+                        swiftSourceAvailable
+                    );
+                };
+
+                return PaginationHelper.paginateFunctions(
+                    context.getProgram(),
+                    cursor,
+                    null, // No name filter
+                    mapper,
+                    commentMatches
+                );
+            } catch (ToolExecutionException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new ToolExecutionException("Failed to search function comments: " + e.getMessage(), e);
+            }
+        });
     }
 }
 

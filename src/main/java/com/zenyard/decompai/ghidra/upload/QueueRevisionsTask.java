@@ -88,8 +88,8 @@ public class QueueRevisionsTask extends Task implements EventConsumer, EventProd
     
     @Override
     public void handleEvent(DecompaiEvent event) {
-        if (event.getType() == DecompaiEvent.EventType.UPLOAD_ORIGINAL_FILES_COMPLETE ||
-            event.getType() == DecompaiEvent.EventType.INITIAL_DIALOG_CONFIRMED) {
+        if (event.getType() == DecompaiEvent.EventType.UPLOAD_ORIGINAL_FILES_COMPLETE 
+            || event.getType() == DecompaiEvent.EventType.INITIAL_DIALOG_CONFIRMED) {
             synchronized (waitLock) {
                 readyToQueue = true;
                 waitLock.notify();

@@ -16,8 +16,12 @@ public class CopilotToolRegistry {
     private final CopilotToolContext context;
     private final PluginTool tool;
     
-    public CopilotToolRegistry(Program program, TaskMonitor monitor, PluginTool tool) {
-        this.context = new CopilotToolContext(program, monitor, tool);
+    public CopilotToolRegistry(
+            Program program,
+            TaskMonitor monitor,
+            PluginTool tool,
+            ToolExecutionListener toolExecutionListener) {
+        this.context = new CopilotToolContext(program, monitor, tool, toolExecutionListener);
         this.tool = tool;
     }
     
@@ -40,6 +44,29 @@ public class CopilotToolRegistry {
         tools.add(new SetFunctionPrototypeTool(context));
         tools.add(new GetLocalTypesTool(context));
         tools.add(new SearchFunctionCommentsTool(context));
+        
+        // Phase 1: High-priority tools
+        tools.add(new GetXrefsToTool(context));
+        tools.add(new GetXrefsFromTool(context));
+        tools.add(new DisassembleFunctionTool(context));
+        tools.add(new ListStringsTool(context));
+        tools.add(new GetAddressDetailsTool(context));
+        
+        // Phase 2: Medium-priority tools
+        tools.add(new ListSegmentsTool(context));
+        tools.add(new ListImportsTool(context));
+        tools.add(new ListExportsTool(context));
+        tools.add(new ListNamespacesTool(context));
+        tools.add(new ListDefinedDataTool(context));
+        tools.add(new ReadDataAtAddressTool(context));
+        tools.add(new ListCalledFunctionsTool(context));
+        
+        // Phase 3: Advanced tools
+        tools.add(new GetBasicBlocksTool(context));
+        tools.add(new GetStackFrameTool(context));
+        tools.add(new SetLocalVariableTypeTool(context));
+        tools.add(new GoToAddressTool(context, tool));
+        tools.add(new GetCurrentAddressTool(context, tool));
         
         // Swift tools (conditional - only if Swift binary detected)
         Program program = context.getProgram();

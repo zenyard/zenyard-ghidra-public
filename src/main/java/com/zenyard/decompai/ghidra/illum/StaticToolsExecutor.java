@@ -199,8 +199,8 @@ public class StaticToolsExecutor {
                     monitor.checkCanceled();
                     // Estimate size (rough approximation)
                     int objSize = estimateObjectSize(obj);
-                    if (currentChunk.size() >= MAX_OBJECTS_PER_REVISION || 
-                        (totalSize + objSize > MAX_UPLOAD_BYTES && !currentChunk.isEmpty())) {
+                    if (currentChunk.size() >= MAX_OBJECTS_PER_REVISION 
+                        || (totalSize + objSize > MAX_UPLOAD_BYTES && !currentChunk.isEmpty())) {
                         // Upload current chunk
                         AddObjectsToCurrentRevisionParams addParams = new AddObjectsToCurrentRevisionParams();
                         addParams.setObjects(currentChunk);

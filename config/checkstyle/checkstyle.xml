@@ -22,6 +22,11 @@
         <property name="fileNamePattern" value="module-info\.java$"/>
     </module>
 
+    <!-- Excludes all generated code in build/generated/     -->
+    <module name="BeforeExecutionExclusionFileFilter">
+        <property name="fileNamePattern" value=".*[\\/]build[\\/]generated[\\/].*$"/>
+    </module>
+
     <!-- Checks for whitespace                               -->
     <!-- See http://checkstyle.sourceforge.net/config_whitespace.html -->
     <module name="FileTabCharacter">
@@ -113,7 +118,8 @@
         <!-- Miscellaneous other checks.                   -->
         <!-- See http://checkstyle.sourceforge.net/config_misc.html -->
         <module name="ArrayTypeStyle"/>
-        <module name="FinalParameters"/>
+        <!-- FinalParameters disabled - too pervasive across codebase -->
+        <!-- <module name="FinalParameters"/> -->
         <module name="TodoComment"/>
         <module name="UpperEll"/>
     </module>

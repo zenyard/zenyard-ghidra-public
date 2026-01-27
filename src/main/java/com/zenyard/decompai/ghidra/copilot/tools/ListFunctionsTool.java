@@ -16,25 +16,34 @@ public class ListFunctionsTool {
         this.context = context;
     }
     
-    @Tool("Returns a paginated list of functions (names and addresses) from the program. " +
-          "An optional regex filter can be provided to filter by function name. " +
-          "If next_cursor is not empty, there are more pages which can be fetched using the cursor parameter.")
+    @Tool("Returns a paginated list of functions (names and addresses) from the program. " 
+          + "An optional regex filter can be provided to filter by function name. " 
+          + "If next_cursor is not empty, there are more pages which can be fetched using the cursor parameter.")
     public PagedResults<Function> listFunctions(String filter, String cursor) {
-        try {
-            context.checkCancelled();
-            
-            // Map Ghidra Function to tool Function
-            return PaginationHelper.paginateFunctions(
-                context.getProgram(),
-                cursor,
-                filter,
-                func -> Function.fromGhidraFunction(func, context.getProgram())
-            );
-        } catch (ToolExecutionException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new ToolExecutionException("Failed to list functions: " + e.getMessage(), e);
+        java.util.Map<String, Object> args = new java.util.HashMap<>();
+        if (filter != null) {
+            args.put("filter", filter);
         }
+        if (cursor != null) {
+            args.put("cursor", cursor);
+        }
+        return ToolUtils.executeTool(context, "list_functions", args, () -> {
+            try {
+                context.checkCancelled();
+
+                // Map Ghidra Function to tool Function
+                return PaginationHelper.paginateFunctions(
+                    context.getProgram(),
+                    cursor,
+                    filter,
+                    func -> Function.fromGhidraFunction(func, context.getProgram())
+                );
+            } catch (ToolExecutionException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new ToolExecutionException("Failed to list functions: " + e.getMessage(), e);
+            }
+        });
     }
 }
 

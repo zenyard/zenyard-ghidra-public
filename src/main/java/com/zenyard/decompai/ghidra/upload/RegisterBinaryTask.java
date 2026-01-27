@@ -8,7 +8,10 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 import com.zenyard.decompai.ghidra.api.generated.api.BinariesApi;
-import com.zenyard.decompai.ghidra.api.generated.model.*;
+import com.zenyard.decompai.ghidra.api.generated.model.BinaryDetails;
+import com.zenyard.decompai.ghidra.api.generated.model.OriginalLanguages;
+import com.zenyard.decompai.ghidra.api.generated.model.PostBinaryBody;
+import com.zenyard.decompai.ghidra.api.generated.model.PostBinaryResponse;
 import com.zenyard.decompai.ghidra.config.DecompaiOptions;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
 import com.zenyard.decompai.ghidra.events.EventConsumer;
@@ -257,9 +260,9 @@ public class RegisterBinaryTask extends Task implements EventConsumer, EventProd
             
             // Check if it's a redirect error (307/308)
             String errorMsg = e.getMessage();
-            if (errorMsg != null && (errorMsg.contains("status 307") || 
-                errorMsg.contains("status 308") ||
-                errorMsg.contains("Redirect error"))) {
+            if (errorMsg != null && (errorMsg.contains("status 307") 
+                || errorMsg.contains("status 308") 
+                || errorMsg.contains("Redirect error"))) {
                 errorMessage += "Redirect Error: The server is redirecting the request.\n\n";
                 errorMessage += "This usually means:\n";
                 errorMessage += "1. Server URL might need a trailing slash or different path\n";
@@ -267,9 +270,9 @@ public class RegisterBinaryTask extends Task implements EventConsumer, EventProd
                 errorMessage += "3. Server is redirecting to a different endpoint\n\n";
                 errorMessage += "Current server URL: " + options.getServerUrl() + "\n\n";
                 errorMessage += "Please check the server URL in Tools → DecompAI → Configuration...";
-            } else if (rootCause instanceof java.net.ConnectException || 
-                rootCause instanceof java.net.UnknownHostException ||
-                (e.getMessage() != null && e.getMessage().contains("ConnectException"))) {
+            } else if (rootCause instanceof java.net.ConnectException 
+                || rootCause instanceof java.net.UnknownHostException 
+                || (e.getMessage() != null && e.getMessage().contains("ConnectException"))) {
                 errorMessage += "Connection Error: Unable to connect to the DecompAI server.\n\n";
                 errorMessage += "Please check:\n";
                 errorMessage += "1. Server URL is correct: " + options.getServerUrl() + "\n";

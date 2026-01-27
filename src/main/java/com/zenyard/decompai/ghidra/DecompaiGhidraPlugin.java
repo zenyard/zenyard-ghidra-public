@@ -39,8 +39,9 @@ import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
 import com.zenyard.decompai.ghidra.storage.SyncStatusStorage;
 import com.zenyard.decompai.ghidra.status.StatusBarManager;
 import com.zenyard.decompai.ghidra.status.StatusBarPriorities;
-import com.zenyard.decompai.ghidra.upload.*;
 import com.zenyard.decompai.ghidra.upload.QueueRevisionsTask;
+import com.zenyard.decompai.ghidra.upload.RegisterBinaryTask;
+import com.zenyard.decompai.ghidra.upload.UploadOriginalFilesTask;
 import com.zenyard.decompai.ghidra.upload.UploadRevisionsTask;
 import com.zenyard.decompai.ghidra.tracking.TrackChangesTaskManager;
 import ghidra.util.task.Task;
@@ -60,8 +61,8 @@ import ghidra.util.task.TaskMonitor;
     packageName = "com.zenyard.decompai.ghidra",
     category = "Reverse Engineering",
     shortDescription = "DecompAI - AI-powered reverse engineering assistance",
-    description = "Provides AI-powered reverse engineering assistance through the DecompAI service. " +
-                  "Features include function/variable highlighting, renaming, and LLM-assisted analysis.",
+    description = "Provides AI-powered reverse engineering assistance through the DecompAI service. " 
+                  + "Features include function/variable highlighting, renaming, and LLM-assisted analysis.",
     eventsConsumed = { FirstTimeAnalyzedPluginEvent.class }
 )
 public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer {
@@ -250,52 +251,40 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
             }
         };
         configAction.setMenuBarData(new MenuData(
-            new String[] { "Tools", "DecompAI", "Configuration..." },
+            new String[] { "Zenyard", "Configuration..." },
             null,
             "Zenyard"
         ));
         configAction.setDescription("Configure DecompAI API key and server settings");
         tool.addAction(configAction);
         
-        // Analyze current function action (placeholder for now)
-        DockingAction analyzeAction = new DockingAction("Analyze Function with DecompAI", getName()) {
-            @Override
-            public void actionPerformed(ActionContext context) {
-                if (services != null && currentProgram != null) {
-                    services.analyzeCurrentFunction();
-                } else {
-                    tool.setStatusInfo("No program loaded or DecompAI not configured");
-                }
-            }
-            
-            @Override
-            public boolean isEnabledForContext(ActionContext context) {
-                return currentProgram != null && options.isConfigured();
-            }
-        };
-        analyzeAction.setMenuBarData(new MenuData(
-            new String[] { "Tools", "DecompAI", "Analyze Current Function" },
-            null,
-            "DecompAI"
-        ));
-        analyzeAction.setDescription("Analyze the current function with DecompAI");
-        tool.addAction(analyzeAction);
-        
         // Open Copilot action
-        DockingAction copilotAction = new DockingAction("Open DecompAI Copilot", getName()) {
+        DockingAction copilotAction = new DockingAction("Open Copilot", getName()) {
             @Override
             public void actionPerformed(ActionContext context) {
+                if (services == null) {
+                    services = new DecompaiServices(DecompaiGhidraPlugin.this, options);
+                    Program program = getCurrentProgram();
+                    if (program != null) {
+                        services.onProgramActivated(program);
+                    }
+                }
                 if (services != null && services.getCopilotProvider() != null) {
+                    try {
+                        tool.addComponentProvider(services.getCopilotProvider(), false);
+                    } catch (ghidra.util.exception.AssertException e) {
+                        // Provider already added; ignore duplicate registration.
+                    }
                     tool.showComponentProvider(services.getCopilotProvider(), true);
                 }
             }
         };
         copilotAction.setMenuBarData(new MenuData(
-            new String[] { "Window", "DecompAI Copilot" },
+            new String[] { "Zenyard", "Open Copilot" },
             null,
-            "DecompAI"
+            "Zenyard"
         ));
-        copilotAction.setDescription("Open the DecompAI Copilot chat window");
+        copilotAction.setDescription("Open the Zenyard Copilot chat window");
         tool.addAction(copilotAction);
     }
     

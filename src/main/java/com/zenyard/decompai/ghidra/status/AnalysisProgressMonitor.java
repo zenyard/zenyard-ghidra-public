@@ -49,8 +49,8 @@ public class AnalysisProgressMonitor implements EventConsumer {
             Object progressObj = event.getPayloadValue("progress");
             Object etaObj = event.getPayloadValue("eta");
             
-            ghidra.util.Msg.debug(this, "AnalysisProgressMonitor: Received ANALYSIS_STATUS_UPDATED event, progress=" + 
-                progressObj + ", eta=" + etaObj);
+            ghidra.util.Msg.debug(this, "AnalysisProgressMonitor: Received ANALYSIS_STATUS_UPDATED event, progress=" 
+                + progressObj + ", eta=" + etaObj);
             
             if (progressObj == null) {
                 // No progress data - unregister if registered

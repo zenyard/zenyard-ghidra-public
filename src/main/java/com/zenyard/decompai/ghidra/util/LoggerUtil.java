@@ -91,8 +91,8 @@ public class LoggerUtil {
             
         } catch (Exception e) {
             // Fallback: use Ghidra's Msg API if Log4j2 configuration fails
-            Msg.warn(LoggerUtil.class, "Failed to configure custom logging for program " + programName + 
-                ": " + e.getMessage() + ". Using Ghidra's default logging.", e);
+            Msg.warn(LoggerUtil.class, "Failed to configure custom logging for program " + programName 
+                + ": " + e.getMessage() + ". Using Ghidra's default logging.", e);
         }
     }
     

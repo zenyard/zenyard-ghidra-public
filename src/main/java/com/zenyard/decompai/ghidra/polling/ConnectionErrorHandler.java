@@ -33,9 +33,9 @@ public class ConnectionErrorHandler {
      */
     public static boolean isConnectionError(Throwable e) {
         Throwable rootCause = findRootCause(e);
-        return rootCause instanceof ConnectException ||
-               rootCause instanceof UnknownHostException ||
-               (e.getMessage() != null && e.getMessage().contains("ConnectException"));
+        return rootCause instanceof ConnectException 
+               || rootCause instanceof UnknownHostException 
+               || (e.getMessage() != null && e.getMessage().contains("ConnectException"));
     }
     
     /**

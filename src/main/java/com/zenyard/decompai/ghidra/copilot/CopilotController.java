@@ -15,6 +15,7 @@ import com.zenyard.decompai.ghidra.api.generated.ApiException;
 import com.zenyard.decompai.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.decompai.ghidra.api.generated.api.UserApi;
 import com.zenyard.decompai.ghidra.copilot.tools.CopilotToolRegistry;
+import com.zenyard.decompai.ghidra.copilot.tools.ToolExecutionListener;
 
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.memory.ChatMemory;
@@ -44,6 +45,7 @@ public class CopilotController {
     private CopilotStreamHandler streamHandler;
     private CopilotConfig copilotConfig;
     private CopilotSummarizer summarizer;
+    private ToolExecutionListener toolExecutionListener;
     
     public CopilotController(CopilotProvider provider, ApiClient apiClient, BinariesApi binariesApi, UserApi userApi, PluginTool tool) {
         this.provider = provider;
@@ -55,6 +57,7 @@ public class CopilotController {
         this.memory = null;
         this.streamHandler = null;
         this.copilotConfig = null;
+        this.toolExecutionListener = null;
     }
     
     /**
@@ -65,6 +68,7 @@ public class CopilotController {
         // Create stream handler with view model
         if (viewModel != null) {
             this.streamHandler = new CopilotStreamHandler(viewModel);
+            this.toolExecutionListener = createToolExecutionListener(viewModel);
         }
     }
     
@@ -85,6 +89,7 @@ public class CopilotController {
             initializeAgent();
         }
     }
+
     
     /**
      * Initialize the LangChain4j agent with tools and memory.
@@ -95,28 +100,31 @@ public class CopilotController {
         }
         
         try {
-            // Create chat model
-            ChatModel chatModel = CopilotAgent.createChatModel(copilotConfig);
+            // Create streaming chat model
+            dev.langchain4j.model.chat.StreamingChatModel chatModel =
+                CopilotAgent.createStreamingChatModel(copilotConfig);
             
-            // Create summarization model (separate LLM with maxTokens=10k)
-            ChatModel summarizationModel = CopilotAgent.createSummarizationModel(copilotConfig);
+            // Create streaming summarization model (separate LLM with maxTokens=10k)
+            dev.langchain4j.model.chat.StreamingChatModel summarizationModel =
+                CopilotAgent.createStreamingSummarizationModel(copilotConfig);
             
             // Get TokenCountEstimator from model (or use default based on provider)
-            dev.langchain4j.model.TokenCountEstimator tokenCountEstimator = getTokenCountEstimator(chatModel, copilotConfig);
+            dev.langchain4j.model.TokenCountEstimator tokenCountEstimator = getTokenCountEstimator(null, copilotConfig);
             
             // Create memory with TokenCountEstimator
             memory = new CopilotMemory(COPILOT_THREAD_ID, tokenCountEstimator);
             ChatMemory chatMemory = memory.getChatMemory();
             
             // Create summarizer (also needs TokenCountEstimator)
-            dev.langchain4j.model.TokenCountEstimator summarizationEstimator = getTokenCountEstimator(summarizationModel, copilotConfig);
+            dev.langchain4j.model.TokenCountEstimator summarizationEstimator = getTokenCountEstimator(null, copilotConfig);
             summarizer = new CopilotSummarizer(summarizationModel, summarizationEstimator);
             
             // Create tools
             CopilotToolRegistry toolRegistry = new CopilotToolRegistry(
                 currentProgram,
                 TaskMonitor.DUMMY, // TODO: Use actual TaskMonitor if available
-                tool
+                tool,
+                toolExecutionListener
             );
             List<Object> tools = toolRegistry.getAllTools();
             
@@ -135,6 +143,7 @@ public class CopilotController {
      * Clear the conversation.
      */
     public void clearConversation() {
+        Msg.info(this, "Clearing conversation");
         if (memory != null) {
             memory.clear();
         }
@@ -149,6 +158,10 @@ public class CopilotController {
     public void stop() {
         if (streamHandler != null) {
             streamHandler.cancel();
+        }
+        if (viewModel != null) {
+            viewModel.setThinking(false, null);
+            viewModel.setLoading(false);
         }
     }
     
@@ -224,6 +237,7 @@ public class CopilotController {
         if (viewModel != null) {
             viewModel.addMessage(message, true);
             viewModel.setLoading(true);
+            viewModel.setThinking(true, "Thinking...");
             // Add empty AI message for streaming
             viewModel.addMessage("", false);
         } else {
@@ -234,11 +248,21 @@ public class CopilotController {
             });
         }
         
-        // Check if agent is initialized
+        // Ensure agent is initialized
         if (agent == null) {
-            String errorMsg = "Copilot agent not initialized. Please configure Copilot settings.";
-            handleError(errorMsg, null);
-            return;
+            if (copilotConfig == null) {
+                handleError("Copilot settings not configured. Please configure Copilot settings.", null);
+                return;
+            }
+            if (currentProgram == null) {
+                handleError("No program loaded. Please open a program to use Copilot.", null);
+                return;
+            }
+            initializeAgent();
+            if (agent == null) {
+                handleError("Copilot agent failed to initialize. Please check logs.", null);
+                return;
+            }
         }
         
         // Send message to agent asynchronously
@@ -254,7 +278,15 @@ public class CopilotController {
             SwingUtilities.invokeLater(() -> {
                 if (viewModel != null) {
                     viewModel.setLoading(false);
-                    // Response already added via streaming handler
+                    viewModel.setThinking(false, null);
+                    // If streaming isn't supported, append response to last message
+                    List<CopilotViewModel.Message> messages = viewModel.getMessages();
+                    if (!messages.isEmpty()) {
+                        CopilotViewModel.Message last = messages.get(messages.size() - 1);
+                        if (!last.isFromUser() && (last.getText() == null || last.getText().isEmpty())) {
+                            viewModel.appendToLastMessage(response);
+                        }
+                    }
                 } else {
                     provider.appendMessage("DecompAI: " + response);
                 }
@@ -275,6 +307,7 @@ public class CopilotController {
         SwingUtilities.invokeLater(() -> {
             if (viewModel != null) {
                 viewModel.setLoading(false);
+                viewModel.setThinking(false, null);
                 viewModel.setError(finalErrorMsg);
                 viewModel.addMessage(finalErrorMsg, false);
             } else {
@@ -284,6 +317,25 @@ public class CopilotController {
                 }
             }
         });
+    }
+
+    private ToolExecutionListener createToolExecutionListener(CopilotViewModel model) {
+        return new ToolExecutionListener() {
+            @Override
+            public void onToolStart(String toolName, java.util.Map<String, Object> arguments) {
+                SwingUtilities.invokeLater(() -> model.setThinking(true, "Running " + toolName + "..."));
+            }
+
+            @Override
+            public void onToolSuccess(String toolName, long durationMs) {
+                SwingUtilities.invokeLater(() -> model.setThinking(false, null));
+            }
+
+            @Override
+            public void onToolError(String toolName, Throwable error, long durationMs) {
+                SwingUtilities.invokeLater(() -> model.setThinking(false, null));
+            }
+        };
     }
 }
 

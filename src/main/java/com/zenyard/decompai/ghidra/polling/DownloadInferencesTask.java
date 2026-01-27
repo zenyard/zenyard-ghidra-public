@@ -176,8 +176,8 @@ public class DownloadInferencesTask extends Task implements EventConsumer, Event
                         int backoffMs = ConnectionErrorHandler.calculateBackoff(
                             updatedFailures, INITIAL_BACKOFF_MS, MAX_BACKOFF_MS);
                         
-                        Msg.warn(this, "Connection error downloading inferences: " + rootCause.getMessage() + 
-                            " (attempt " + updatedFailures + ", backoff " + backoffMs + "ms)");
+                        Msg.warn(this, "Connection error downloading inferences: " + rootCause.getMessage() 
+                            + " (attempt " + updatedFailures + ", backoff " + backoffMs + "ms)");
                         
                         try {
                             Thread.sleep(backoffMs);
@@ -280,8 +280,8 @@ public class DownloadInferencesTask extends Task implements EventConsumer, Event
                 // Publish event when new inferences are added
                 if (inferencesAdded) {
                     int inferenceCount = response.getInferences() != null ? response.getInferences().size() : 0;
-                    Msg.info(this, "DownloadInferencesTask: Publishing NEW_INFERENCES_AVAILABLE event for " + 
-                        inferenceCount + " new inferences");
+                    Msg.info(this, "DownloadInferencesTask: Publishing NEW_INFERENCES_AVAILABLE event for " 
+                        + inferenceCount + " new inferences");
                     publishEvent(new DecompaiEvent(DecompaiEvent.EventType.NEW_INFERENCES_AVAILABLE, 
                         getTaskTitle()));
                 }

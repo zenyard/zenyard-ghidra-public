@@ -17,9 +17,6 @@ import ghidra.util.Msg;
 
 import com.zenyard.decompai.ghidra.config.DecompaiOptions;
 import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
-import com.zenyard.decompai.ghidra.upload.QueueRevisionsTask;
-import ghidra.util.task.Task;
-import ghidra.util.task.TaskListener;
 
 /**
  * Dialog shown after initial upload completes.
@@ -57,8 +54,8 @@ public class InitialUploadMessageDialog extends DialogComponentProvider {
         gbc.fill = GridBagConstraints.HORIZONTAL;
         gbc.weightx = 1.0;
         JLabel messageLabel = new JLabel(
-            "<html>The initial processing is complete. Zenyard will continue analyzing remotely in the background.<br><br>" +
-            "You can safely close Ghidra — no need to keep it running.</html>");
+            "<html>The initial processing is complete. Zenyard will continue analyzing remotely in the background.<br><br>" 
+            + "You can safely close Ghidra — no need to keep it running.</html>");
         mainPanel.add(messageLabel, gbc);
         
         // Don't show again checkbox

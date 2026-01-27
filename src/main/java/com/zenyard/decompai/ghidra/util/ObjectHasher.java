@@ -6,7 +6,10 @@ import java.util.Base64;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import com.zenyard.decompai.ghidra.api.generated.model.*;
+import com.zenyard.decompai.ghidra.api.generated.model.Function;
+import com.zenyard.decompai.ghidra.api.generated.model.GlobalVariable;
+import com.zenyard.decompai.ghidra.api.generated.model.ModelObject;
+import com.zenyard.decompai.ghidra.api.generated.model.Thunk;
 import ghidra.util.Msg;
 
 /**

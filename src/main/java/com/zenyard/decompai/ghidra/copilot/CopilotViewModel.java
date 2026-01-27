@@ -46,12 +46,16 @@ public class CopilotViewModel {
     private final List<Runnable> listeners;
     private boolean isLoading;
     private String error;
+    private boolean thinking;
+    private String thinkingText;
     
     public CopilotViewModel() {
         this.messages = new CopyOnWriteArrayList<>();
         this.listeners = new CopyOnWriteArrayList<>();
         this.isLoading = false;
         this.error = null;
+        this.thinking = false;
+        this.thinkingText = null;
     }
     
     /**
@@ -123,6 +127,20 @@ public class CopilotViewModel {
     public boolean isLoading() {
         return isLoading;
     }
+
+    /**
+     * Check if the agent is currently thinking or running a tool.
+     */
+    public boolean isThinking() {
+        return thinking;
+    }
+
+    /**
+     * Get the current thinking text.
+     */
+    public String getThinkingText() {
+        return thinkingText;
+    }
     
     /**
      * Set error message.
@@ -144,6 +162,15 @@ public class CopilotViewModel {
      */
     public void clearError() {
         this.error = null;
+        notifyListeners();
+    }
+
+    /**
+     * Set thinking state and optional text.
+     */
+    public void setThinking(boolean thinking, String thinkingText) {
+        this.thinking = thinking;
+        this.thinkingText = thinkingText;
         notifyListeners();
     }
     

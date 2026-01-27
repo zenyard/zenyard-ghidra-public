@@ -41,9 +41,9 @@ public class DecompaiOptions {
             if (DecompaiConfigFile.configFileExists()) {
                 java.awt.Component parent = (tool != null) ? tool.getActiveWindow() : null;
                 Msg.showWarn(this, parent, 
-                    "Configuration File Error: Could not read decompai.json: " + e.getMessage() +
-                    "\nUsing default configuration.\n\nFile location: " + e.getConfigPath() +
-                    "\n\nYou can edit the file manually or use Tools → DecompAI → Configuration...", e);
+                    "Configuration File Error: Could not read decompai.json: " + e.getMessage() 
+                    + "\nUsing default configuration.\n\nFile location: " + e.getConfigPath() 
+                    + "\n\nYou can edit the file manually or use Tools → DecompAI → Configuration...", e);
             } else {
                 // File doesn't exist - try migration from Options API, then use defaults
                 if (migrateFromOptionsApi()) {
@@ -57,8 +57,8 @@ public class DecompaiOptions {
                     }
                 }
                 // Use defaults silently (user can configure via dialog)
-                Msg.info(this, "DecompAI: Configuration file not found. Using defaults. " +
-                    "Configure via Tools → DecompAI → Configuration...");
+                Msg.info(this, "DecompAI: Configuration file not found. Using defaults. " 
+                    + "Configure via Tools → DecompAI → Configuration...");
             }
             this.config = PluginConfiguration.getDefault();
         }

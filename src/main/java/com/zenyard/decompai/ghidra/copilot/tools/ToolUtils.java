@@ -4,6 +4,8 @@ import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Program;
+import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * Utility functions for tool implementations.
@@ -70,6 +72,42 @@ public class ToolUtils {
         
         FunctionManager functionManager = program.getFunctionManager();
         return functionManager.getFunctionContaining(address);
+    }
+
+    /**
+     * Execute a tool action with optional execution hooks.
+     */
+    public static <T> T executeTool(
+            CopilotToolContext context,
+            String toolName,
+            Map<String, Object> arguments,
+            Supplier<T> action) {
+        ToolExecutionListener listener = context != null ? context.getToolExecutionListener() : null;
+        long startTime = System.nanoTime();
+        if (listener != null) {
+            listener.onToolStart(toolName, arguments);
+        }
+        try {
+            T result = action.get();
+            if (listener != null) {
+                listener.onToolSuccess(toolName, elapsedMs(startTime));
+            }
+            return result;
+        } catch (RuntimeException e) {
+            if (listener != null) {
+                listener.onToolError(toolName, e, elapsedMs(startTime));
+            }
+            throw e;
+        } catch (Exception e) {
+            if (listener != null) {
+                listener.onToolError(toolName, e, elapsedMs(startTime));
+            }
+            throw new ToolExecutionException("Tool execution failed: " + e.getMessage(), e);
+        }
+    }
+
+    private static long elapsedMs(long startTimeNs) {
+        return (System.nanoTime() - startTimeNs) / 1_000_000L;
     }
 }
 

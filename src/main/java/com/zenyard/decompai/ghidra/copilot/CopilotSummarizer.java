@@ -7,9 +7,12 @@ import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
-import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.TokenCountEstimator;
 import ghidra.util.Msg;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Handles summarization of conversation history to preserve context.
@@ -22,10 +25,10 @@ public class CopilotSummarizer {
     
     private static final int KEEP_RECENT_MESSAGES = 5; // Keep last 5 messages without summarization
     
-    private final ChatModel summarizationModel;
+    private final StreamingChatModel summarizationModel;
     private final TokenCountEstimator tokenCountEstimator;
     
-    public CopilotSummarizer(ChatModel summarizationModel, TokenCountEstimator tokenCountEstimator) {
+    public CopilotSummarizer(StreamingChatModel summarizationModel, TokenCountEstimator tokenCountEstimator) {
         this.summarizationModel = summarizationModel;
         this.tokenCountEstimator = tokenCountEstimator;
     }
@@ -68,8 +71,8 @@ public class CopilotSummarizer {
             // Replace old messages with summary message
             replaceMessagesWithSummary(memory, oldMessages, recentMessages, summary);
             
-            Msg.info(this, "Summarized " + oldMessages.size() + " messages into summary. " +
-                          "Kept " + recentMessages.size() + " recent messages.");
+            Msg.info(this, "Summarized " + oldMessages.size() + " messages into summary. " 
+                          + "Kept " + recentMessages.size() + " recent messages.");
             
         } catch (Exception e) {
             // Log error but don't block conversation
@@ -119,8 +122,41 @@ public class CopilotSummarizer {
      */
     private String summarizeMessages(String prompt) {
         try {
-            // In langchain4j 1.10.0, ChatModel.chat(String) returns String directly
-            return summarizationModel.chat(prompt);
+            StringBuilder summaryBuilder = new StringBuilder();
+            CountDownLatch completion = new CountDownLatch(1);
+            AtomicReference<Throwable> errorHolder = new AtomicReference<>();
+
+            summarizationModel.chat(prompt, new dev.langchain4j.model.chat.response.StreamingChatResponseHandler() {
+                @Override
+                public void onPartialResponse(String partialResponse) {
+                    summaryBuilder.append(partialResponse);
+                }
+
+                @Override
+                public void onCompleteResponse(dev.langchain4j.model.chat.response.ChatResponse completeResponse) {
+                    if (completeResponse.aiMessage() != null && completeResponse.aiMessage().text() != null) {
+                        summaryBuilder.setLength(0);
+                        summaryBuilder.append(completeResponse.aiMessage().text());
+                    }
+                    completion.countDown();
+                }
+
+                @Override
+                public void onError(Throwable error) {
+                    errorHolder.set(error);
+                    completion.countDown();
+                }
+            });
+
+            boolean finished = completion.await(120, TimeUnit.SECONDS);
+            if (!finished) {
+                throw new RuntimeException("Summarization streaming did not complete in time");
+            }
+            if (errorHolder.get() != null) {
+                Throwable error = errorHolder.get();
+                throw error instanceof Exception ? (Exception) error : new RuntimeException(error);
+            }
+            return summaryBuilder.toString();
         } catch (Exception e) {
             throw new RuntimeException("Failed to generate summary: " + e.getMessage(), e);
         }

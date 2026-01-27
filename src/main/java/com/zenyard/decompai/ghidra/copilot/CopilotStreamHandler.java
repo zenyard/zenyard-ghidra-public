@@ -52,6 +52,7 @@ public class CopilotStreamHandler implements StreamingChatResponseHandler {
         // Finalize message
         SwingUtilities.invokeLater(() -> {
             viewModel.setLoading(false);
+            viewModel.setThinking(false, null);
         });
     }
     
@@ -61,6 +62,7 @@ public class CopilotStreamHandler implements StreamingChatResponseHandler {
         SwingUtilities.invokeLater(() -> {
             viewModel.setError("Streaming error: " + error.getMessage());
             viewModel.setLoading(false);
+            viewModel.setThinking(false, null);
         });
     }
     

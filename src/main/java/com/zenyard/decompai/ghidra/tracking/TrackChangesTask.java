@@ -29,7 +29,31 @@ import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.Set;
 
-import static ghidra.program.util.ProgramEvent.*;
+import static ghidra.program.util.ProgramEvent.CODE_ADDED;
+import static ghidra.program.util.ProgramEvent.CODE_REMOVED;
+import static ghidra.program.util.ProgramEvent.CODE_REPLACED;
+import static ghidra.program.util.ProgramEvent.CODE_UNIT_PROPERTY_CHANGED;
+import static ghidra.program.util.ProgramEvent.COMMENT_CHANGED;
+import static ghidra.program.util.ProgramEvent.FUNCTION_ADDED;
+import static ghidra.program.util.ProgramEvent.FUNCTION_BODY_CHANGED;
+import static ghidra.program.util.ProgramEvent.FUNCTION_CHANGED;
+import static ghidra.program.util.ProgramEvent.FUNCTION_REMOVED;
+import static ghidra.program.util.ProgramEvent.REFERENCE_ADDED;
+import static ghidra.program.util.ProgramEvent.REFERENCE_REMOVED;
+import static ghidra.program.util.ProgramEvent.REFERENCE_TYPE_CHANGED;
+import static ghidra.program.util.ProgramEvent.SYMBOL_ADDED;
+import static ghidra.program.util.ProgramEvent.SYMBOL_ADDRESS_CHANGED;
+import static ghidra.program.util.ProgramEvent.SYMBOL_ANCHOR_FLAG_CHANGED;
+import static ghidra.program.util.ProgramEvent.SYMBOL_ASSOCIATION_ADDED;
+import static ghidra.program.util.ProgramEvent.SYMBOL_ASSOCIATION_REMOVED;
+import static ghidra.program.util.ProgramEvent.SYMBOL_DATA_CHANGED;
+import static ghidra.program.util.ProgramEvent.SYMBOL_PRIMARY_STATE_CHANGED;
+import static ghidra.program.util.ProgramEvent.SYMBOL_REMOVED;
+import static ghidra.program.util.ProgramEvent.SYMBOL_RENAMED;
+import static ghidra.program.util.ProgramEvent.SYMBOL_SCOPE_CHANGED;
+import static ghidra.program.util.ProgramEvent.SYMBOL_SOURCE_CHANGED;
+import static ghidra.program.util.ProgramEvent.VARIABLE_REFERENCE_ADDED;
+import static ghidra.program.util.ProgramEvent.VARIABLE_REFERENCE_REMOVED;
 
 /**
  * Event-driven change tracker that listens to program changes and marks objects as dirty.
@@ -120,8 +144,8 @@ public class TrackChangesTask implements EventProducer {
                     return;
                 }
                 String description = tx.getDescription();
-                if (EDIT_LABEL_TRANSACTION.equals(description) || 
-                    RENAME_LOCAL_VARIABLE_TRANSACTION.equals(description)) {
+                if (EDIT_LABEL_TRANSACTION.equals(description) 
+                    || RENAME_LOCAL_VARIABLE_TRANSACTION.equals(description)) {
                     synchronized (editLabelAffectedAddresses) {
                         trackingEditLabelTransaction = true;
                         editLabelAffectedAddresses.clear();
@@ -138,8 +162,8 @@ public class TrackChangesTask implements EventProducer {
                 synchronized (editLabelAffectedAddresses) {
                     if (trackingEditLabelTransaction) {
                         trackingEditLabelTransaction = false;
-                        Msg.info(TrackChangesTask.this, "TrackChangesTask: Edit Label transaction ended, marking " + 
-                            editLabelAffectedAddresses.size() + " addresses as dirty");
+                        Msg.info(TrackChangesTask.this, "TrackChangesTask: Edit Label transaction ended, marking " 
+                            + editLabelAffectedAddresses.size() + " addresses as dirty");
                         
                         // Mark all affected addresses as dirty
                         for (Address address : editLabelAffectedAddresses) {
@@ -377,17 +401,17 @@ public class TrackChangesTask implements EventProducer {
     }
 
     private boolean isSymbolEvent(ProgramEvent eventType) {
-        return eventType == SYMBOL_ADDED ||
-            eventType == SYMBOL_RENAMED ||
-            eventType == SYMBOL_REMOVED ||
-            eventType == SYMBOL_SOURCE_CHANGED ||
-            eventType == SYMBOL_PRIMARY_STATE_CHANGED ||
-            eventType == SYMBOL_ANCHOR_FLAG_CHANGED ||
-            eventType == SYMBOL_SCOPE_CHANGED ||
-            eventType == SYMBOL_ASSOCIATION_ADDED ||
-            eventType == SYMBOL_ASSOCIATION_REMOVED ||
-            eventType == SYMBOL_DATA_CHANGED ||
-            eventType == SYMBOL_ADDRESS_CHANGED;
+        return eventType == SYMBOL_ADDED 
+            || eventType == SYMBOL_RENAMED 
+            || eventType == SYMBOL_REMOVED 
+            || eventType == SYMBOL_SOURCE_CHANGED 
+            || eventType == SYMBOL_PRIMARY_STATE_CHANGED 
+            || eventType == SYMBOL_ANCHOR_FLAG_CHANGED 
+            || eventType == SYMBOL_SCOPE_CHANGED 
+            || eventType == SYMBOL_ASSOCIATION_ADDED 
+            || eventType == SYMBOL_ASSOCIATION_REMOVED 
+            || eventType == SYMBOL_DATA_CHANGED 
+            || eventType == SYMBOL_ADDRESS_CHANGED;
     }
     
     /**
@@ -443,9 +467,9 @@ public class TrackChangesTask implements EventProducer {
         } else {
             // Include named global variables, excluding auto-generated string literals
             // Exclude if it looks like an auto-generated string (starts with "a" and is a string)
-            boolean isAutoString = name.startsWith("a") && 
-                data.getDataType().getDisplayName().contains("string") &&
-                symbol.getSource() == SourceType.DEFAULT;
+            boolean isAutoString = name.startsWith("a") 
+                && data.getDataType().getDisplayName().contains("string") 
+                && symbol.getSource() == SourceType.DEFAULT;
             
             return !isAutoString;
         }

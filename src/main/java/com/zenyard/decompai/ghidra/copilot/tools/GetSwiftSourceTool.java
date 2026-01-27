@@ -21,37 +21,44 @@ public class GetSwiftSourceTool {
         this.program = context.getProgram();
     }
     
-    @Tool("Returns the decompiled Swift source code of the given function address. " +
-          "Throws an error if no Swift source is available for the function.")
+    @Tool("Returns the decompiled Swift source code of the given function address. " 
+          + "Throws an error if no Swift source is available for the function.")
     public String getSwiftSource(String address) {
-        try {
-            context.checkCancelled();
-            
-            if (program == null) {
-                throw new ToolExecutionException("No program is currently loaded");
-            }
-            
-            // Get function at address
-            Function function = ToolUtils.getFunction(program, address);
-            Address functionAddress = function.getEntryPoint();
-            
-            // Find SwiftFunction inference
-            SwiftFunction swiftFunction = SwiftUtils.findLatestSwiftFunctionInference(program, functionAddress);
-            
-            if (swiftFunction == null || swiftFunction.getSource() == null || 
-                swiftFunction.getSource().isEmpty()) {
+        java.util.Map<String, Object> args = new java.util.HashMap<>();
+        args.put("address", address);
+        return ToolUtils.executeTool(context, "get_swift_source", args, () -> {
+            try {
+                context.checkCancelled();
+
+                if (program == null) {
+                    throw new ToolExecutionException("No program is currently loaded");
+                }
+
+                // Get function at address
+                Function function = ToolUtils.getFunction(program, address);
+                if (function == null) {
+                    throw new ToolExecutionException("Failed to retrieve function from address: " + address);
+                }
+                Address functionAddress = function.getEntryPoint();
+
+                // Find SwiftFunction inference
+                SwiftFunction swiftFunction = SwiftUtils.findLatestSwiftFunctionInference(program, functionAddress);
+
+                if (swiftFunction == null || swiftFunction.getSource() == null
+                    || swiftFunction.getSource().isEmpty()) {
+                    throw new ToolExecutionException(
+                        "No Swift source code available for function at " + address);
+                }
+
+                return swiftFunction.getSource();
+
+            } catch (ToolExecutionException e) {
+                throw e;
+            } catch (Exception e) {
                 throw new ToolExecutionException(
-                    "No Swift source code available for function at " + address);
+                    "Failed to get Swift source for function at " + address + ": " + e.getMessage(), e);
             }
-            
-            return swiftFunction.getSource();
-            
-        } catch (ToolExecutionException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new ToolExecutionException(
-                "Failed to get Swift source for function at " + address + ": " + e.getMessage(), e);
-        }
+        });
     }
 }
 

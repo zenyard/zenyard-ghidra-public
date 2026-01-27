@@ -31,8 +31,8 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
     private static final int POLL_INTERVAL_MS = 3000; // 3 seconds
     private static final int MAX_BACKOFF_MS = 30000; // Maximum backoff of 30 seconds
     private static final int INITIAL_BACKOFF_MS = 1000; // Initial backoff of 1 second
-    private static final long ETA_CALCULATION_TIME_NS = 30_000_000_000L; // 30 seconds in nanoseconds
-    private static final long ETA_MIN_TIME_NS = 5_000_000_000L; // 5 seconds in nanoseconds
+    private static final long ETA_CALCULATION_TIME_MS = 30_000L; // 30 seconds in milliseconds
+    private static final long ETA_MIN_TIME_MS = 5_000L; // 5 seconds in milliseconds
     private static final double ETA_MIN_PROGRESS = 0.05; // 5% progress to allow early ETA
     private static final double REVISION_EPS = 1e-6; // floating point tolerance for revision comparisons
     
@@ -144,6 +144,9 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
             
             Msg.debug(this, "PollServerStatusTask: Binary ID available, starting polling loop");
             
+            // Restore analysis state if it was in progress when program was closed
+            restoreAnalysisStateIfNeeded();
+            
             int localRevision = getLocalRevision();
             double fractionalServerRevision = getServerRevisionFractional();
             
@@ -191,11 +194,24 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
                     
                     // Track RemoteAnalysisStats when analysis starts
                     boolean isAnalyzing = (status.getRevisionAnalyses() != null && !status.getRevisionAnalyses().isEmpty());
-                    Msg.debug(this, "PollServerStatusTask: isAnalyzing=" + isAnalyzing + 
-                        ", revision_analyses=" + (status.getRevisionAnalyses() != null ? status.getRevisionAnalyses().size() : 0));
+                    Msg.debug(this, "PollServerStatusTask: isAnalyzing=" + isAnalyzing 
+                        + ", revision_analyses=" + (status.getRevisionAnalyses() != null ? status.getRevisionAnalyses().size() : 0));
+                    
+                    // Check if analysis was in progress but server shows it's not analyzing anymore
+                    // This handles the case where analysis completed while program was closed
+                    if (!isAnalyzing && isAnalysisInProgress()) {
+                        // Analysis flag says in progress, but server says not analyzing
+                        // This means analysis completed while program was closed
+                        Msg.info(this, "PollServerStatusTask: Analysis completed while program was closed");
+                        clearRemoteAnalysisStats(); // This also clears analysis_in_progress flag
+                        // Publish null status to clear the status bar immediately
+                        publishAnalysisStatus(null, fractionalServerRevision);
+                    }
+                    
                     if (isAnalyzing && getRemoteAnalysisStats() == null) {
                         // Analysis just started - create stats with fractional revision for accuracy
-                        setRemoteAnalysisStats(new RemoteAnalysisStats(System.nanoTime(), fractionalServerRevision));
+                        // Use wall-clock time (milliseconds since epoch) for persistence across restarts
+                        setRemoteAnalysisStats(new RemoteAnalysisStats(System.currentTimeMillis(), fractionalServerRevision));
                         Msg.debug(this, "PollServerStatusTask: Analysis started, created RemoteAnalysisStats");
                     }
                     boolean hadAnalysisStats = (getRemoteAnalysisStats() != null);
@@ -204,10 +220,16 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
                     boolean clientInSync = Math.abs(localRevision - fractionalServerRevision) < REVISION_EPS;
 
                     if (clientInSync) {
-                        // Client is in sync - store last_done_revision and clear stats
+                        // Client is in sync - analysis has completed
+                        // Store last_done_revision and clear stats
                         setLastDoneRevision(localRevision);
                         if (getRemoteAnalysisStats() != null) {
-                            clearRemoteAnalysisStats();
+                            clearRemoteAnalysisStats(); // This also clears analysis_in_progress flag
+                        } else if (isAnalysisInProgress()) {
+                            // Stats were cleared but flag wasn't - clear it now
+                            // This handles the case where analysis completed while program was closed
+                            setAnalysisInProgress(false);
+                            Msg.debug(this, "PollServerStatusTask: Analysis completed while program was closed, clearing flag");
                         }
                         // Wait for client to be ahead
                         waitForClientAhead(monitor, localRevision);
@@ -219,8 +241,8 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
                     // and the client is in sync, signal completion by publishing a null status.
                     AnalysisStatus analysisStatus = calculateAnalysisStatus(localRevision, fractionalServerRevision);
                     if (analysisStatus != null) {
-                        Msg.debug(this, "PollServerStatusTask: Publishing ANALYSIS_STATUS_UPDATED, progress=" + 
-                            analysisStatus.getProgress() + ", eta=" + analysisStatus.getEta());
+                        Msg.debug(this, "PollServerStatusTask: Publishing ANALYSIS_STATUS_UPDATED, progress=" 
+                            + analysisStatus.getProgress() + ", eta=" + analysisStatus.getEta());
                         publishAnalysisStatus(analysisStatus, fractionalServerRevision);
                     } else if (clientInSync && hadAnalysisStats) {
                         Msg.debug(this, "PollServerStatusTask: Client in sync, signaling completion");
@@ -246,8 +268,8 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
                         int backoffMs = ConnectionErrorHandler.calculateBackoff(
                             updatedFailures, INITIAL_BACKOFF_MS, MAX_BACKOFF_MS);
                         
-                        Msg.warn(this, "Connection error polling server status: " + rootCause.getMessage() + 
-                            " (attempt " + updatedFailures + ", backoff " + backoffMs + "ms)");
+                        Msg.warn(this, "Connection error polling server status: " + rootCause.getMessage() 
+                            + " (attempt " + updatedFailures + ", backoff " + backoffMs + "ms)");
                         
                         try {
                             Thread.sleep(backoffMs);
@@ -422,8 +444,8 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
         String startTimeStr = props.getString("remote_analysis_start_time");
         String startRevisionStr = props.getString("remote_analysis_start_revision");
         
-        if (startTimeStr == null || startRevisionStr == null || 
-            startTimeStr.isEmpty() || startRevisionStr.isEmpty()) {
+        if (startTimeStr == null || startRevisionStr == null 
+            || startTimeStr.isEmpty() || startRevisionStr.isEmpty()) {
             return null;
         }
         
@@ -443,6 +465,8 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
         DecompaiProgramProperties props = new DecompaiProgramProperties(program);
         props.setString("remote_analysis_start_time", String.valueOf(stats.getStartTime()));
         props.setString("remote_analysis_start_revision", String.valueOf(stats.getStartRevision()));
+        // Mark analysis as in progress
+        setAnalysisInProgress(true);
     }
     
     /**
@@ -453,6 +477,30 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
         // Clear by setting to empty string (properties will be treated as not set)
         props.setString("remote_analysis_start_time", "");
         props.setString("remote_analysis_start_revision", "");
+        // Mark analysis as not in progress
+        setAnalysisInProgress(false);
+    }
+    
+    /**
+     * Check if analysis is in progress (persisted state).
+     */
+    private boolean isAnalysisInProgress() {
+        DecompaiProgramProperties props = new DecompaiProgramProperties(program);
+        String flag = props.getString("analysis_in_progress");
+        return "true".equals(flag);
+    }
+    
+    /**
+     * Set analysis in progress flag.
+     */
+    private void setAnalysisInProgress(boolean inProgress) {
+        DecompaiProgramProperties props = new DecompaiProgramProperties(program);
+        if (inProgress) {
+            props.setString("analysis_in_progress", "true");
+        } else {
+            // Clear by setting to empty string
+            props.setString("analysis_in_progress", "");
+        }
     }
     
     /**
@@ -495,6 +543,8 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
      * Calculate ETA for analysis completion.
      * Mirrors _calculate_eta() in decompai_ida/ui/status_bar_view_model.py
      * 
+     * Uses wall-clock time (milliseconds since epoch) to handle program restarts correctly.
+     * 
      * @param revision Target revision
      * @param serverRevision Current fractional server revision
      * @return ETA in seconds, or null if not available
@@ -510,10 +560,24 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
             return null;
         }
         
-        // Calculate time since stats were created
-        long timeSinceStatsNs = System.nanoTime() - stats.getStartTime();
+        // Calculate time since stats were created using wall-clock time
+        // This handles program restarts correctly since we store absolute timestamps
+        long currentTimeMs = System.currentTimeMillis();
+        long startTimeMs = stats.getStartTime();
+        long timeSinceStatsMs = currentTimeMs - startTimeMs;
         
-        double timeSinceStatsSeconds = timeSinceStatsNs / 1e9;
+        // Handle case where stored time might be in old format (nanoseconds)
+        // If the stored time is unreasonably large (> year 2100 in milliseconds), it's likely nanoseconds
+        // Convert it by dividing by 1e6, but this is a one-time migration
+        if (startTimeMs > 4102444800000L) { // Year 2100 in milliseconds
+            // Likely stored as nanoseconds (old format) - convert to milliseconds
+            // For this calculation, we'll treat it as if it started now (can't recover exact time)
+            // This will cause ETA to recalculate from current point
+            Msg.debug(this, "PollServerStatusTask: Detected old timestamp format, treating as restart");
+            return null; // Let it recalculate from current state
+        }
+        
+        double timeSinceStatsSeconds = timeSinceStatsMs / 1000.0;
         
         // Calculate progress since stats were created
         double denominator = (revision - stats.getStartRevision());
@@ -523,12 +587,12 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
         double progressSinceStats = (serverRevision - stats.getStartRevision()) / denominator;
         
         // Need at least some progress and time to produce a stable ETA.
-        if (progressSinceStats <= 0.0 || timeSinceStatsNs < ETA_MIN_TIME_NS) {
+        if (progressSinceStats <= 0.0 || timeSinceStatsMs < ETA_MIN_TIME_MS) {
             return null;
         }
         
         // Allow early ETA once meaningful progress is observed; otherwise wait for stabilization.
-        if (progressSinceStats < ETA_MIN_PROGRESS && timeSinceStatsNs < ETA_CALCULATION_TIME_NS) {
+        if (progressSinceStats < ETA_MIN_PROGRESS && timeSinceStatsMs < ETA_CALCULATION_TIME_MS) {
             return null;
         }
         
@@ -543,6 +607,62 @@ public class PollServerStatusTask extends Task implements EventConsumer, EventPr
         
         // ETA = distance / speed
         return distance / speed;
+    }
+    
+    /**
+     * Restore analysis state if it was in progress when the program was closed.
+     * This allows the status bar to show "Analyzing in background" immediately on program activation,
+     * before the first server poll completes.
+     * 
+     * However, if analysis completed while the program was closed (client is in sync),
+     * we clear the state instead of restoring it.
+     */
+    private void restoreAnalysisStateIfNeeded() {
+        if (!isAnalysisInProgress()) {
+            Msg.debug(this, "PollServerStatusTask: No analysis in progress, skipping state restoration");
+            return;
+        }
+        
+        RemoteAnalysisStats stats = getRemoteAnalysisStats();
+        if (stats == null) {
+            Msg.debug(this, "PollServerStatusTask: Analysis in progress flag set but no stats found, clearing flag");
+            setAnalysisInProgress(false);
+            return;
+        }
+        
+        // Get current state from properties
+        int localRevision = getLocalRevision();
+        double fractionalServerRevision = getServerRevisionFractional();
+        
+        // Check if client is already in sync with server - this indicates analysis completed
+        // while the program was closed
+        boolean clientInSync = Math.abs(localRevision - fractionalServerRevision) < REVISION_EPS;
+        
+        if (clientInSync) {
+            // Analysis completed while program was closed - clear the state
+            Msg.info(this, "PollServerStatusTask: Analysis completed while program was closed, clearing state");
+            clearRemoteAnalysisStats(); // This also clears analysis_in_progress flag
+            // Publish null status to unregister the status bar task
+            publishAnalysisStatus(null, fractionalServerRevision);
+            return;
+        }
+        
+        Msg.info(this, "PollServerStatusTask: Restoring analysis state - analysis was in progress when program closed");
+        
+        // Calculate analysis status using stored state
+        // Note: This uses the last known server_revision_fractional, which may be slightly stale
+        // The first poll will update it, but this gives immediate feedback to the user
+        AnalysisStatus analysisStatus = calculateAnalysisStatus(localRevision, fractionalServerRevision);
+        
+        if (analysisStatus != null) {
+            Msg.debug(this, "PollServerStatusTask: Restored analysis status, progress=" 
+                + analysisStatus.getProgress() + ", eta=" + analysisStatus.getEta());
+            publishAnalysisStatus(analysisStatus, fractionalServerRevision);
+        } else {
+            // Analysis may have completed while program was closed, or state is invalid
+            // First poll will handle this properly
+            Msg.debug(this, "PollServerStatusTask: Could not restore analysis status, will check on first poll");
+        }
     }
     
     /**

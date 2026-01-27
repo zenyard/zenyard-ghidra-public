@@ -6,11 +6,14 @@ import ghidra.util.Msg;
 
 import com.zenyard.decompai.ghidra.api.DecompaiApiClientFactory;
 import com.zenyard.decompai.ghidra.api.generated.ApiClient;
+import com.zenyard.decompai.ghidra.api.generated.ApiException;
 import com.zenyard.decompai.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.decompai.ghidra.api.generated.api.UserApi;
+import com.zenyard.decompai.ghidra.copilot.CopilotConfigMapper;
 import com.zenyard.decompai.ghidra.config.DecompaiOptions;
 import com.zenyard.decompai.ghidra.copilot.CopilotController;
 import com.zenyard.decompai.ghidra.copilot.CopilotProvider;
+import com.zenyard.decompai.ghidra.copilot.CopilotViewModel;
 import com.zenyard.decompai.ghidra.illum.IlluminatorController;
 import com.zenyard.decompai.ghidra.status.AnalysisProgressMonitor;
 import com.zenyard.decompai.ghidra.status.StatusBarManager;
@@ -21,6 +24,7 @@ import com.zenyard.decompai.ghidra.events.EventDispatcher;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -46,10 +50,12 @@ public class DecompaiServices {
     private IlluminatorController illuminatorController;
     private CopilotProvider copilotProvider;
     private CopilotController copilotController;
+    private CopilotViewModel copilotViewModel;
     private StatusBarManager statusBarManager;
     private TrackChangesTaskManager trackChangesTaskManager;
     private EventDispatcher eventDispatcher;
     private AnalysisProgressMonitor analysisProgressMonitor;
+    private volatile boolean userConfigFetchStarted;
     
     // Foreground task queue infrastructure
     private final Deque<ForegroundTask> foregroundTaskQueue = new ArrayDeque<>();
@@ -88,18 +94,29 @@ public class DecompaiServices {
         // Initialize analysis progress monitor
         this.analysisProgressMonitor = new AnalysisProgressMonitor(statusBarManager, eventDispatcher);
         
-        // Initialize Copilot (controller will be set when API client is available)
+        // Initialize Copilot (controller exists even if API is not configured)
         this.copilotController = null;
+        this.copilotViewModel = new CopilotViewModel();
         this.copilotProvider = new CopilotProvider(plugin.getTool(), null);
+        this.copilotProvider.setViewModel(copilotViewModel);
+        this.copilotController = new CopilotController(
+            copilotProvider,
+            apiClient,
+            binariesApi,
+            userApi,
+            plugin.getTool()
+        );
+        this.copilotController.setViewModel(copilotViewModel);
+        copilotProvider.setController(copilotController);
+        Msg.info(this, "Copilot controller initialized in services constructor");
         if (apiClient != null && binariesApi != null && userApi != null) {
-            this.copilotController = new CopilotController(copilotProvider, apiClient, binariesApi, userApi, plugin.getTool());
-            copilotProvider.setController(copilotController);
+            fetchUserConfigAsync();
         }
         plugin.getTool().addComponentProvider(copilotProvider, false);
         
         // Illuminator will be initialized when program is activated
     }
-    
+
     public void onProgramActivated(Program program) {
         this.currentProgram = program;
         
@@ -111,10 +128,7 @@ public class DecompaiServices {
             apiClient = DecompaiApiClientFactory.createApiClient(options);
             binariesApi = new BinariesApi(apiClient);
             userApi = new UserApi(apiClient);
-            if (copilotController == null) {
-                copilotController = new CopilotController(copilotProvider, apiClient, binariesApi, userApi, plugin.getTool());
-                copilotProvider.setController(copilotController);
-            }
+            fetchUserConfigAsync();
         }
         
         // Initialize Illuminator
@@ -137,6 +151,73 @@ public class DecompaiServices {
         if (copilotController != null) {
             copilotController.setCurrentProgram(null);
         }
+    }
+
+    private void fetchUserConfigAsync() {
+        if (userApi == null || copilotController == null || userConfigFetchStarted) {
+            return;
+        }
+        userConfigFetchStarted = true;
+        CompletableFuture.supplyAsync(() -> {
+            try {
+                return userApi.getUserConfig();
+            } catch (ApiException e) {
+                throw new RuntimeException(e);
+            }
+        }).thenAccept(userConfig -> {
+            if (userConfig == null) {
+                return;
+            }
+            com.zenyard.decompai.ghidra.copilot.CopilotConfig config =
+                CopilotConfigMapper.fromUserConfig(userConfig);
+            if (config != null && copilotController != null) {
+                copilotController.setCopilotConfig(sanitizeCopilotConfig(config));
+            }
+        }).exceptionally(error -> {
+            Msg.warn(this, "Failed to fetch user config: " + error.getMessage());
+            return null;
+        });
+    }
+
+    private com.zenyard.decompai.ghidra.copilot.CopilotConfig sanitizeCopilotConfig(
+            com.zenyard.decompai.ghidra.copilot.CopilotConfig config) {
+        if (config == null || options == null) {
+            return config;
+        }
+        logCopilotConfigSummary(config);
+        String backendApiKey = options.getApiKey();
+        if (backendApiKey == null || backendApiKey.isBlank()) {
+            return config;
+        }
+        Object rawKey = config.getAdditionalParams().get("api_key");
+        if (rawKey instanceof String && backendApiKey.equals(rawKey)) {
+            java.util.Map<String, Object> adjusted = new java.util.HashMap<>(config.getAdditionalParams());
+            adjusted.remove("api_key");
+            Msg.warn(this, "Copilot config API key matches backend key; removing to avoid invalid LLM auth.");
+            return new com.zenyard.decompai.ghidra.copilot.CopilotConfig(
+                config.getModelName(),
+                config.getModelProvider(),
+                adjusted
+            );
+        }
+        return config;
+    }
+
+    private void logCopilotConfigSummary(com.zenyard.decompai.ghidra.copilot.CopilotConfig config) {
+        if (config == null) {
+            return;
+        }
+        java.util.Map<String, Object> params = config.getAdditionalParams();
+        java.util.Set<String> keys = params != null ? params.keySet() : java.util.Collections.emptySet();
+        Object apiKey = params != null ? params.get("api_key") : null;
+        String apiKeySummary = apiKey instanceof String
+            ? "api_key=present(len=" + ((String) apiKey).length() + ")"
+            : "api_key=missing";
+        Msg.info(this, "Copilot config received: provider="
+            + config.getModelProvider()
+            + ", model=" + config.getModelName()
+            + ", params=" + keys
+            + ", " + apiKeySummary);
     }
     
     /**

@@ -13,9 +13,15 @@ import com.google.gson.GsonBuilder;
 import com.zenyard.decompai.ghidra.api.exceptions.DecompaiApiException;
 import com.zenyard.decompai.ghidra.api.exceptions.DecompaiUnauthorizedException;
 import com.zenyard.decompai.ghidra.api.exceptions.DecompaiForbiddenException;
-import com.zenyard.decompai.ghidra.api.models.*;
+import com.zenyard.decompai.ghidra.api.models.AddObjectsToCurrentRevisionParams;
+import com.zenyard.decompai.ghidra.api.models.BinaryStatus;
+import com.zenyard.decompai.ghidra.api.models.CreateRevisionParams;
+import com.zenyard.decompai.ghidra.api.models.FinishAndAnalyzeCurrentRevisionParams;
+import com.zenyard.decompai.ghidra.api.models.GetInferencesResponse;
+import com.zenyard.decompai.ghidra.api.models.HealthResponse;
+import com.zenyard.decompai.ghidra.api.models.PostBinaryBody;
+import com.zenyard.decompai.ghidra.api.models.PostBinaryResponse;
 import java.util.UUID;
-import java.util.Map;
 import java.net.http.HttpRequest.BodyPublishers;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -116,8 +122,8 @@ public class DecompaiApiClient {
                         String location = response.headers().firstValue("Location").orElse("unknown");
                         future.completeExceptionally(
                             new DecompaiApiException(
-                                "Redirect error (status " + statusCode + "): Server redirected to " + location + 
-                                ". Please check if the server URL is correct: " + baseUrl));
+                                "Redirect error (status " + statusCode + "): Server redirected to " + location 
+                                + ". Please check if the server URL is correct: " + baseUrl));
                         return;
                     } else if (statusCode < 200 || statusCode >= 300) {
                         future.completeExceptionally(
@@ -226,16 +232,16 @@ public class DecompaiApiClient {
         
         // Build multipart body
         // First part: file data
-        String filePartHeader = "--" + boundary + "\r\n" +
-            "Content-Disposition: form-data; name=\"data\"; filename=\"" + name + "\"\r\n" +
-            "Content-Type: application/octet-stream\r\n\r\n";
+        String filePartHeader = "--" + boundary + "\r\n" 
+            + "Content-Disposition: form-data; name=\"data\"; filename=\"" + name + "\"\r\n" 
+            + "Content-Type: application/octet-stream\r\n\r\n";
         byte[] filePartHeaderBytes = filePartHeader.getBytes(StandardCharsets.UTF_8);
         
         // Second part: type parameter
-        String typePart = "\r\n--" + boundary + "\r\n" +
-            "Content-Disposition: form-data; name=\"type\"\r\n\r\n" +
-            type + "\r\n" +
-            "--" + boundary + "--\r\n";
+        String typePart = "\r\n--" + boundary + "\r\n" 
+            + "Content-Disposition: form-data; name=\"type\"\r\n\r\n" 
+            + type + "\r\n" 
+            + "--" + boundary + "--\r\n";
         byte[] typePartBytes = typePart.getBytes(StandardCharsets.UTF_8);
         
         // Combine all parts
@@ -247,8 +253,8 @@ public class DecompaiApiClient {
         offset += data.length;
         System.arraycopy(typePartBytes, 0, fullBody, offset, typePartBytes.length);
         
-        URI uri = URI.create(baseUrl + "/binaries/" + binaryId + "/original_files/" + 
-                            URLEncoder.encode(name, StandardCharsets.UTF_8));
+        URI uri = URI.create(baseUrl + "/binaries/" + binaryId + "/original_files/" 
+                            + URLEncoder.encode(name, StandardCharsets.UTF_8));
         
         HttpRequest request = HttpRequest.newBuilder()
             .uri(uri)

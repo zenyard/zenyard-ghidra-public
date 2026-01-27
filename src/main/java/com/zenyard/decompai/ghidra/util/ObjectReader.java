@@ -131,9 +131,9 @@ public class ObjectReader {
                     // Not a function, could be a global variable
                     // Exclude if it looks like an auto-generated string (starts with "a" and is a string)
                     // Note: Ghidra's Data doesn't have isString() - we'll check data type instead
-                    boolean isAutoString = name.startsWith("a") && 
-                        data.getDataType().getDisplayName().contains("string") &&
-                        symbol.getSource() == SourceType.DEFAULT;
+                    boolean isAutoString = name.startsWith("a") 
+                        && data.getDataType().getDisplayName().contains("string") 
+                        && symbol.getSource() == SourceType.DEFAULT;
                         
                         if (!isAutoString) {
                             isGlobalVariable = true;
@@ -182,9 +182,9 @@ public class ObjectReader {
             return null;
         }
 
-        boolean isAutoString = name.startsWith("a") &&
-            data.getDataType().getDisplayName().contains("string") &&
-            symbol.getSource() == SourceType.DEFAULT;
+        boolean isAutoString = name.startsWith("a") 
+            && data.getDataType().getDisplayName().contains("string") 
+            && symbol.getSource() == SourceType.DEFAULT;
 
         return isAutoString ? null : dataAddress;
     }

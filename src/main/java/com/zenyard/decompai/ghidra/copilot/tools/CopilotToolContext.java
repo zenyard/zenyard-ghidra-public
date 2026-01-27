@@ -18,17 +18,31 @@ public class CopilotToolContext {
     private final Program program;
     private final TaskMonitor monitor;
     private final PluginTool tool;
+    private final ToolExecutionListener toolExecutionListener;
     
     public CopilotToolContext(Program program, TaskMonitor monitor) {
         this.program = program;
         this.monitor = monitor;
         this.tool = null;
+        this.toolExecutionListener = null;
     }
     
     public CopilotToolContext(Program program, TaskMonitor monitor, PluginTool tool) {
         this.program = program;
         this.monitor = monitor;
         this.tool = tool;
+        this.toolExecutionListener = null;
+    }
+
+    public CopilotToolContext(
+            Program program,
+            TaskMonitor monitor,
+            PluginTool tool,
+            ToolExecutionListener toolExecutionListener) {
+        this.program = program;
+        this.monitor = monitor;
+        this.tool = tool;
+        this.toolExecutionListener = toolExecutionListener;
     }
     
     public Program getProgram() {
@@ -41,6 +55,10 @@ public class CopilotToolContext {
     
     public PluginTool getTool() {
         return tool;
+    }
+
+    public ToolExecutionListener getToolExecutionListener() {
+        return toolExecutionListener;
     }
     
     /**

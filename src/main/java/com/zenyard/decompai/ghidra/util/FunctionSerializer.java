@@ -63,8 +63,8 @@ public class FunctionSerializer {
         }
         
         // Check if name is user-defined (has known name)
-        boolean hasKnownName = function.getSymbol().getSource() != 
-            ghidra.program.model.symbol.SourceType.DEFAULT;
+        boolean hasKnownName = function.getSymbol().getSource() 
+            != ghidra.program.model.symbol.SourceType.DEFAULT;
         
         // Get mangled name (cleaned)
         String mangledName = null;
@@ -97,8 +97,8 @@ public class FunctionSerializer {
                 );
                 
                 if (!results.decompileCompleted()) {
-                    throw new RuntimeException("Failed to decompile function: " + 
-                        (results.getErrorMessage() != null ? results.getErrorMessage() : "Unknown error"));
+                    throw new RuntimeException("Failed to decompile function: " 
+                        + (results.getErrorMessage() != null ? results.getErrorMessage() : "Unknown error"));
                 }
                 
                 decompiledCode = results.getDecompiledFunction().getC();
@@ -181,8 +181,8 @@ public class FunctionSerializer {
             name = "data_" + address.toString();
         }
         
-        boolean hasKnownName = program.getSymbolTable().getPrimarySymbol(address).getSource() != 
-            ghidra.program.model.symbol.SourceType.DEFAULT;
+        boolean hasKnownName = program.getSymbolTable().getPrimarySymbol(address).getSource() 
+            != ghidra.program.model.symbol.SourceType.DEFAULT;
         
         String mangledName = null;
         if (hasKnownName) {
@@ -318,9 +318,9 @@ public class FunctionSerializer {
             for (Reference ref : dataRefs) {
                 ghidra.program.model.address.Address targetAddr = ref.getToAddress();
                 ghidra.program.model.listing.Function targetFunc = funcManager.getFunctionAt(targetAddr);
-                if (targetFunc != null && 
-                    targetFunc.getEntryPoint().equals(targetAddr) && 
-                    !targetFunc.equals(function)) {
+                if (targetFunc != null 
+                    && targetFunc.getEntryPoint().equals(targetAddr) 
+                    && !targetFunc.equals(function)) {
                     String apiAddr = com.zenyard.decompai.ghidra.api.AddressHelper.fromAddress(targetFunc.getEntryPoint());
                     if (!calls.contains(apiAddr)) {
                         calls.add(apiAddr);

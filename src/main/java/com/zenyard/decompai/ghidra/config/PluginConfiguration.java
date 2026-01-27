@@ -137,10 +137,10 @@ public class PluginConfiguration {
         // Validate log level
         if (logLevel != null) {
             String upperLevel = logLevel.toUpperCase();
-            if (!upperLevel.equals("DEBUG") && !upperLevel.equals("INFO") && 
-                !upperLevel.equals("WARN") && !upperLevel.equals("WARNING") &&
-                !upperLevel.equals("ERROR") && !upperLevel.equals("CRITICAL") &&
-                !upperLevel.equals("FATAL")) {
+            if (!upperLevel.equals("DEBUG") && !upperLevel.equals("INFO") 
+                && !upperLevel.equals("WARN") && !upperLevel.equals("WARNING") 
+                && !upperLevel.equals("ERROR") && !upperLevel.equals("CRITICAL") 
+                && !upperLevel.equals("FATAL")) {
                 throw new IllegalArgumentException("Invalid log_level: " + logLevel);
             }
         }

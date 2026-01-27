@@ -177,8 +177,8 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
                 }
             }
             
-            Msg.info(this, "UploadRevisionsTask: Exited wait loop, revisionsQueued=" + revisionsQueued + 
-                ", revisions.size()=" + revisions.size() + ", shouldStop=" + shouldStop);
+            Msg.info(this, "UploadRevisionsTask: Exited wait loop, revisionsQueued=" + revisionsQueued 
+                + ", revisions.size()=" + revisions.size() + ", shouldStop=" + shouldStop);
             
             // Re-check binaryId from properties in case it was set after we started waiting
             if (binaryId == null) {
@@ -236,8 +236,8 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
                 if (totalRevisions > 0) {
                     uploadProgress = (int)((revIndex / (double)totalRevisions) * 100);
                 }
-                String uploadMessage = "Uploading revision " + currentRevision + "/" + 
-                    (startRevision + totalRevisions) + " (" + uploadProgress + "%)";
+                String uploadMessage = "Uploading revision " + currentRevision + "/" 
+                    + (startRevision + totalRevisions) + " (" + uploadProgress + "%)";
                 if (statusBarManager != null) {
                     statusBarManager.updateTaskStatus(TASK_ID, uploadMessage, uploadProgress, false);
                 }
@@ -258,8 +258,8 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
                 int originalCount = revision.getObjects().size();
                 List<ModelObject> validObjects = dropInvalidObjects(revision.getObjects());
                 
-                Msg.info(this, "DecompAI: Revision " + currentRevision + " - " + originalCount + 
-                    " objects queued, " + validObjects.size() + " valid after validation");
+                Msg.info(this, "DecompAI: Revision " + currentRevision + " - " + originalCount 
+                    + " objects queued, " + validObjects.size() + " valid after validation");
                 
                 if (validObjects.isEmpty()) {
                     // Still update revision number to maintain sequence
@@ -288,15 +288,15 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
                         int revisionRange = nextRevisionProgress - uploadProgress;
                         chunkProgress = uploadProgress + (int)((i / (double)chunks.size()) * revisionRange);
                     }
-                    String chunkMessage = "Uploading chunk " + (i + 1) + "/" + chunks.size() + 
-                        " of revision " + currentRevision + " (" + chunkProgress + "%)";
+                    String chunkMessage = "Uploading chunk " + (i + 1) + "/" + chunks.size() 
+                        + " of revision " + currentRevision + " (" + chunkProgress + "%)";
                     if (statusBarManager != null) {
                         statusBarManager.updateTaskStatus(TASK_ID, chunkMessage, chunkProgress, false);
                     }
                     
                     List<ModelObject> chunk = chunks.get(i);
-                    Msg.info(this, "DecompAI: Uploading chunk " + (i + 1) + "/" + chunks.size() + 
-                        " with " + chunk.size() + " objects to revision " + currentRevision);
+                    Msg.info(this, "DecompAI: Uploading chunk " + (i + 1) + "/" + chunks.size() 
+                        + " with " + chunk.size() + " objects to revision " + currentRevision);
                     
                     AddObjectsToCurrentRevisionParams addParams = new AddObjectsToCurrentRevisionParams();
                     addParams.setObjects(chunk);
@@ -313,8 +313,8 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
                         Msg.info(this, "DecompAI: Successfully uploaded chunk " + (i + 1) + " with " + chunk.size() + " objects");
                     } catch (Exception e) {
                         Msg.showError(this, tool.getActiveWindow(), "Upload Error",
-                            "Failed to upload chunk " + (i + 1) + " of revision " + currentRevision + 
-                            ": " + e.getMessage(), e);
+                            "Failed to upload chunk " + (i + 1) + " of revision " + currentRevision 
+                            + ": " + e.getMessage(), e);
                         if (statusBarManager != null) {
                             statusBarManager.unregisterTask(TASK_ID);
                         }
@@ -389,8 +389,8 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
             // Estimate size (rough - actual size would require serialization)
             int estimatedSize = estimateObjectSize(obj);
             
-            if (!currentChunk.isEmpty() && 
-                currentChunkBytes + estimatedSize > MAX_UPLOAD_BYTES) {
+            if (!currentChunk.isEmpty() 
+                && currentChunkBytes + estimatedSize > MAX_UPLOAD_BYTES) {
                 chunks.add(new ArrayList<>(currentChunk));
                 currentChunk.clear();
                 currentChunkBytes = 0;
@@ -569,9 +569,9 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
                 for (int i = 0; i < sortedRanges.size() - 1; i++) {
                     Range r1 = sortedRanges.get(i);
                     Range r2 = sortedRanges.get(i + 1);
-                    if (r1.getStart() != null && r1.getLength() != null && 
-                        r2.getStart() != null && 
-                        r2.getStart() < r1.getStart() + r1.getLength()) {
+                    if (r1.getStart() != null && r1.getLength() != null 
+                        && r2.getStart() != null 
+                        && r2.getStart() < r1.getStart() + r1.getLength()) {
                         return false; // Overlapping ranges
                     }
                 }
@@ -591,8 +591,8 @@ public class UploadRevisionsTask extends Task implements EventConsumer, EventPro
                     }
                     // Count lines in code (remove trailing newlines first)
                     String codeWithoutTrailingNewlines = code.replaceAll("\n+$", "");
-                    int codeLines = codeWithoutTrailingNewlines.isEmpty() ? 0 : 
-                        codeWithoutTrailingNewlines.split("\n").length;
+                    int codeLines = codeWithoutTrailingNewlines.isEmpty() ? 0 
+                        : codeWithoutTrailingNewlines.split("\n").length;
                     if (codeLines == 0 && !code.isEmpty()) {
                         codeLines = 1; // Single line of code
                     }

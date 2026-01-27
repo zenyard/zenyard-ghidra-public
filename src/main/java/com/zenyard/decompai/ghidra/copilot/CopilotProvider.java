@@ -1,17 +1,16 @@
 package com.zenyard.decompai.ghidra.copilot;
 
 import java.awt.BorderLayout;
-import java.awt.event.ActionEvent;
-import java.awt.event.ActionListener;
+import java.awt.KeyboardFocusManager;
+import java.awt.event.KeyEvent;
+import java.lang.reflect.Field;
 
-import javax.swing.JButton;
 import javax.swing.JPanel;
-import javax.swing.JScrollPane;
-import javax.swing.JTextArea;
-import javax.swing.JTextField;
 
 import docking.ComponentProvider;
+import docking.WindowPosition;
 import ghidra.framework.plugintool.PluginTool;
+import ghidra.util.Msg;
 
 /**
  * A ComponentProvider dockable window implementing the Copilot chat UI.
@@ -19,48 +18,48 @@ import ghidra.framework.plugintool.PluginTool;
  * NOTE: mirrors functionality in decompai_ida/ui/copilot.py
  */
 public class CopilotProvider extends ComponentProvider {
-    
-    private JTextArea chatArea;
-    private JTextField inputField;
-    private JButton sendButton;
+
     private CopilotController controller;
+    private CopilotViewModel viewModel;
+    private CopilotWebViewPanel webViewPanel;
+    private final java.awt.KeyEventDispatcher copilotKeyDispatcher = this::dispatchCopilotKeyEvent;
+    private boolean keyHandlersInstalled;
+    private java.awt.KeyEventDispatcher ghidraKeyDispatcher;
     
     public CopilotProvider(PluginTool tool, CopilotController controller) {
         super(tool, "DecompAI Copilot", "DecompAI");
         this.controller = controller;
+        setDefaultWindowPosition(WindowPosition.BOTTOM);
+        setWindowGroup("Console");
+        setIntraGroupPosition(WindowPosition.STACK);
         
         buildComponent();
     }
     
     public void setController(CopilotController controller) {
         this.controller = controller;
+        if (webViewPanel != null) {
+            webViewPanel.setController(controller);
+        }
+        Msg.info(this, "CopilotProvider controller set: " + (controller != null));
     }
-    
+
+    public void setViewModel(CopilotViewModel viewModel) {
+        this.viewModel = viewModel;
+        if (webViewPanel != null) {
+            webViewPanel.setViewModel(viewModel);
+        }
+    }
+
     private void buildComponent() {
         JPanel mainPanel = new JPanel(new BorderLayout());
-        
-        // Chat area
-        chatArea = new JTextArea(20, 50);
-        chatArea.setEditable(false);
-        chatArea.setLineWrap(true);
-        chatArea.setWrapStyleWord(true);
-        JScrollPane scrollPane = new JScrollPane(chatArea);
-        mainPanel.add(scrollPane, BorderLayout.CENTER);
-        
-        // Input panel
-        JPanel inputPanel = new JPanel(new BorderLayout());
-        inputField = new JTextField();
-        sendButton = new JButton("Send");
-        sendButton.addActionListener(new ActionListener() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                sendMessage();
-            }
-        });
-        
-        inputPanel.add(inputField, BorderLayout.CENTER);
-        inputPanel.add(sendButton, BorderLayout.EAST);
-        mainPanel.add(inputPanel, BorderLayout.SOUTH);
+
+        webViewPanel = new CopilotWebViewPanel();
+        webViewPanel.setController(controller);
+        if (viewModel != null) {
+            webViewPanel.setViewModel(viewModel);
+        }
+        mainPanel.add(webViewPanel, BorderLayout.CENTER);
         
         // In Ghidra 12.0, ComponentProvider may require getComponent() method
         // Store component and provide getComponent() implementation
@@ -75,38 +74,75 @@ public class CopilotProvider extends ComponentProvider {
         return component;
     }
     
-    private void sendMessage() {
-        if (controller == null) {
-            appendMessage("Error: Copilot not initialized. Please configure DecompAI API key.");
-            return;
-        }
-        
-        String message = inputField.getText().trim();
-        if (message.isEmpty()) {
-            return;
-        }
-        
-        // Add user message to chat
-        appendMessage("You: " + message);
-        inputField.setText("");
-        
-        // Send to controller
-        controller.sendMessage(message);
-    }
-    
     public void appendMessage(String message) {
-        chatArea.append(message + "\n");
-        chatArea.setCaretPosition(chatArea.getDocument().getLength());
+        if (viewModel != null) {
+            viewModel.addMessage(message, false);
+            return;
+        }
+        Msg.warn(this, "Copilot message: " + message);
     }
     
     @Override
     public void componentShown() {
-        // Component is shown
+        installKeyHandlers();
     }
     
     @Override
     public void componentHidden() {
-        // Component is hidden
+        removeKeyHandlers();
+    }
+
+    private void installKeyHandlers() {
+        if (keyHandlersInstalled) {
+            return;
+        }
+        KeyboardFocusManager kfm = KeyboardFocusManager.getCurrentKeyboardFocusManager();
+        ghidraKeyDispatcher = findGhidraKeyDispatcher();
+        if (ghidraKeyDispatcher != null) {
+            kfm.removeKeyEventDispatcher(ghidraKeyDispatcher);
+        }
+        kfm.addKeyEventDispatcher(copilotKeyDispatcher);
+        if (ghidraKeyDispatcher != null) {
+            kfm.addKeyEventDispatcher(ghidraKeyDispatcher);
+        }
+        keyHandlersInstalled = true;
+    }
+
+    private void removeKeyHandlers() {
+        if (!keyHandlersInstalled) {
+            return;
+        }
+        KeyboardFocusManager kfm = KeyboardFocusManager.getCurrentKeyboardFocusManager();
+        kfm.removeKeyEventDispatcher(copilotKeyDispatcher);
+        if (ghidraKeyDispatcher != null) {
+            kfm.removeKeyEventDispatcher(ghidraKeyDispatcher);
+            kfm.addKeyEventDispatcher(ghidraKeyDispatcher);
+        }
+        keyHandlersInstalled = false;
+    }
+
+    private boolean dispatchCopilotKeyEvent(KeyEvent event) {
+        if (webViewPanel == null || !webViewPanel.isFocusWithin()) {
+            return false;
+        }
+        webViewPanel.redispatchKeyEvent(event);
+        event.consume();
+        return true;
+    }
+
+    private java.awt.KeyEventDispatcher findGhidraKeyDispatcher() {
+        try {
+            Class<?> clazz = Class.forName("docking.KeyBindingOverrideKeyEventDispatcher");
+            Field instanceField = clazz.getDeclaredField("instance");
+            instanceField.setAccessible(true);
+            Object instance = instanceField.get(null);
+            if (instance instanceof java.awt.KeyEventDispatcher) {
+                return (java.awt.KeyEventDispatcher) instance;
+            }
+        } catch (ReflectiveOperationException e) {
+            Msg.debug(this, "Failed to locate Ghidra key dispatcher: " + e.getMessage());
+        }
+        return null;
     }
 }
 
