@@ -1,5 +1,6 @@
 package com.zenyard.decompai.ghidra.config;
 
+import java.awt.BorderLayout;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
@@ -13,7 +14,6 @@ import javax.swing.JPasswordField;
 import javax.swing.JTextField;
 import javax.swing.border.EmptyBorder;
 
-import docking.DialogComponentProvider;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.util.Msg;
 
@@ -22,13 +22,14 @@ import java.util.concurrent.CompletableFuture;
 import com.zenyard.decompai.ghidra.api.generated.ApiClient;
 import com.zenyard.decompai.ghidra.api.generated.ApiException;
 import com.zenyard.decompai.ghidra.api.generated.api.UserApi;
+import com.zenyard.decompai.ghidra.ui.ZenyardDialogComponentProvider;
 
 /**
  * Configuration dialog for DecompAI API key and server settings.
  * 
  * NOTE: mirrors functionality in decompai_ida/configuration.py show_configuration_dialog_sync()
  */
-public class LicenseConfigDialog extends DialogComponentProvider {
+public class LicenseConfigDialog extends ZenyardDialogComponentProvider {
     
     private final DecompaiOptions options;
     private final PluginTool tool;
@@ -37,7 +38,7 @@ public class LicenseConfigDialog extends DialogComponentProvider {
     private JButton testConnectionButton;
     
     public LicenseConfigDialog(PluginTool tool, DecompaiOptions options) {
-        super("DecompAI Configuration", true, true, true, false);
+        super("DecompAI Configuration", true);
         this.tool = tool;
         this.options = options;
         
@@ -46,6 +47,10 @@ public class LicenseConfigDialog extends DialogComponentProvider {
     }
     
     private void buildPanel() {
+        JPanel contentPanel = new JPanel(new BorderLayout());
+        JPanel titlePanel = createTitlePanel("DecompAI Configuration");
+        contentPanel.add(titlePanel, BorderLayout.NORTH);
+
         JPanel mainPanel = new JPanel(new GridBagLayout());
         mainPanel.setBorder(new EmptyBorder(10, 10, 10, 10));
         
@@ -98,7 +103,8 @@ public class LicenseConfigDialog extends DialogComponentProvider {
         });
         mainPanel.add(testConnectionButton, gbc);
         
-        addWorkPanel(mainPanel);
+        contentPanel.add(mainPanel, BorderLayout.CENTER);
+        addWorkPanel(contentPanel);
         
         // Buttons
         addOKButton();

@@ -7,6 +7,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
+import com.zenyard.decompai.ghidra.api.generated.ApiException;
 import com.zenyard.decompai.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.decompai.ghidra.api.generated.model.BinaryDetails;
 import com.zenyard.decompai.ghidra.api.generated.model.OriginalLanguages;
@@ -14,15 +15,16 @@ import com.zenyard.decompai.ghidra.api.generated.model.PostBinaryBody;
 import com.zenyard.decompai.ghidra.api.generated.model.PostBinaryResponse;
 import com.zenyard.decompai.ghidra.config.DecompaiOptions;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
-import com.zenyard.decompai.ghidra.tasks.EventAwareTask;
+import com.zenyard.decompai.ghidra.tasks.StatusBarAwareTask;
 import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
 import com.zenyard.decompai.ghidra.status.StatusBarManager;
+import com.zenyard.decompai.ghidra.status.StatusBarPriorities;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
 
-import com.zenyard.decompai.ghidra.DecompaiServices;
+import com.zenyard.decompai.ghidra.ZenyardService;
 
 /**
  * Background task to register a binary with the API.
@@ -31,16 +33,15 @@ import com.zenyard.decompai.ghidra.DecompaiServices;
  * 
  * NOTE: mirrors decompai_ida/register_binary_task.py
  */
-public class RegisterBinaryTask extends EventAwareTask {
+public class RegisterBinaryTask extends StatusBarAwareTask {
     
     private static final String TASK_ID = "register_binary";
-    private static final int STATUS_BAR_PRIORITY = com.zenyard.decompai.ghidra.status.StatusBarPriorities.REGISTER_BINARY;
+    private static final int STATUS_BAR_PRIORITY = StatusBarPriorities.REGISTER_BINARY;
     
     private final PluginTool tool;
     private final BinariesApi binariesApi;
     private final DecompaiOptions options;
     private final String binaryInstructions;
-    private final StatusBarManager statusBarManager;
     private final Program program;
     private UUID binaryId;
     
@@ -58,14 +59,13 @@ public class RegisterBinaryTask extends EventAwareTask {
     
     public RegisterBinaryTask(PluginTool tool, BinariesApi binariesApi,
                              DecompaiOptions options, String binaryInstructions, StatusBarManager statusBarManager,
-                             Program program, DecompaiServices services) {
+                             Program program, ZenyardService services) {
         super("Register Binary with DecompAI", true, false, false,
-            services != null ? services.getEventDispatcher() : null);
+            services != null ? services.getEventDispatcher() : null, statusBarManager, TASK_ID, STATUS_BAR_PRIORITY);
         this.tool = tool;
         this.binariesApi = binariesApi;
         this.options = options;
         this.binaryInstructions = binaryInstructions;
-        this.statusBarManager = statusBarManager;
         this.program = program;
     }
     
@@ -161,75 +161,70 @@ public class RegisterBinaryTask extends EventAwareTask {
                 return;
             }
 
-            // Register with status bar
-            if (statusBarManager != null) {
-                statusBarManager.registerTask(TASK_ID, STATUS_BAR_PRIORITY);
-            }
-            
-            // Get binary instructions from properties (set by ShowInitialQuestionsTask)
-            String binaryInstructionsFromProps = props.getString("binary_instructions");
-            String instructionsToUse = (binaryInstructionsFromProps != null && !binaryInstructionsFromProps.isEmpty()) 
-                ? binaryInstructionsFromProps : binaryInstructions;
-            
-            if (statusBarManager != null) {
-                statusBarManager.updateTaskStatus(TASK_ID, "Registering binary...", null, true);
-            }
-            
-            // Get binary path name
-            String binaryName = program.getName();
-            if (binaryName == null || binaryName.isEmpty()) {
-                binaryName = "unknown";
-            }
-            
-            // Extract platform and OS version (simplified - can be enhanced)
-            String platform = extractPlatform();
-            String osVersion = extractOsVersion();
-            
-            // Check for Swift
-            boolean hasSwift = checkForSwift();
-            
-            // Create binary details
-            OriginalLanguages originalLanguages = new OriginalLanguages();
-            originalLanguages.setSwift(hasSwift);
-            
-            BinaryDetails details = new BinaryDetails();
-            if (instructionsToUse != null && !instructionsToUse.isEmpty()) {
-                details.setInstructions(instructionsToUse);
-            }
-            details.setOriginalLanguages(originalLanguages);
-            if (platform != null) {
-                details.setPlatform(BinaryDetails.PlatformEnum.fromValue(platform));
-            }
-            if (osVersion != null && !osVersion.isEmpty()) {
-                details.setOsVersion(osVersion);
-            }
-            
-            // Create binary
-            PostBinaryBody body = new PostBinaryBody();
-            body.setName(binaryName);
-            body.setDetails(details);
-                        
-            PostBinaryResponse response = CompletableFuture.supplyAsync(() -> {
-                try {
-                    return binariesApi.createBinary(body);
-                } catch (com.zenyard.decompai.ghidra.api.generated.ApiException e) {
-                    throw new RuntimeException(e);
+            runWithStatusBar(() -> {
+                StatusBarManager statusBarManager = getStatusBarManager();
+
+                // Get binary instructions from properties (set by ShowInitialQuestionsTask)
+                String binaryInstructionsFromProps = props.getString("binary_instructions");
+                String instructionsToUse = (binaryInstructionsFromProps != null && !binaryInstructionsFromProps.isEmpty()) 
+                    ? binaryInstructionsFromProps : binaryInstructions;
+
+                if (statusBarManager != null) {
+                    statusBarManager.updateTaskStatus(TASK_ID, "Registering binary...", null, true);
                 }
-            }).get();
-            this.binaryId = response.getBinaryId();
-            
-            // Store binary ID
-            props.setString("binary_id", binaryId.toString());
-            
-            // Publish events
-            Map<String, Object> payload = new HashMap<>();
-            payload.put("binaryId", binaryId);
-            publishEvent(new DecompaiEvent(DecompaiEvent.EventType.BINARY_REGISTERED, getTaskTitle(), payload));
-            publishEvent(new DecompaiEvent(DecompaiEvent.EventType.BINARY_ID_AVAILABLE, getTaskTitle(), payload));
-            
-            if (statusBarManager != null) {
-                statusBarManager.unregisterTask(TASK_ID);
-            }
+
+                // Get binary path name
+                String binaryName = program.getName();
+                if (binaryName == null || binaryName.isEmpty()) {
+                    binaryName = "unknown";
+                }
+
+                // Extract platform and OS version (simplified - can be enhanced)
+                String platform = extractPlatform();
+                String osVersion = extractOsVersion();
+
+                // Check for Swift
+                boolean hasSwift = checkForSwift();
+
+                // Create binary details
+                OriginalLanguages originalLanguages = new OriginalLanguages();
+                originalLanguages.setSwift(hasSwift);
+
+                BinaryDetails details = new BinaryDetails();
+                if (instructionsToUse != null && !instructionsToUse.isEmpty()) {
+                    details.setInstructions(instructionsToUse);
+                }
+                details.setOriginalLanguages(originalLanguages);
+                if (platform != null) {
+                    details.setPlatform(BinaryDetails.PlatformEnum.fromValue(platform));
+                }
+                if (osVersion != null && !osVersion.isEmpty()) {
+                    details.setOsVersion(osVersion);
+                }
+
+                // Create binary
+                PostBinaryBody body = new PostBinaryBody();
+                body.setName(binaryName);
+                body.setDetails(details);
+
+                PostBinaryResponse response = CompletableFuture.supplyAsync(() -> {
+                    try {
+                        return binariesApi.createBinary(body);
+                    } catch (ApiException e) {
+                        throw new RuntimeException(e);
+                    }
+                }).get();
+                this.binaryId = response.getBinaryId();
+
+                // Store binary ID
+                props.setString("binary_id", binaryId.toString());
+
+                // Publish events
+                Map<String, Object> payload = new HashMap<>();
+                payload.put("binaryId", binaryId);
+                publishEvent(new DecompaiEvent(DecompaiEvent.EventType.BINARY_REGISTERED, getTaskTitle(), payload));
+                publishEvent(new DecompaiEvent(DecompaiEvent.EventType.BINARY_ID_AVAILABLE, getTaskTitle(), payload));
+            });
             
         } catch (Exception e) {
             // Extract root cause for better error messages
@@ -262,9 +257,8 @@ public class RegisterBinaryTask extends EventAwareTask {
                 errorMessage += "3. Network connectivity is working\n";
                 errorMessage += "4. Firewall/proxy settings allow the connection\n\n";
                 errorMessage += "You can verify the connection in Tools → DecompAI → Configuration...";
-            } else if (rootCause instanceof com.zenyard.decompai.ghidra.api.generated.ApiException) {
-                com.zenyard.decompai.ghidra.api.generated.ApiException apiEx = 
-                    (com.zenyard.decompai.ghidra.api.generated.ApiException) rootCause;
+            } else if (rootCause instanceof ApiException) {
+                ApiException apiEx = (ApiException) rootCause;
                 if (apiEx.getCode() == 401) {
                     errorMessage += "Authentication Error: Invalid API key.\n\n";
                     errorMessage += "Please check your API key in Tools → DecompAI → Configuration...";
@@ -276,9 +270,6 @@ public class RegisterBinaryTask extends EventAwareTask {
             }
             
             Msg.showError(this, tool.getActiveWindow(), "Registration Error", errorMessage, e);
-            if (statusBarManager != null) {
-                statusBarManager.unregisterTask(TASK_ID);
-            }
             throw new RuntimeException("Failed to register binary", e);
         }
     }

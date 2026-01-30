@@ -9,10 +9,11 @@ import javax.swing.SwingUtilities;
 
 import docking.DockingWindowManager;
 import ghidra.framework.plugintool.PluginTool;
+import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 import com.zenyard.decompai.ghidra.events.EventDispatcher;
 import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
-import com.zenyard.decompai.ghidra.DecompaiServices;
+import com.zenyard.decompai.ghidra.ZenyardService;
 
 /**
  * Integrates with Ghidra's native StatusBar to display analysis progress, errors, and hints.
@@ -42,7 +43,7 @@ public class StatusBarManager {
     }
     
     private final PluginTool tool;
-    private DecompaiStatusBarComponent statusBarComponent;
+    private StatusBarComponent statusBarComponent;
     private DecompaiStatusBarProvider statusBarProvider;
     private EventDispatcher eventDispatcher;
     private StatusBarEventController eventController;
@@ -100,7 +101,7 @@ public class StatusBarManager {
                 }
                             
                 // Create status bar component
-                statusBarComponent = new DecompaiStatusBarComponent(tool, viewModel, actions, iconRegistry);
+                statusBarComponent = new StatusBarComponent(tool, viewModel, actions, iconRegistry);
                 statusBarProvider = new DecompaiStatusBarProvider(tool, statusBarComponent);
                 
                 // Wire event controller after component is created
@@ -202,7 +203,8 @@ public class StatusBarManager {
                     .withStatus("Click to analyze with Zenyard");
             } else {
                 StatusBarState current = viewModel.getStateSnapshot();
-                boolean showRerun = current.isShowRerun() || hasPersistedChangesDetected();
+                boolean showRerun = canShowRerun() &&
+                    (current.isShowRerun() || hasPersistedChangesDetected());
                 if (showRerun) {
                     state = StatusBarState.empty()
                         .withShowRerun(true)
@@ -219,46 +221,54 @@ public class StatusBarManager {
         refreshDisplay();
     }
 
-    private boolean hasPersistedChangesDetected() {
+    private Program getCurrentProgramSafely() {
         try {
-            com.zenyard.decompai.ghidra.DecompaiServices services = DecompaiServices.getInstance();
+            ZenyardService services = ZenyardService.getInstance();
             if (services == null) {
-                return false;
+                return null;
             }
-            ghidra.program.model.listing.Program program = services.getCurrentProgram();
+            Program program = services.getCurrentProgram();
             if (program == null || program.isClosed()) {
-                return false;
+                return null;
             }
-            DecompaiProgramProperties props = new DecompaiProgramProperties(program);
-            return "true".equals(props.getString("changes_detected"));
+            return program;
         } catch (Exception e) {
-            return false;
+            return null;
         }
     }
 
-    private boolean hasPersistedInitialQuestionsDeferred() {
-        try {
-            com.zenyard.decompai.ghidra.DecompaiServices services = DecompaiServices.getInstance();
-            if (services == null) {
-                return false;
-            }
-            ghidra.program.model.listing.Program program = services.getCurrentProgram();
-            if (program == null || program.isClosed()) {
-                return false;
-            }
-            DecompaiProgramProperties props = new DecompaiProgramProperties(program);
-            String deferred = props.getString("initial_questions_deferred");
-            String initialUploadComplete = props.getString("initial_upload_complete");
-            return "true".equals(deferred) && !"true".equals(initialUploadComplete);
-        } catch (Exception e) {
+    private boolean canShowRerun() {
+        ZenyardService services = ZenyardService.getInstance();
+        if (services == null || services.getTrackChangesTaskManager() == null) {
             return false;
         }
+        return services.getTrackChangesTaskManager().shouldProcessEvents();
+    }
+
+    private boolean hasPersistedChangesDetected() {
+        Program program = getCurrentProgramSafely();
+        if (program == null) {
+            return false;
+        }
+        DecompaiProgramProperties props = new DecompaiProgramProperties(program);
+        return "true".equals(props.getString("changes_detected"));
+    }
+
+    private boolean hasPersistedInitialQuestionsDeferred() {
+        Program program = getCurrentProgramSafely();
+        if (program == null) {
+            return false;
+        }
+        DecompaiProgramProperties props = new DecompaiProgramProperties(program);
+        String deferred = props.getString("initial_questions_deferred");
+        String initialUploadComplete = props.getString("initial_upload_complete");
+        return "true".equals(deferred) && !"true".equals(initialUploadComplete);
     }
     
     /**
      * Get the status bar component (for testing or advanced usage).
      */
-    public DecompaiStatusBarComponent getComponent() {
+    public StatusBarComponent getComponent() {
         return statusBarComponent;
     }
     

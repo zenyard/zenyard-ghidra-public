@@ -3,7 +3,7 @@ package com.zenyard.decompai.ghidra.illum;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 
 import ghidra.util.task.Task;
 import ghidra.util.task.TaskMonitor;
@@ -15,9 +15,6 @@ import ghidra.util.Msg;
 import ghidra.util.exception.CancelledException;
 
 import com.zenyard.decompai.ghidra.api.generated.api.BinariesApi;
-import com.zenyard.decompai.ghidra.api.generated.model.AddObjectsToCurrentRevisionParams;
-import com.zenyard.decompai.ghidra.api.generated.model.CreateRevisionParams;
-import com.zenyard.decompai.ghidra.api.generated.model.FinishAndAnalyzeCurrentRevisionParams;
 import com.zenyard.decompai.ghidra.api.generated.model.Inference;
 import com.zenyard.decompai.ghidra.api.generated.model.MaybeUnknownInference;
 import com.zenyard.decompai.ghidra.api.generated.model.ModelObject;
@@ -51,7 +48,7 @@ public class IlluminatorController {
      * 
      * Follows the revision-based API workflow matching IDA's UploadRevisionsTask pattern.
      */
-    public void analyzeFunction(Program program, ghidra.program.model.listing.Function function) {
+    public void analyzeFunction(Program program, Function function) {
         Task task = new Task("Analyzing Function with DecompAI", true, false, true) {
             @Override
             public void run(TaskMonitor monitor) {
@@ -95,19 +92,7 @@ public class IlluminatorController {
                     monitor.checkCanceled();
                     
                     // Step 4: Create revision
-                    workflowManager.retryApiRequest(() -> {
-                        CreateRevisionParams createParams = new CreateRevisionParams();
-                        createParams.setNumber(nextRevision);
-                        CompletableFuture.supplyAsync(() -> {
-                            try {
-                                binariesApi.createRevision(binaryId, createParams);
-                                return null;
-                            } catch (com.zenyard.decompai.ghidra.api.generated.ApiException e) {
-                                throw new RuntimeException(e);
-                            }
-                        }).get();
-                        return null;
-                    });
+                    workflowManager.createRevision(binaryId, nextRevision);
                     
                     monitor.setMessage("Adding function to revision...");
                     monitor.setProgress(30);
@@ -118,40 +103,14 @@ public class IlluminatorController {
                     ModelObject obj = new ModelObject();
                     obj.setActualInstance(apiFunction);
                     objects.add(obj);
-                    AddObjectsToCurrentRevisionParams addParams = new AddObjectsToCurrentRevisionParams();
-                    addParams.setObjects(objects);
-                    
-                    workflowManager.retryApiRequest(() -> {
-                        CompletableFuture.supplyAsync(() -> {
-                            try {
-                                binariesApi.addObjectsToCurrentRevision(binaryId, addParams);
-                                return null;
-                            } catch (com.zenyard.decompai.ghidra.api.generated.ApiException e) {
-                                throw new RuntimeException(e);
-                            }
-                        }).get();
-                        return null;
-                    });
+                    workflowManager.addObjectsToRevision(binaryId, objects);
                     
                     monitor.setMessage("Finishing and analyzing revision...");
                     monitor.setProgress(40);
                     monitor.checkCanceled();
                     
                     // Step 6: Finish and analyze revision
-                    FinishAndAnalyzeCurrentRevisionParams finishParams = new FinishAndAnalyzeCurrentRevisionParams();
-                    finishParams.setAnalyzeDependents(false); // analyzeDependents=false for single function
-                    
-                    workflowManager.retryApiRequest(() -> {
-                        CompletableFuture.supplyAsync(() -> {
-                            try {
-                                binariesApi.finishAndAnalyzeCurrentRevision(binaryId, finishParams);
-                                return null;
-                            } catch (com.zenyard.decompai.ghidra.api.generated.ApiException e) {
-                                throw new RuntimeException(e);
-                            }
-                        }).get();
-                        return null;
-                    });
+                    workflowManager.finishAndAnalyzeRevision(binaryId, false);
                     
                     // Step 7: Update revision number atomically
                     props.setInt("revision", nextRevision);
@@ -166,7 +125,7 @@ public class IlluminatorController {
                     List<Inference> convertedInferences = inferences.stream()
                         .map(MaybeUnknownInference::getInference)
                         .filter(inference -> inference != null)
-                            .collect(java.util.stream.Collectors.toList());
+                        .collect(Collectors.toList());
                     
                     monitor.setMessage("Applying inferences...");
                     monitor.setProgress(90);

@@ -1,5 +1,6 @@
 package com.zenyard.decompai.ghidra.initialization;
 
+import java.awt.BorderLayout;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
@@ -10,13 +11,13 @@ import javax.swing.JPanel;
 import javax.swing.JTextArea;
 import javax.swing.border.EmptyBorder;
 
-import docking.DialogComponentProvider;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 
 import com.zenyard.decompai.ghidra.config.DecompaiOptions;
 import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
+import com.zenyard.decompai.ghidra.ui.ZenyardDialogComponentProvider;
 
 /**
  * Dialog shown after initial analysis completes, asking user if they want to start Zenyard analysis.
@@ -25,31 +26,25 @@ import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
  * 
  * NOTE: mirrors decompai_ida/ask_initial_questions_task.py
  */
-public class InitialQuestionsDialog extends DialogComponentProvider {
+public class InitialQuestionsDialog extends ZenyardDialogComponentProvider {
     
     /**
      * Result of the dialog.
      */
     public static class InitialQuestionsResult {
         private final boolean accepted;
-        private final boolean autoApplyResults;
         private final boolean allowPreprocessing;
         private final String binaryInstructions;
         
-        public InitialQuestionsResult(boolean accepted, boolean autoApplyResults, 
+        public InitialQuestionsResult(boolean accepted,
                 boolean allowPreprocessing, String binaryInstructions) {
             this.accepted = accepted;
-            this.autoApplyResults = autoApplyResults;
             this.allowPreprocessing = allowPreprocessing;
             this.binaryInstructions = binaryInstructions;
         }
         
         public boolean isAccepted() {
             return accepted;
-        }
-        
-        public boolean isAutoApplyResults() {
-            return autoApplyResults;
         }
         
         public boolean isAllowPreprocessing() {
@@ -63,14 +58,13 @@ public class InitialQuestionsDialog extends DialogComponentProvider {
     
     private final DecompaiOptions options;
     private final Program program;
-    private JCheckBox autoApplyCheckBox;
     private JCheckBox allowPreprocessingCheckBox;
     private JCheckBox dontShowAgainCheckBox;
     private JTextArea binaryInstructionsArea;
     private InitialQuestionsResult result;
     
     public InitialQuestionsDialog(PluginTool tool, DecompaiOptions options, Program program) {
-        super("Run Zenyard Analysis", true, true, true, false);
+        super("Run Zenyard Analysis", true);
         this.options = options;
         this.program = program;
         this.result = null;
@@ -79,6 +73,10 @@ public class InitialQuestionsDialog extends DialogComponentProvider {
     }
     
     private void buildPanel() {
+        JPanel contentPanel = new JPanel(new BorderLayout());
+        JPanel titlePanel = createTitlePanel("Run Zenyard Analysis");
+        contentPanel.add(titlePanel, BorderLayout.NORTH);
+
         JPanel mainPanel = new JPanel(new GridBagLayout());
         mainPanel.setBorder(new EmptyBorder(10, 10, 10, 10));
         
@@ -96,22 +94,15 @@ public class InitialQuestionsDialog extends DialogComponentProvider {
             "<html>Looks like it's your first time opening this file — Zenyard can analyze it now to save you time and effort.</html>");
         mainPanel.add(descriptionLabel, gbc);
         
-        // Auto-apply checkbox
-        gbc.gridx = 0;
-        gbc.gridy = 1;
-        gbc.gridwidth = 2;
-        autoApplyCheckBox = new JCheckBox("Auto-apply results when ready", true);
-        mainPanel.add(autoApplyCheckBox, gbc);
-        
         // Allow preprocessing checkbox
         gbc.gridx = 0;
-        gbc.gridy = 2;
+        gbc.gridy = 1;
         gbc.gridwidth = 2;
         allowPreprocessingCheckBox = new JCheckBox("Allow Zenyard to improve database before uploading", true);
         mainPanel.add(allowPreprocessingCheckBox, gbc);
         
         // Binary instructions (if enabled)
-        int nextRow = 3;
+        int nextRow = 2;
         if (options.isRequestBinaryInstructions()) {
             gbc.gridx = 0;
             gbc.gridy = nextRow++;
@@ -142,7 +133,8 @@ public class InitialQuestionsDialog extends DialogComponentProvider {
         dontShowAgainCheckBox = new JCheckBox("Don't show this dialog again for this project");
         mainPanel.add(dontShowAgainCheckBox, gbc);
         
-        addWorkPanel(mainPanel);
+        contentPanel.add(mainPanel, BorderLayout.CENTER);
+        addWorkPanel(contentPanel);
         
         // Buttons
         addOKButton();
@@ -161,7 +153,6 @@ public class InitialQuestionsDialog extends DialogComponentProvider {
         
         result = new InitialQuestionsResult(
             true,
-            autoApplyCheckBox.isSelected(),
             allowPreprocessingCheckBox.isSelected(),
             binaryInstructions
         );
@@ -182,7 +173,7 @@ public class InitialQuestionsDialog extends DialogComponentProvider {
     
     @Override
     protected void cancelCallback() {
-        result = new InitialQuestionsResult(false, false, false, null);
+        result = new InitialQuestionsResult(false, false, null);
         
         // Store "don't show again" preference if checked (even on cancel)
         if (dontShowAgainCheckBox.isSelected() && program != null) {

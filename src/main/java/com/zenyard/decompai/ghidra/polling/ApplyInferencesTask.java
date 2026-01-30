@@ -9,7 +9,7 @@ import java.util.Set;
 import com.zenyard.decompai.ghidra.api.generated.model.Inference;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
 import com.zenyard.decompai.ghidra.events.EventDispatcher;
-import com.zenyard.decompai.ghidra.tasks.EventAwareTask;
+import com.zenyard.decompai.ghidra.tasks.StatusBarAwareTask;
 import com.zenyard.decompai.ghidra.illum.InferenceApplier;
 import com.zenyard.decompai.ghidra.illum.FunctionOverviewAnnotator;
 import com.zenyard.decompai.ghidra.storage.InferenceStorage;
@@ -29,7 +29,7 @@ import ghidra.util.task.TaskMonitor;
  * 
  * NOTE: mirrors decompai_ida/trigger_apply_inferences_task.py and apply_inferences_task.py
  */
-public class ApplyInferencesTask extends EventAwareTask {
+public class ApplyInferencesTask extends StatusBarAwareTask {
     
     private static final int BATCH_SIZE = 50; // Apply inferences in batches
     private static final String TASK_ID = "apply_inferences";
@@ -39,7 +39,6 @@ public class ApplyInferencesTask extends EventAwareTask {
     
     private final DownloadInferencesTask.InferenceQueue inferenceQueue;
     private final TrackChangesTaskManager trackChangesTaskManager;
-    private final StatusBarManager statusBarManager;
     private final Program program;
     private final PluginTool tool;
     
@@ -54,11 +53,10 @@ public class ApplyInferencesTask extends EventAwareTask {
                               StatusBarManager statusBarManager,
                               Program program,
                               EventDispatcher eventDispatcher) {
-        super("Apply Inferences", true, true, false, eventDispatcher);
+        super("Apply Inferences", true, true, false, eventDispatcher, statusBarManager, TASK_ID, STATUS_BAR_PRIORITY);
         this.tool = tool;
         this.inferenceQueue = inferenceQueue;
         this.trackChangesTaskManager = trackChangesTaskManager;
-        this.statusBarManager = statusBarManager;
         this.program = program;
         
         // Note: TrackChangesTask event listener is already active and doesn't need to be restarted
@@ -92,14 +90,13 @@ public class ApplyInferencesTask extends EventAwareTask {
     
     @Override
     protected void doRun(TaskMonitor monitor) {
-        try {
-            Msg.info(this, "ApplyInferencesTask: Starting, waiting for new inferences");
-            FunctionOverviewAnnotator overviewAnnotator = new FunctionOverviewAnnotator();
-            InferenceStorage inferenceStorage = new InferenceStorage(program);
-            InferenceApplier inferenceApplier = new InferenceApplier(overviewAnnotator, inferenceStorage, tool);
-            
-            // Main loop: wait for notifications and apply inferences
-            while (!shouldStop && !monitor.isCancelled()) {
+        Msg.info(this, "ApplyInferencesTask: Starting, waiting for new inferences");
+        FunctionOverviewAnnotator overviewAnnotator = new FunctionOverviewAnnotator();
+        InferenceStorage inferenceStorage = new InferenceStorage(program);
+        InferenceApplier inferenceApplier = new InferenceApplier(overviewAnnotator, inferenceStorage, tool);
+        
+        // Main loop: wait for notifications and apply inferences
+        while (!shouldStop && !monitor.isCancelled()) {
             // Wait for new inferences to be available
             synchronized (waitLock) {
                 while (!newInferencesAvailable && !shouldStop && !monitor.isCancelled()) {
@@ -136,26 +133,21 @@ public class ApplyInferencesTask extends EventAwareTask {
                 Msg.info(this, "ApplyInferencesTask: Queue is empty, continuing to wait");
             }
         }
-        
-        } finally {
-            // Cleanup: unregister status bar
-            if (statusBarManager != null) {
-                statusBarManager.unregisterTask(TASK_ID);
-            }
-        }
     }
     
     /**
      * Apply a batch of inferences from the queue.
      */
     private void applyInferencesBatch(TaskMonitor monitor, InferenceApplier inferenceApplier) {
+        StatusBarManager statusBarManager = getStatusBarManager();
+
         // Temporarily disable change tracking to avoid marking objects as dirty
         // when we're applying our own inferences (which trigger rename events, etc.)
         if (trackChangesTaskManager != null) {
             trackChangesTaskManager.setIgnoreEvents(true);
         }
         
-        int totalApplied = 0;
+        int[] totalApplied = new int[] { 0 };
         
         try {                        
             // Count total inferences to apply for progress tracking
@@ -164,41 +156,42 @@ public class ApplyInferencesTask extends EventAwareTask {
                 return;
             }
             
-            // Register with status bar when starting to apply
-            if (statusBarManager != null) {
-                statusBarManager.registerTask(TASK_ID, STATUS_BAR_PRIORITY);
-            }
-                        
-            // Apply all available inferences in batches
-            while (!inferenceQueue.isEmpty() && !shouldStop) {
-                // Collect a batch of inferences from the queue
-                List<Inference> batch = new ArrayList<>();
-                for (int i = 0; i < BATCH_SIZE && !inferenceQueue.isEmpty(); i++) {
-                    Inference inference = inferenceQueue.dequeue();
-                    if (inference != null) {
-                        batch.add(inference);
-                    }
-                }
-                
-                if (!batch.isEmpty()) {
-                    try {
-                        inferenceApplier.applyInferences(program, batch);    
-                        totalApplied += batch.size();            
-                        // Update status bar with progress
-                        if (statusBarManager != null) {
-                            int progressPercent = calculateProgressPercent(totalApplied, totalToApply);
-                            String statusMessage = "Applying results";
-                            statusBarManager.updateTaskStatus(TASK_ID, statusMessage, progressPercent, false);
-                            Msg.info(this, "ApplyInferencesTask: Applied " + batch.size() + " results");
+            try {
+                runWithStatusBar(() -> {
+                    // Apply all available inferences in batches
+                    while (!inferenceQueue.isEmpty() && !shouldStop) {
+                        // Collect a batch of inferences from the queue
+                        List<Inference> batch = new ArrayList<>();
+                        for (int i = 0; i < BATCH_SIZE && !inferenceQueue.isEmpty(); i++) {
+                            Inference inference = inferenceQueue.dequeue();
+                            if (inference != null) {
+                                batch.add(inference);
+                            }
                         }
-                    } catch (Exception e) {
-                        // Error applying inferences - continue with next batch
+
+                        if (!batch.isEmpty()) {
+                            try {
+                                inferenceApplier.applyInferences(program, batch);
+                                totalApplied[0] += batch.size();
+                                // Update status bar with progress
+                                if (statusBarManager != null) {
+                                    int progressPercent = calculateProgressPercent(totalApplied[0], totalToApply);
+                                    String statusMessage = "Applying results";
+                                    statusBarManager.updateTaskStatus(TASK_ID, statusMessage, progressPercent, false);
+                                    Msg.info(this, "ApplyInferencesTask: Applied " + batch.size() + " results");
+                                }
+                            } catch (Exception e) {
+                                // Error applying inferences - continue with next batch
+                            }
+                        }
                     }
-                }
+                });
+            } catch (Exception e) {
+                throw new RuntimeException("Failed while applying inferences", e);
             }
             
             // Update status bar with final messageππ
-            if (statusBarManager != null && totalApplied > 0) {
+            if (statusBarManager != null && totalApplied[0] > 0) {
                 statusBarManager.registerTask(LATEST_RESULTS_TASK_ID, LATEST_RESULTS_PRIORITY);
                 statusBarManager.updateTaskStatus(LATEST_RESULTS_TASK_ID, "Latest results applied", null, false);
             }
@@ -212,10 +205,6 @@ public class ApplyInferencesTask extends EventAwareTask {
                 trackChangesTaskManager.setIgnoreEvents(false);
             }
             
-            // Unregister status bar when done (ensures cleanup even on error or early return)
-            if (statusBarManager != null) {
-                statusBarManager.unregisterTask(TASK_ID);
-            }
         }
     }
     

@@ -12,7 +12,7 @@ import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
 
-import com.zenyard.decompai.ghidra.DecompaiServices;
+import com.zenyard.decompai.ghidra.ZenyardService;
 import com.zenyard.decompai.ghidra.config.DecompaiOptions;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
 import com.zenyard.decompai.ghidra.tasks.EventAwareTask;
@@ -29,14 +29,14 @@ public class ShowInitialQuestionsTask extends EventAwareTask {
     
     private final PluginTool tool;
     private final Program program;
-    private final DecompaiServices services;
+    private final ZenyardService services;
     
     // Event waiting
     private final Object waitLock = new Object();
     private volatile boolean readyForQuestions = false;
     private volatile boolean shouldStop = false;
     
-    public ShowInitialQuestionsTask(PluginTool tool, Program program, DecompaiServices services) {
+    public ShowInitialQuestionsTask(PluginTool tool, Program program, ZenyardService services) {
         super("Show Initial Questions", true, false, false,
             services != null ? services.getEventDispatcher() : null);
         this.tool = tool;
@@ -133,7 +133,6 @@ public class ShowInitialQuestionsTask extends EventAwareTask {
             props.setString("asked_initial_questions", "true");
             
             // Store preferences
-            props.setString("auto_apply_results", String.valueOf(result.isAutoApplyResults()));
             props.setString("allow_preprocessing", String.valueOf(result.isAllowPreprocessing()));
             if (result.getBinaryInstructions() != null) {
                 props.setString("binary_instructions", result.getBinaryInstructions());

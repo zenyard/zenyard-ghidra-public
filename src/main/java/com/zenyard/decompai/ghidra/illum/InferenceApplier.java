@@ -225,16 +225,22 @@ public class InferenceApplier {
         }
         Msg.warn(this, "Unhandled inference map type '" + typeValue + "' at " + address);
     }
+
+    private Function getFunctionAtAddress(Program program, Address address) {
+        FunctionManager funcManager = program.getFunctionManager();
+        Function function = funcManager.getFunctionAt(address);
+        if (function == null) {
+            Msg.warn(this, "No function at address " + address);
+        }
+        return function;
+    }
     
     /**
      * Apply function overview inference.
      */
     private void applyFunctionOverview(Program program, Address address, FunctionOverview overview) {
-        FunctionManager funcManager = program.getFunctionManager();
-        Function function = funcManager.getFunctionAt(address);
-        
+        Function function = getFunctionAtAddress(program, address);
         if (function == null) {
-            Msg.warn(this, "No function at address " + address);
             return;
         }
         
@@ -332,11 +338,8 @@ public class InferenceApplier {
             variableRenamer.applyVariablesMapping(program, address, mapping);
             return;
         }
-        FunctionManager funcManager = program.getFunctionManager();
-        Function function = funcManager.getFunctionAt(address);
-        
+        Function function = getFunctionAtAddress(program, address);
         if (function == null) {
-            Msg.warn(this, "No function at address " + address);
             return;
         }
         
@@ -511,11 +514,8 @@ public class InferenceApplier {
             parameterRenamer.applyParametersMapping(program, address, mapping);
             return;
         }
-        FunctionManager funcManager = program.getFunctionManager();
-        Function function = funcManager.getFunctionAt(address);
-        
+        Function function = getFunctionAtAddress(program, address);
         if (function == null) {
-            Msg.warn(this, "No function at address " + address);
             return;
         }
         

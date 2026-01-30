@@ -21,6 +21,7 @@ import com.zenyard.decompai.ghidra.storage.InferenceStorage;
 import com.zenyard.decompai.ghidra.storage.SyncStatus;
 import com.zenyard.decompai.ghidra.storage.SyncStatusStorage;
 import com.zenyard.decompai.ghidra.status.StatusBarManager;
+import com.zenyard.decompai.ghidra.status.StatusBarPriorities;
 import com.zenyard.decompai.ghidra.util.FunctionSerializer;
 import com.zenyard.decompai.ghidra.util.GlobalVariableSerializer;
 import com.zenyard.decompai.ghidra.util.ObjectGraph;
@@ -34,13 +35,14 @@ import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 import ghidra.util.task.Task;
+import ghidra.util.task.TaskLauncher;
 import ghidra.util.task.TaskMonitor;
 
 /**
  * Background task to scan database for objects and queue revisions.
  * Waits for UPLOAD_ORIGINAL_FILES_COMPLETE or INITIAL_DIALOG_CONFIRMED events.
  * Publishes REVISIONS_QUEUED event with revisions in payload.
- * Shows progress via status bar instead of modal dialog.
+ * Shows a modal progress dialog while preparing revisions, with status bar updates.
  * 
  * NOTE: mirrors decompai_ida/queue_revisions_task.py
  */
@@ -48,7 +50,10 @@ public class QueueRevisionsTask extends EventAwareTask {
     
     private static final int MAX_OBJECTS_IN_REVISION = 100; // Configurable
     private static final String TASK_ID = "queue_revisions";
-    private static final int STATUS_BAR_PRIORITY = com.zenyard.decompai.ghidra.status.StatusBarPriorities.QUEUE_REVISIONS;
+    private static final String PREPARING_MESSAGE =
+        "Zenyard is preparing your data for analysis — this may take a little while";
+    private static final int PREPARING_DIALOG_WIDTH = 640;
+    private static final int STATUS_BAR_PRIORITY = StatusBarPriorities.QUEUE_REVISIONS;
     
     private final PluginTool tool;
     private final Program program;
@@ -152,10 +157,10 @@ public class QueueRevisionsTask extends EventAwareTask {
             
             final boolean isInitialUpload = !"true".equals(uploaded);
             
-            // Launch background task without modal dialog
+            // Launch processing task with a modal dialog and progress bar
             ProcessRevisionsTask processTask = new ProcessRevisionsTask(
                 tool, program, statusBarManager, isInitialUpload, revisions, getEventDispatcher(), this);
-            com.zenyard.decompai.ghidra.DecompaiGhidraPlugin.executeBackgroundTask(processTask);
+            new TaskLauncher(processTask, tool.getActiveWindow(), 0, PREPARING_DIALOG_WIDTH);
             
             // Processing is now handled by ProcessRevisionsTask, which will publish events
             
@@ -242,8 +247,6 @@ public class QueueRevisionsTask extends EventAwareTask {
             }
         } catch (Exception e) {
             Msg.warn(this, "Can't read object at " + address + ": " + e.getMessage());
-            // Mark clean so we don't try again until next change
-            syncStatusStorage.setSyncStatus(address, status.withDirty(false));
             return;
         }
         
@@ -274,22 +277,14 @@ public class QueueRevisionsTask extends EventAwareTask {
         
         // Convert to ModelObject list
         List<ModelObject> objects = new ArrayList<>();
+        List<QueuedObject> queuedObjects = new ArrayList<>();
         for (BufferedObject buffered : bufferedObjects) {
             objects.add(buffered.object);
+            queuedObjects.add(new QueuedObject(buffered.address, buffered.hash));
         }
         
-        Revision revision = new Revision(objects, isInitialUpload);
-        
-        // Mark all objects as uploaded and clean
-        for (BufferedObject buffered : bufferedObjects) {
-            SyncStatus newStatus = new SyncStatus(
-                Optional.of(buffered.hash),
-                false // not dirty
-            );
-            syncStatusStorage.setSyncStatus(buffered.address, newStatus);
-            Msg.debug(this, "Object marked clean at " + buffered.address);
-        }
-        
+        Revision revision = new Revision(objects, queuedObjects, isInitialUpload);
+
         Msg.info(this, "DecompAI: Queued revision with " + objects.size() + " objects");
         return revision;
     }
@@ -347,7 +342,7 @@ public class QueueRevisionsTask extends EventAwareTask {
             List<Address> orderedAddresses = ObjectGraph.getObjectsInApproxTopoOrder(program, dirtySymbols);
             
             // Initialize progress monitor for processing phase
-            monitor.setMessage("Zenyard is preparing your data for analysis — this may take a little while...");
+            monitor.setMessage(PREPARING_MESSAGE + "...");
             monitor.initialize(orderedAddresses.size());
             monitor.setIndeterminate(false);
             
@@ -375,11 +370,9 @@ public class QueueRevisionsTask extends EventAwareTask {
                     
                     // Update message with percentage
                     int percentage = (int)(100.0 * processed / orderedAddresses.size());
-                    monitor.setMessage("Zenyard is preparing your data for analysis — this may take a little while (" + percentage + "%)");
+                    monitor.setMessage(PREPARING_MESSAGE + " (" + percentage + "%)");
                 } catch (Exception e) {
                     Msg.warn(this, "Failed to process object at " + address + ": " + e.getMessage());
-                    // Mark clean to avoid retry loops
-                    syncStatusStorage.markClean(address);
                 }
             }
             
@@ -435,7 +428,7 @@ public class QueueRevisionsTask extends EventAwareTask {
         DecompaiProgramProperties props = new DecompaiProgramProperties(program);
         props.setString("database_dirty", "true");
     }
-    
+
     /**
      * Buffered object with address, object, and hash.
      */
@@ -450,21 +443,48 @@ public class QueueRevisionsTask extends EventAwareTask {
             this.hash = hash;
         }
     }
+
+    /**
+     * Queued object metadata (used to clear dirty list after upload).
+     */
+    public static class QueuedObject {
+        private final Address address;
+        private final String hash;
+
+        public QueuedObject(Address address, String hash) {
+            this.address = address;
+            this.hash = hash;
+        }
+
+        public Address getAddress() {
+            return address;
+        }
+
+        public String getHash() {
+            return hash;
+        }
+    }
     
     /**
      * Revision data class.
      */
     public static class Revision {
         private final List<ModelObject> objects;
+        private final List<QueuedObject> queuedObjects;
         private final boolean isInitialAnalysis;
         
-        public Revision(List<ModelObject> objects, boolean isInitialAnalysis) {
+        public Revision(List<ModelObject> objects, List<QueuedObject> queuedObjects, boolean isInitialAnalysis) {
             this.objects = objects;
+            this.queuedObjects = queuedObjects;
             this.isInitialAnalysis = isInitialAnalysis;
         }
         
         public List<ModelObject> getObjects() {
             return objects;
+        }
+
+        public List<QueuedObject> getQueuedObjects() {
+            return queuedObjects;
         }
         
         public boolean isInitialAnalysis() {

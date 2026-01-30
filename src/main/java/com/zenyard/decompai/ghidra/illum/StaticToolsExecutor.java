@@ -1,9 +1,12 @@
 package com.zenyard.decompai.ghidra.illum;
 
+import java.io.File;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 
 import ghidra.util.task.TaskMonitor;
 import ghidra.framework.plugintool.PluginTool;
@@ -13,9 +16,6 @@ import ghidra.util.Msg;
 import ghidra.util.exception.CancelledException;
 
 import com.zenyard.decompai.ghidra.api.generated.api.BinariesApi;
-import com.zenyard.decompai.ghidra.api.generated.model.AddObjectsToCurrentRevisionParams;
-import com.zenyard.decompai.ghidra.api.generated.model.CreateRevisionParams;
-import com.zenyard.decompai.ghidra.api.generated.model.FinishAndAnalyzeCurrentRevisionParams;
 import com.zenyard.decompai.ghidra.api.generated.model.Function;
 import com.zenyard.decompai.ghidra.api.generated.model.Inference;
 import com.zenyard.decompai.ghidra.api.generated.model.MaybeUnknownInference;
@@ -104,23 +104,15 @@ public class StaticToolsExecutor {
                 
                 // Step 2: Serialize binary and upload original file
                 BinarySerializer.SerializedBinary serializedBinary = BinarySerializer.serializeBinary(program);
-                workflowManager.retryApiRequest(() -> {
-                    CompletableFuture.supplyAsync(() -> {
-                        try {
-                            // Convert byte array to File for upload
-                            java.io.File tempFile = java.io.File.createTempFile("binary_upload_", ".bin");
-                            java.nio.file.Files.write(tempFile.toPath(), serializedBinary.getData());
-                            try {
-                                binariesApi.putOriginalFile(serializedBinary.getName(), binaryId, tempFile, serializedBinary.getType());
-                            } finally {
-                                tempFile.delete();
-                            }
-                            return null;
-                        } catch (java.io.IOException | com.zenyard.decompai.ghidra.api.generated.ApiException e) {
-                            throw new RuntimeException(e);
-                        }
-                    }).get();
-                    return null;
+                workflowManager.executeApiRequest(() -> {
+                    // Convert byte array to File for upload
+                    File tempFile = File.createTempFile("binary_upload_", ".bin");
+                    Files.write(tempFile.toPath(), serializedBinary.getData());
+                    try {
+                        binariesApi.putOriginalFile(serializedBinary.getName(), binaryId, tempFile, serializedBinary.getType());
+                    } finally {
+                        tempFile.delete();
+                    }
                 });
                 
                 monitor.setMessage("Serializing functions...");
@@ -156,19 +148,7 @@ public class StaticToolsExecutor {
                 int currentRevision = workflowManager.getCurrentRevision(props);
                 int nextRevision = currentRevision + 1;
                 
-                workflowManager.retryApiRequest(() -> {
-                    CreateRevisionParams createParams = new CreateRevisionParams();
-                    createParams.setNumber(nextRevision);
-                    CompletableFuture.supplyAsync(() -> {
-                        try {
-                            binariesApi.createRevision(binaryId, createParams);
-                            return null;
-                        } catch (com.zenyard.decompai.ghidra.api.generated.ApiException e) {
-                            throw new RuntimeException(e);
-                        }
-                    }).get();
-                    return null;
-                });
+                workflowManager.createRevision(binaryId, nextRevision);
                 
                 monitor.setMessage("Adding objects to revision...");
                 monitor.setProgress(40);
@@ -191,19 +171,7 @@ public class StaticToolsExecutor {
                     if (currentChunk.size() >= MAX_OBJECTS_PER_REVISION 
                         || (totalSize + objSize > MAX_UPLOAD_BYTES && !currentChunk.isEmpty())) {
                         // Upload current chunk
-                        AddObjectsToCurrentRevisionParams addParams = new AddObjectsToCurrentRevisionParams();
-                        addParams.setObjects(currentChunk);
-                        workflowManager.retryApiRequest(() -> {
-                            CompletableFuture.supplyAsync(() -> {
-                                try {
-                                    binariesApi.addObjectsToCurrentRevision(binaryId, addParams);
-                                    return null;
-                                } catch (com.zenyard.decompai.ghidra.api.generated.ApiException e) {
-                                    throw new RuntimeException(e);
-                                }
-                            }).get();
-                            return null;
-                        });
+                        workflowManager.addObjectsToRevision(binaryId, currentChunk);
                         currentChunk.clear();
                         totalSize = 0;
                     }
@@ -213,19 +181,7 @@ public class StaticToolsExecutor {
                 
                 // Upload remaining chunk
                 if (!currentChunk.isEmpty()) {
-                    AddObjectsToCurrentRevisionParams addParams = new AddObjectsToCurrentRevisionParams();
-                    addParams.setObjects(currentChunk);
-                    workflowManager.retryApiRequest(() -> {
-                        CompletableFuture.supplyAsync(() -> {
-                            try {
-                                binariesApi.addObjectsToCurrentRevision(binaryId, addParams);
-                                return null;
-                            } catch (com.zenyard.decompai.ghidra.api.generated.ApiException e) {
-                                throw new RuntimeException(e);
-                            }
-                        }).get();
-                        return null;
-                    });
+                    workflowManager.addObjectsToRevision(binaryId, currentChunk);
                 }
                 
                 monitor.setMessage("Finishing and analyzing revision...");
@@ -233,20 +189,7 @@ public class StaticToolsExecutor {
                 monitor.checkCanceled();
                 
                 // Step 6: Finish and analyze revision
-                FinishAndAnalyzeCurrentRevisionParams finishParams = new FinishAndAnalyzeCurrentRevisionParams();
-                finishParams.setAnalyzeDependents(true); // analyzeDependents=true for program-level
-                
-                workflowManager.retryApiRequest(() -> {
-                    CompletableFuture.supplyAsync(() -> {
-                        try {
-                            binariesApi.finishAndAnalyzeCurrentRevision(binaryId, finishParams);
-                            return null;
-                        } catch (com.zenyard.decompai.ghidra.api.generated.ApiException e) {
-                            throw new RuntimeException(e);
-                        }
-                    }).get();
-                    return null;
-                });
+                workflowManager.finishAndAnalyzeRevision(binaryId, true);
                 
                 // Step 7: Update revision number atomically
                 props.setInt("revision", nextRevision);
@@ -268,7 +211,7 @@ public class StaticToolsExecutor {
                     List<Inference> convertedInferences = inferences.stream()
                         .map(MaybeUnknownInference::getInference)
                         .filter(inference -> inference != null)
-                        .collect(java.util.stream.Collectors.toList());
+                        .collect(Collectors.toList());
                     InferenceStorage inferenceStorage = new InferenceStorage(program);
                     InferenceApplier inferenceApplier = new InferenceApplier(overviewAnnotator, inferenceStorage, tool);
                     inferenceApplier.applyInferences(program, convertedInferences);
@@ -334,19 +277,7 @@ public class StaticToolsExecutor {
                 monitor.checkCanceled();
                 
                 // Step 4: Create revision
-                workflowManager.retryApiRequest(() -> {
-                    CreateRevisionParams createParams = new CreateRevisionParams();
-                    createParams.setNumber(nextRevision);
-                    CompletableFuture.supplyAsync(() -> {
-                        try {
-                            binariesApi.createRevision(binaryId, createParams);
-                            return null;
-                        } catch (com.zenyard.decompai.ghidra.api.generated.ApiException e) {
-                            throw new RuntimeException(e);
-                        }
-                    }).get();
-                    return null;
-                });
+                workflowManager.createRevision(binaryId, nextRevision);
                 
                 monitor.setMessage("Adding function to revision...");
                 monitor.setProgress(30);
@@ -357,40 +288,14 @@ public class StaticToolsExecutor {
                 ModelObject obj = new ModelObject();
                 obj.setActualInstance(apiFunction);
                 objects.add(obj);
-                AddObjectsToCurrentRevisionParams addParams = new AddObjectsToCurrentRevisionParams();
-                addParams.setObjects(objects);
-                
-                workflowManager.retryApiRequest(() -> {
-                    CompletableFuture.supplyAsync(() -> {
-                        try {
-                            binariesApi.addObjectsToCurrentRevision(binaryId, addParams);
-                            return null;
-                        } catch (com.zenyard.decompai.ghidra.api.generated.ApiException e) {
-                            throw new RuntimeException(e);
-                        }
-                    }).get();
-                    return null;
-                });
+                workflowManager.addObjectsToRevision(binaryId, objects);
                 
                 monitor.setMessage("Finishing and analyzing revision...");
                 monitor.setProgress(40);
                 monitor.checkCanceled();
                 
                 // Step 6: Finish and analyze revision
-                FinishAndAnalyzeCurrentRevisionParams finishParams = new FinishAndAnalyzeCurrentRevisionParams();
-                finishParams.setAnalyzeDependents(false); // analyzeDependents=false for single function
-                
-                workflowManager.retryApiRequest(() -> {
-                    CompletableFuture.supplyAsync(() -> {
-                        try {
-                            binariesApi.finishAndAnalyzeCurrentRevision(binaryId, finishParams);
-                            return null;
-                        } catch (com.zenyard.decompai.ghidra.api.generated.ApiException e) {
-                            throw new RuntimeException(e);
-                        }
-                    }).get();
-                    return null;
-                });
+                workflowManager.finishAndAnalyzeRevision(binaryId, false);
                 
                 // Step 7: Update revision number atomically
                 props.setInt("revision", nextRevision);
@@ -412,7 +317,7 @@ public class StaticToolsExecutor {
                     List<Inference> convertedInferences = inferences.stream()
                         .map(MaybeUnknownInference::getInference)
                         .filter(inference -> inference != null)
-                        .collect(java.util.stream.Collectors.toList());
+                        .collect(Collectors.toList());
                     InferenceStorage inferenceStorage = new InferenceStorage(program);
                     InferenceApplier inferenceApplier = new InferenceApplier(overviewAnnotator, inferenceStorage, tool);
                     inferenceApplier.applyInferences(program, convertedInferences);

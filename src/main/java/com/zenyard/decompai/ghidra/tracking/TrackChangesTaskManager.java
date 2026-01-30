@@ -74,4 +74,8 @@ public class TrackChangesTaskManager {
             trackChangesTask.setInitialAnalysisComplete(complete);
         }
     }
+
+    public boolean shouldProcessEvents() {
+        return trackChangesTask != null && trackChangesTask.shouldProcessEvents();
+    }
 }

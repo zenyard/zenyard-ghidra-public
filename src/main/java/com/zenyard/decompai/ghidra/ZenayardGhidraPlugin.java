@@ -10,7 +10,6 @@ import docking.ActionContext;
 import docking.action.DockingAction;
 import docking.action.MenuData;
 import ghidra.app.events.FirstTimeAnalyzedPluginEvent;
-import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.plugin.ProgramPlugin;
 import ghidra.framework.plugintool.PluginEvent;
 import ghidra.framework.plugintool.PluginInfo;
@@ -62,20 +61,20 @@ import ghidra.util.task.TaskMonitor;
     status = PluginStatus.RELEASED,
     packageName = "com.zenyard.decompai.ghidra",
     category = "Reverse Engineering",
-    shortDescription = "DecompAI - AI-powered reverse engineering assistance",
+    shortDescription = "Zenyard - AI-powered reverse engineering assistance",
     description = "Provides AI-powered reverse engineering assistance through the DecompAI service. " 
                   + "Features include function/variable highlighting, renaming, and LLM-assisted analysis.",
     eventsConsumed = { FirstTimeAnalyzedPluginEvent.class }
 )
-public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer {
+public class ZenayardGhidraPlugin extends ProgramPlugin implements EventConsumer {
     
     private DecompaiOptions options;
-    private DecompaiServices services;
+    private ZenyardService services;
     private TrackChangesTaskManager trackChangesTaskManager;
     private ApplyInferencesTask applyInferencesTask; // Reference to continuous apply task
     private static final String WAITING_FOR_GHIDRA_TASK_ID = "waiting_for_ghidra";
     
-    public DecompaiGhidraPlugin(PluginTool tool) {
+    public ZenayardGhidraPlugin(PluginTool tool) {
         super(tool);
         
         // Initialize options (reads from config file)
@@ -116,7 +115,7 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
         
         // Clear singleton instance when plugin is disposed
         if (services != null) {
-            com.zenyard.decompai.ghidra.DecompaiServices.clearInstance();
+            com.zenyard.decompai.ghidra.ZenyardService.clearInstance();
         }
         // ProgramManagerListener removed in Ghidra 12.0 - no need to unregister
         super.dispose();
@@ -128,10 +127,11 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
         
         if (event instanceof FirstTimeAnalyzedPluginEvent) {
             FirstTimeAnalyzedPluginEvent ev = (FirstTimeAnalyzedPluginEvent) event;
+            Msg.debug(this, "ZenayardGhidraPlugin: Received FirstTimeAnalyzedPluginEvent");
             Program program = ev.getProgram();
             if (program != null && program.equals(currentProgram)) {
                 Swing.runLater(() -> handleAnalysisComplete(program));
-            }
+            }    
         }
     }
     
@@ -141,7 +141,7 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
         
         // Initialize services when a program is activated
         if (services == null) {
-            services = new DecompaiServices(this, options);
+            services = new ZenyardService(this, options);
         }
         
         services.onProgramActivated(program);
@@ -167,18 +167,12 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
         String alreadyCompleted = props.getString("initial_analysis_complete");
         
         if (!"true".equals(alreadyCompleted)) {
-            // // Check if program has already been analyzed
-            // if (GhidraProgramUtilities.isAnalyzed(program)) {
-            //     // Program was already analyzed - mark as complete and notify immediately
-            //     handleAnalysisComplete(program);
-            // } else {
-                // Analysis not complete - register status bar task to show "Waiting for Ghidra"
-                if (statusBarManager != null) {
-                    statusBarManager.registerTask(WAITING_FOR_GHIDRA_TASK_ID, 
-                        StatusBarPriorities.WAITING_FOR_GHIDRA);
-                    statusBarManager.updateTaskStatus(WAITING_FOR_GHIDRA_TASK_ID, "Waiting for Ghidra", null, true);
-                }
-            // }
+            // Analysis not complete - register status bar task to show "Waiting for Ghidra"
+            if (statusBarManager != null) {
+                statusBarManager.registerTask(WAITING_FOR_GHIDRA_TASK_ID, 
+                    StatusBarPriorities.WAITING_FOR_GHIDRA);
+                statusBarManager.updateTaskStatus(WAITING_FOR_GHIDRA_TASK_ID, "Waiting for Ghidra", null, true);
+            }
         } else if (trackChangesTaskManager != null) {
             // Analysis already complete from a previous session; re-enable change tracking.
             trackChangesTaskManager.setInitialAnalysisComplete(true);
@@ -248,7 +242,6 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
     @Override
     protected void programClosed(Program program) {
         super.programClosed(program);
-        
         if (services != null) {
             services.onProgramClosed(program);
         }
@@ -275,7 +268,7 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
             @Override
             public void actionPerformed(ActionContext context) {
                 if (services == null) {
-                    services = new DecompaiServices(DecompaiGhidraPlugin.this, options);
+                    services = new ZenyardService(ZenayardGhidraPlugin.this, options);
                     Program program = getCurrentProgram();
                     if (program != null) {
                         services.onProgramActivated(program);
@@ -309,7 +302,7 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
         return options;
     }
     
-    public DecompaiServices getServices() {
+    public ZenyardService getServices() {
         return services;
     }
     
@@ -428,8 +421,6 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
             return;
         }
         
-        waitForAnalysisCompletion(program);
-
         DecompaiProgramProperties props = new DecompaiProgramProperties(program);
         
         // Check if we've already marked it as complete (avoid duplicate notifications)
@@ -461,23 +452,6 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
         }
     }
 
-    private void waitForAnalysisCompletion(Program program) {
-        AutoAnalysisManager analysisManager = AutoAnalysisManager.getAnalysisManager(program);
-        if (analysisManager == null) {
-            return;
-        }
-
-        Msg.debug(this, "Waiting for analysis completion");
-        while (analysisManager.isAnalyzing() && !program.isClosed()) {
-            try {
-                Thread.sleep(250);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            }
-        }
-        Msg.debug(this, "Analysis completion complete");
-    }
     
     @Override
     public Set<DecompaiEvent.EventType> getSubscribedEventTypes() {
@@ -489,13 +463,13 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
     @Override
     public void handleEvent(DecompaiEvent event) {
         if (event.getType() == DecompaiEvent.EventType.INITIAL_UPLOAD_COMPLETE) {
-            Msg.info(this, "DecompaiGhidraPlugin: Received INITIAL_UPLOAD_COMPLETE event");
+            Msg.info(this, "ZenayardGhidraPlugin: Received INITIAL_UPLOAD_COMPLETE event");
             // Show InitialUploadMessageDialog after upload completes
             SwingUtilities.invokeLater(() -> {
                 if (currentProgram != null && !currentProgram.isClosed()) {
                     handleInitialUploadComplete(currentProgram);
                 } else {
-                    Msg.warn(this, "DecompaiGhidraPlugin: Cannot show dialog - program is null or closed");
+                    Msg.warn(this, "ZenayardGhidraPlugin: Cannot show dialog - program is null or closed");
                 }
             });
         }
@@ -515,11 +489,10 @@ public class DecompaiGhidraPlugin extends ProgramPlugin implements EventConsumer
             try {
                 task.monitoredRun(monitor);
             } catch (Exception e) {
-                Msg.error(DecompaiGhidraPlugin.class, "Error executing background task: " + task.getTaskTitle(), e);
+                Msg.error(ZenayardGhidraPlugin.class, "Error executing background task: " + task.getTaskTitle(), e);
             }
         });
         taskThread.setDaemon(true);
         taskThread.start();
     }
 }
-

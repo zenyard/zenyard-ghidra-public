@@ -4,9 +4,13 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+import com.zenyard.decompai.ghidra.api.generated.ApiException;
 import com.zenyard.decompai.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.decompai.ghidra.api.generated.model.AddObjectsToCurrentRevisionParams;
 import com.zenyard.decompai.ghidra.api.generated.model.CreateRevisionParams;
@@ -17,9 +21,12 @@ import com.zenyard.decompai.ghidra.api.generated.model.ModelObject;
 import com.zenyard.decompai.ghidra.api.generated.model.Range;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
 import com.zenyard.decompai.ghidra.events.EventDispatcher;
-import com.zenyard.decompai.ghidra.tasks.EventAwareTask;
+import com.zenyard.decompai.ghidra.tasks.StatusBarAwareTask;
 import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
+import com.zenyard.decompai.ghidra.storage.SyncStatus;
+import com.zenyard.decompai.ghidra.storage.SyncStatusStorage;
 import com.zenyard.decompai.ghidra.status.StatusBarManager;
+import com.zenyard.decompai.ghidra.status.StatusBarPriorities;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
@@ -32,15 +39,15 @@ import ghidra.util.task.TaskMonitor;
  * 
  * NOTE: mirrors decompai_ida/upload_revisions_task.py
  */
-public class UploadRevisionsTask extends EventAwareTask {
+public class UploadRevisionsTask extends StatusBarAwareTask {
     
     private static final int MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10MB
     private static final String TASK_ID = "upload_revisions";
-    private static final int STATUS_BAR_PRIORITY = com.zenyard.decompai.ghidra.status.StatusBarPriorities.UPLOAD_REVISIONS;
+    private static final int STATUS_BAR_PRIORITY = StatusBarPriorities.UPLOAD_REVISIONS;
+    private static final ConcurrentHashMap<Program, AtomicBoolean> RUNNING_UPLOADS = new ConcurrentHashMap<>();
     
     private final PluginTool tool;
     private final BinariesApi binariesApi;
-    private final StatusBarManager statusBarManager;
     private final Program program;
     
     // Event waiting
@@ -54,10 +61,9 @@ public class UploadRevisionsTask extends EventAwareTask {
     
     public UploadRevisionsTask(PluginTool tool, BinariesApi binariesApi,
                                StatusBarManager statusBarManager, Program program, EventDispatcher eventDispatcher) {
-        super("Upload Revisions", true, false, false, eventDispatcher);
+        super("Upload Revisions", true, false, false, eventDispatcher, statusBarManager, TASK_ID, STATUS_BAR_PRIORITY);
         this.tool = tool;
         this.binariesApi = binariesApi;
-        this.statusBarManager = statusBarManager;
         this.program = program;
     }
     
@@ -123,7 +129,13 @@ public class UploadRevisionsTask extends EventAwareTask {
     
     @Override
     protected void doRun(TaskMonitor monitor) {
+        AtomicBoolean runningFlag = RUNNING_UPLOADS.computeIfAbsent(program, key -> new AtomicBoolean(false));
+        if (!runningFlag.compareAndSet(false, true)) {
+            Msg.warn(this, "UploadRevisionsTask: Another upload task is already running for this program. Skipping.");
+            return;
+        }
         try {
+            try {
             // Get binary ID from properties
             DecompaiProgramProperties props = new DecompaiProgramProperties(program);
             String binaryIdStr = props.getString("binary_id");
@@ -194,36 +206,32 @@ public class UploadRevisionsTask extends EventAwareTask {
             
             Msg.info(this, "UploadRevisionsTask: Starting upload of " + revisions.size() + " revision(s) for binaryId: " + binaryId);
             
-            // Register with status bar
-            if (statusBarManager != null) {
-                statusBarManager.registerTask(TASK_ID, STATUS_BAR_PRIORITY);
-            }
-            
-            int currentRevision = getCurrentRevision();
-            int totalRevisions = revisions.size();
-            int startRevision = currentRevision;
-            
-            for (int revIndex = 0; revIndex < revisions.size(); revIndex++) {
-                if (monitor.isCancelled() || shouldStop) {
-                    if (statusBarManager != null) {
-                        statusBarManager.unregisterTask(TASK_ID);
+            runWithStatusBar(() -> {
+                StatusBarManager statusBarManager = getStatusBarManager();
+                SyncStatusStorage syncStatusStorage = new SyncStatusStorage(program);
+
+                int currentRevision = getCurrentRevision();
+                int totalRevisions = revisions.size();
+                int startRevision = currentRevision;
+
+                for (int revIndex = 0; revIndex < revisions.size(); revIndex++) {
+                    if (monitor.isCancelled() || shouldStop) {
+                        return;
                     }
-                    return;
-                }
-                
-                QueueRevisionsTask.Revision revision = revisions.get(revIndex);
-                currentRevision++;
-                
-                // Calculate progress percentage
-                int uploadProgress = 0;
-                if (totalRevisions > 0) {
-                    uploadProgress = (int)((revIndex / (double)totalRevisions) * 100);
-                }
-                String uploadMessage = "Uploading revision " + currentRevision + "/" 
-                    + (startRevision + totalRevisions) + " (" + uploadProgress + "%)";
-                if (statusBarManager != null) {
-                    statusBarManager.updateTaskStatus(TASK_ID, uploadMessage, uploadProgress, false);
-                }
+
+                    QueueRevisionsTask.Revision revision = revisions.get(revIndex);
+                    currentRevision++;
+
+                    // Calculate progress percentage
+                    int uploadProgress = 0;
+                    if (totalRevisions > 0) {
+                        uploadProgress = (int)((revIndex / (double)totalRevisions) * 100);
+                    }
+                    String uploadMessage = "Uploading revision " + currentRevision + "/" 
+                        + (startRevision + totalRevisions) + " (" + uploadProgress + "%)";
+                    if (statusBarManager != null) {
+                        statusBarManager.updateTaskStatus(TASK_ID, uploadMessage, uploadProgress, false);
+                    }
                 
                 // Create revision
                 CreateRevisionParams createParams = new CreateRevisionParams();
@@ -232,7 +240,7 @@ public class UploadRevisionsTask extends EventAwareTask {
                     try {
                         binariesApi.createRevision(binaryId, createParams);
                         return null;
-                    } catch (com.zenyard.decompai.ghidra.api.generated.ApiException e) {
+                    } catch (ApiException e) {
                         throw new RuntimeException(e);
                     }
                 }).get();
@@ -255,9 +263,6 @@ public class UploadRevisionsTask extends EventAwareTask {
                 
                 for (int i = 0; i < chunks.size(); i++) {
                     if (monitor.isCancelled()) {
-                        if (statusBarManager != null) {
-                            statusBarManager.unregisterTask(TASK_ID);
-                        }
                         return;
                     }
                     
@@ -289,7 +294,7 @@ public class UploadRevisionsTask extends EventAwareTask {
                             try {
                                 binariesApi.addObjectsToCurrentRevision(binaryId, addParams);
                                 return null;
-                            } catch (com.zenyard.decompai.ghidra.api.generated.ApiException e) {
+                            } catch (ApiException e) {
                                 throw new RuntimeException(e);
                             }
                         }).get();
@@ -298,9 +303,6 @@ public class UploadRevisionsTask extends EventAwareTask {
                         Msg.showError(this, tool.getActiveWindow(), "Upload Error",
                             "Failed to upload chunk " + (i + 1) + " of revision " + currentRevision 
                             + ": " + e.getMessage(), e);
-                        if (statusBarManager != null) {
-                            statusBarManager.unregisterTask(TASK_ID);
-                        }
                         throw new RuntimeException("Failed to upload chunk " + (i + 1), e);
                     }
                 }
@@ -311,6 +313,9 @@ public class UploadRevisionsTask extends EventAwareTask {
                 finishParams.setAnalyzeDependents(analyzeDependents);
                 
                 finishAndAnalyzeWithRetry(binaryId, finishParams, currentRevision);
+
+                // Clear dirty list for objects in this revision after successful upload
+                markUploadedObjects(revision, syncStatusStorage);
                 
                 // Update revision number
                 setCurrentRevision(currentRevision);
@@ -333,16 +338,16 @@ public class UploadRevisionsTask extends EventAwareTask {
             
             if (statusBarManager != null) {
                 statusBarManager.updateTaskStatus(TASK_ID, "Upload complete", 100, false);
-                statusBarManager.unregisterTask(TASK_ID);
             }
-            
-        } catch (Exception e) {
-            Msg.showError(this, tool.getActiveWindow(), "Upload Error",
-                "Failed to upload revisions: " + e.getMessage(), e);
-            if (statusBarManager != null) {
-                statusBarManager.unregisterTask(TASK_ID);
+            });
+            } catch (Exception e) {
+                Msg.showError(this, tool.getActiveWindow(), "Upload Error",
+                    "Failed to upload revisions: " + e.getMessage(), e);
+                throw new RuntimeException("Failed to upload revisions", e);
             }
-            throw new RuntimeException("Failed to upload revisions", e);
+        } finally {
+            runningFlag.set(false);
+            RUNNING_UPLOADS.remove(program, runningFlag);
         }
     }
 
@@ -355,11 +360,14 @@ public class UploadRevisionsTask extends EventAwareTask {
             try {
                 binariesApi.finishAndAnalyzeCurrentRevision(binaryId, finishParams);
                 return;
-            } catch (com.zenyard.decompai.ghidra.api.generated.ApiException e) {
+            } catch (ApiException e) {
                 String responseBody = e.getResponseBody();
                 Msg.warn(this, "Finish and analyze failed for revision " + currentRevision
                     + " (attempt " + attempt + "/" + maxAttempts + ", code=" + e.getCode() + "): "
                     + (responseBody != null ? responseBody : e.getMessage()));
+                if (responseBody != null && responseBody.contains("No current edited revision")) {
+                    throw new RuntimeException(e);
+                }
                 if (attempt >= maxAttempts || e.getCode() < 500) {
                     throw new RuntimeException(e);
                 }
@@ -377,6 +385,23 @@ public class UploadRevisionsTask extends EventAwareTask {
                 Thread.currentThread().interrupt();
                 throw new RuntimeException("Interrupted during finish-and-analyze retry", ie);
             }
+        }
+    }
+
+    private void markUploadedObjects(QueueRevisionsTask.Revision revision, SyncStatusStorage syncStatusStorage) {
+        if (revision == null || syncStatusStorage == null) {
+            return;
+        }
+        List<QueueRevisionsTask.QueuedObject> queuedObjects = revision.getQueuedObjects();
+        if (queuedObjects == null || queuedObjects.isEmpty()) {
+            return;
+        }
+        for (QueueRevisionsTask.QueuedObject queued : queuedObjects) {
+            if (queued == null || queued.getAddress() == null) {
+                continue;
+            }
+            SyncStatus newStatus = new SyncStatus(Optional.ofNullable(queued.getHash()), false);
+            syncStatusStorage.setSyncStatus(queued.getAddress(), newStatus);
         }
     }
     

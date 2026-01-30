@@ -211,13 +211,6 @@ public class TrackChangesTask implements EventProducer {
     }
     
     /**
-     * Check if events should be ignored.
-     */
-    public boolean isIgnoringEvents() {
-        return ignoreEvents;
-    }
-
-    /**
      * Set whether initial analysis has completed. Change tracking only starts once complete.
      */
     public void setInitialAnalysisComplete(boolean complete) {
@@ -509,8 +502,12 @@ public class TrackChangesTask implements EventProducer {
         publishEvent(new DecompaiEvent(DecompaiEvent.EventType.CHANGES_DETECTED, "TrackChangesTask"));
     }
 
-    private boolean shouldProcessEvents() {
-        return !ignoreEvents && initialAnalysisComplete && program != null && !program.isClosed();
+    public boolean shouldProcessEvents() {
+        Msg.debug(this, "shouldProcessEvents: ignoreEvents=" + ignoreEvents + ", initialAnalysisComplete=" + initialAnalysisComplete + ", program=" + program + ", program.isClosed=" + program.isClosed());
+        return !ignoreEvents && 
+        initialAnalysisComplete && 
+        program != null && 
+        !program.isClosed();
     }
 
     private boolean isInitialAnalysisComplete() {

@@ -8,7 +8,7 @@ import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
 
-import com.zenyard.decompai.ghidra.DecompaiServices;
+import com.zenyard.decompai.ghidra.ZenyardService;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
 import com.zenyard.decompai.ghidra.tasks.EventAwareTask;
 import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
@@ -31,7 +31,7 @@ public class AskInitialQuestionsTask extends EventAwareTask {
     private volatile boolean shouldStop = false;
     
     public AskInitialQuestionsTask(PluginTool tool, Program program, 
-                                   DecompaiServices services) {
+                                   ZenyardService services) {
         super("Ask Initial Questions", true, false, false,
             services != null ? services.getEventDispatcher() : null);
         this.tool = tool;
@@ -69,6 +69,11 @@ public class AskInitialQuestionsTask extends EventAwareTask {
             // Check initial state
             String alreadyAsked = props.getString("asked_initial_questions");
             String alreadyUploaded = props.getString("initial_upload_complete");
+            String deferred = props.getString("initial_questions_deferred");
+            if ("true".equals(deferred) && !"true".equals(alreadyUploaded)) {
+                // User deferred; status bar button will be shown instead of auto dialog.
+                return;
+            }
             
             if ("true".equals(alreadyAsked) || "true".equals(alreadyUploaded)) {
                 // Already asked or uploaded - set ready_for_analysis and return
@@ -106,6 +111,10 @@ public class AskInitialQuestionsTask extends EventAwareTask {
             // Check if still need to ask (might have been set while waiting)
             alreadyAsked = props.getString("asked_initial_questions");
             alreadyUploaded = props.getString("initial_upload_complete");
+            deferred = props.getString("initial_questions_deferred");
+            if ("true".equals(deferred) && !"true".equals(alreadyUploaded)) {
+                return;
+            }
             
             if ("true".equals(alreadyAsked) || "true".equals(alreadyUploaded)) {
                 props.setString("ready_for_analysis", "true");

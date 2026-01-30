@@ -4,12 +4,17 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 
 import com.zenyard.decompai.ghidra.api.DecompaiApiClientFactory;
 import com.zenyard.decompai.ghidra.api.generated.ApiClient;
 import com.zenyard.decompai.ghidra.api.generated.api.BinariesApi;
+import com.zenyard.decompai.ghidra.api.generated.model.AddObjectsToCurrentRevisionParams;
+import com.zenyard.decompai.ghidra.api.generated.model.CreateRevisionParams;
+import com.zenyard.decompai.ghidra.api.generated.model.FinishAndAnalyzeCurrentRevisionParams;
 import com.zenyard.decompai.ghidra.api.generated.model.GetInferencesResponse;
 import com.zenyard.decompai.ghidra.api.generated.model.MaybeUnknownInference;
+import com.zenyard.decompai.ghidra.api.generated.model.ModelObject;
 import com.zenyard.decompai.ghidra.api.generated.model.Range;
 import com.zenyard.decompai.ghidra.config.DecompaiOptions;
 import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
@@ -106,6 +111,11 @@ public class RevisionWorkflowManager {
         }
     }
 
+    @FunctionalInterface
+    public interface ApiRequest {
+        void execute() throws Exception;
+    }
+
     public <T> T retryApiRequest(Callable<T> request) {
         return retryApiCall(request, MAX_RETRIES_FOR_REVISION_REQUEST);
     }
@@ -130,6 +140,38 @@ public class RevisionWorkflowManager {
             }
         }
         throw new RuntimeException("Failed after " + maxRetries + " retries");
+    }
+
+    public void executeApiRequest(ApiRequest request) {
+        retryApiRequest(() -> {
+            CompletableFuture.supplyAsync(() -> {
+                try {
+                    request.execute();
+                    return null;
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }).get();
+            return null;
+        });
+    }
+
+    public void createRevision(UUID binaryId, int revisionNumber) {
+        CreateRevisionParams createParams = new CreateRevisionParams();
+        createParams.setNumber(revisionNumber);
+        executeApiRequest(() -> binariesApi.createRevision(binaryId, createParams));
+    }
+
+    public void addObjectsToRevision(UUID binaryId, List<ModelObject> objects) {
+        AddObjectsToCurrentRevisionParams addParams = new AddObjectsToCurrentRevisionParams();
+        addParams.setObjects(objects);
+        executeApiRequest(() -> binariesApi.addObjectsToCurrentRevision(binaryId, addParams));
+    }
+
+    public void finishAndAnalyzeRevision(UUID binaryId, boolean analyzeDependents) {
+        FinishAndAnalyzeCurrentRevisionParams finishParams = new FinishAndAnalyzeCurrentRevisionParams();
+        finishParams.setAnalyzeDependents(analyzeDependents);
+        executeApiRequest(() -> binariesApi.finishAndAnalyzeCurrentRevision(binaryId, finishParams));
     }
 
     public List<MaybeUnknownInference> pollForInferences(TaskMonitor monitor, UUID binaryId, int revisionNumber) {

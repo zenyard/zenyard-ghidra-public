@@ -20,12 +20,12 @@ import ghidra.framework.plugintool.PluginTool;
 /**
  * Status bar component that renders from a view model and forwards actions.
  */
-public class DecompaiStatusBarComponent extends JPanel {
+public class StatusBarComponent extends JPanel {
     private static final int ICON_SIZE = 20;
     private static final int PANEL_HEIGHT = 25;
     private static final int PROGRESS_WIDTH = 100;
-    private static final int SPACING_SMALL = 4;
-    private static final int SPACING_MEDIUM = 8;
+    private static final int SPACING_SMALL = 2;
+    private static final int SPACING_MEDIUM = 4;
 
     private final StatusBarViewModel viewModel;
     @SuppressWarnings("unused")
@@ -40,7 +40,7 @@ public class DecompaiStatusBarComponent extends JPanel {
     private final JButton initialUploadButton;
     private final JButton rerunButton;
 
-    public DecompaiStatusBarComponent(PluginTool tool,
+    public StatusBarComponent(PluginTool tool,
             StatusBarViewModel viewModel,
             StatusBarActions actions,
             IconRegistry iconRegistry) {
@@ -59,14 +59,14 @@ public class DecompaiStatusBarComponent extends JPanel {
 
         logoLabel = new JLabel();
         logoLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
-        setIconOrFallback(logoLabel, "icons/zenyard_icon.png", "Z");
+        setIcon(logoLabel, "icons/zenyard_icon.png", "Z");
         unifiedStatusPanel.add(logoLabel);
 
         initialUploadButton = new JButton();
         initialUploadButton.setToolTipText("Click to analyze with Zenyard");
         initialUploadButton.setAlignmentY(Component.CENTER_ALIGNMENT);
         initialUploadButton.setVisible(false);
-        setIconOrFallback(initialUploadButton, "icons/upload_icon.png", "Upload");
+        setIcon(initialUploadButton, "icons/upload_icon.png", "Upload");
         initialUploadButton.addActionListener(event -> {
             if (actions != null) {
                 actions.onInitialUpload();
@@ -80,7 +80,7 @@ public class DecompaiStatusBarComponent extends JPanel {
         rerunButton.setToolTipText("Rerun analysis");
         rerunButton.setAlignmentY(Component.CENTER_ALIGNMENT);
         rerunButton.setVisible(false);
-        setIconOrFallback(rerunButton, "icons/save_results_icon.png", "Rerun");
+        setIcon(rerunButton, "icons/save_results_icon.png", "Rerun");
         rerunButton.addActionListener(event -> {
             if (actions != null) {
                 actions.onRerun();
@@ -152,7 +152,7 @@ public class DecompaiStatusBarComponent extends JPanel {
         });
     }
 
-    private void setIconOrFallback(JLabel label, String resourcePath, String fallbackText) {
+    private void setIcon(JLabel label, String resourcePath, String fallbackText) {
         if (iconRegistry == null) {
             label.setText(fallbackText);
             return;
@@ -166,7 +166,7 @@ public class DecompaiStatusBarComponent extends JPanel {
         }
     }
 
-    private void setIconOrFallback(JButton button, String resourcePath, String fallbackText) {
+    private void setIcon(JButton button, String resourcePath, String fallbackText) {
         if (iconRegistry == null) {
             button.setText(fallbackText);
             return;

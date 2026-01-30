@@ -12,9 +12,10 @@ import com.zenyard.decompai.ghidra.api.generated.model.Inference;
 import com.zenyard.decompai.ghidra.api.generated.model.MaybeUnknownInference;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
 import com.zenyard.decompai.ghidra.events.EventDispatcher;
-import com.zenyard.decompai.ghidra.tasks.EventAwareTask;
+import com.zenyard.decompai.ghidra.tasks.StatusBarAwareTask;
 import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
 import com.zenyard.decompai.ghidra.status.StatusBarManager;
+import com.zenyard.decompai.ghidra.status.StatusBarPriorities;
 import com.zenyard.decompai.ghidra.util.DecompaiConstants;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
@@ -29,7 +30,7 @@ import ghidra.util.task.TaskMonitor;
  * 
  * NOTE: mirrors decompai_ida/download_inferences_task.py
  */
-public class DownloadInferencesTask extends EventAwareTask {
+public class DownloadInferencesTask extends StatusBarAwareTask {
     
     private static final int POLL_INTERVAL_MS = DecompaiConstants.POLL_INTERVAL_MS;
     private static final int MAX_INFERENCES_PER_REQUEST = 50;
@@ -37,7 +38,7 @@ public class DownloadInferencesTask extends EventAwareTask {
     private static final int INITIAL_BACKOFF_MS = DecompaiConstants.INITIAL_BACKOFF_MS;
     private static final String TASK_ID = "download_inferences";
     private static final String LATEST_RESULTS_TASK_ID = "latest_results_applied";
-    private static final int STATUS_BAR_PRIORITY = com.zenyard.decompai.ghidra.status.StatusBarPriorities.DOWNLOAD_INFERENCES;
+    private static final int STATUS_BAR_PRIORITY = StatusBarPriorities.DOWNLOAD_INFERENCES;
     
     private final PluginTool tool;
     private final BinariesApi binariesApi;
@@ -55,7 +56,7 @@ public class DownloadInferencesTask extends EventAwareTask {
     public DownloadInferencesTask(PluginTool tool, BinariesApi binariesApi,
                                   InferenceQueue inferenceQueue, StatusBarManager statusBarManager,
                                   Program program, EventDispatcher eventDispatcher) {
-        super("Download Inferences", true, false, false, eventDispatcher);
+        super("Download Inferences", true, false, false, eventDispatcher, statusBarManager, TASK_ID, STATUS_BAR_PRIORITY);
         this.tool = tool;
         this.binariesApi = binariesApi;
         this.inferenceQueue = inferenceQueue;
@@ -169,9 +170,6 @@ public class DownloadInferencesTask extends EventAwareTask {
                             consecutiveConnectionFailures = updatedFailures;
                         } catch (InterruptedException ie) {
                             Thread.currentThread().interrupt();
-                            if (statusBarManager != null) {
-                                statusBarManager.unregisterTask(TASK_ID);
-                            }
                             return;
                         }
                     } else {
@@ -183,9 +181,6 @@ public class DownloadInferencesTask extends EventAwareTask {
                             Thread.sleep(POLL_INTERVAL_MS);
                         } catch (InterruptedException ie) {
                             Thread.currentThread().interrupt();
-                            if (statusBarManager != null) {
-                                statusBarManager.unregisterTask(TASK_ID);
-                            }
                             return;
                         }
                     }
@@ -194,9 +189,6 @@ public class DownloadInferencesTask extends EventAwareTask {
         } catch (Exception e) {
             Msg.showError(this, tool.getActiveWindow(), "Download Error",
                 "Failed to download inferences: " + e.getMessage(), e);
-            if (statusBarManager != null) {
-                statusBarManager.unregisterTask(TASK_ID);
-            }
         }
     }
     
@@ -213,25 +205,25 @@ public class DownloadInferencesTask extends EventAwareTask {
      * Matches IDA's _fetch_inferences() logic.
      */
     private void fetchInferences(TaskMonitor monitor, UUID binaryId) {
-        int currentRevision = getCurrentRevision();
-        int cursor = getInferenceCursor();
-        
         // Clear "Latest results applied" message when starting new download
         if (statusBarManager != null) {
             statusBarManager.unregisterTask(LATEST_RESULTS_TASK_ID);
         }
         
-        // Register with status bar when starting to fetch (like IDA's report_and_notify_background_task)
-        if (statusBarManager != null) {
-            statusBarManager.registerTask(TASK_ID, STATUS_BAR_PRIORITY);
-            statusBarManager.updateTaskStatus(TASK_ID, "Downloading results", null, true);
-        }
-        
         try {
-            while (!shouldStop && !monitor.isCancelled()) {
-                int serverRevision = getServerRevision();
-                // Local revision may have progressed while downloading
-                currentRevision = getCurrentRevision();
+            runWithStatusBar(() -> {
+                int currentRevision = getCurrentRevision();
+                int cursor = getInferenceCursor();
+
+                // Register with status bar when starting to fetch (like IDA's report_and_notify_background_task)
+                if (statusBarManager != null) {
+                    statusBarManager.updateTaskStatus(TASK_ID, "Downloading results", null, true);
+                }
+
+                while (!shouldStop && !monitor.isCancelled()) {
+                    int serverRevision = getServerRevision();
+                    // Local revision may have progressed while downloading
+                    currentRevision = getCurrentRevision();
                 
                 // Fetch a page of inferences
                 GetInferencesResponse response = fetchInferencePage(binaryId, currentRevision, cursor);
@@ -310,10 +302,10 @@ public class DownloadInferencesTask extends EventAwareTask {
                         return;
                     }
                 }
-            }
-        } finally {
-            // Unregister status bar when done (like IDA's context manager exit)
-            statusBarManager.unregisterTask(TASK_ID);
+                }
+            });
+        } catch (Exception e) {
+            throw new RuntimeException("Failed while downloading inferences", e);
         }
     }
     

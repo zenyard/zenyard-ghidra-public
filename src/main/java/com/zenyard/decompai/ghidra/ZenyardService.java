@@ -1,6 +1,5 @@
 package com.zenyard.decompai.ghidra;
 
-import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 
@@ -9,6 +8,7 @@ import com.zenyard.decompai.ghidra.api.generated.ApiClient;
 import com.zenyard.decompai.ghidra.api.generated.ApiException;
 import com.zenyard.decompai.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.decompai.ghidra.api.generated.api.UserApi;
+import com.zenyard.decompai.ghidra.copilot.CopilotConfig;
 import com.zenyard.decompai.ghidra.copilot.CopilotConfigMapper;
 import com.zenyard.decompai.ghidra.config.DecompaiOptions;
 import com.zenyard.decompai.ghidra.copilot.CopilotController;
@@ -31,7 +31,11 @@ import com.zenyard.decompai.ghidra.util.LoggerUtil;
 import com.zenyard.decompai.ghidra.events.EventDispatcher;
 
 import java.util.ArrayDeque;
+import java.util.Collections;
 import java.util.Deque;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -44,17 +48,18 @@ import java.util.concurrent.locks.ReentrantLock;
  * This class is a singleton - use getInstance() to get the current instance,
  * or use static methods like getProgram() to access services.
  */
-public class DecompaiServices {
+public class ZenyardService {
     
-    private static DecompaiServices instance;
+    private static ZenyardService instance;
     
-    private final DecompaiGhidraPlugin plugin;
+    private final ZenayardGhidraPlugin plugin;
     private final DecompaiOptions options;
     private Program currentProgram;
     
     private ApiClient apiClient;
     private BinariesApi binariesApi;
     private UserApi userApi;
+    @SuppressWarnings("unused")
     private IlluminatorController illuminatorController;
     private CopilotProvider copilotProvider;
     private CopilotController copilotController;
@@ -71,7 +76,7 @@ public class DecompaiServices {
     private volatile boolean foregroundTaskActive = false;
     private final Object queueNotification = new Object();
     
-    public DecompaiServices(DecompaiGhidraPlugin plugin, DecompaiOptions options) {
+    public ZenyardService(ZenayardGhidraPlugin plugin, DecompaiOptions options) {
         this.plugin = plugin;
         this.options = options;
         this.currentProgram = null;
@@ -175,8 +180,7 @@ public class DecompaiServices {
             if (userConfig == null) {
                 return;
             }
-            com.zenyard.decompai.ghidra.copilot.CopilotConfig config =
-                CopilotConfigMapper.fromUserConfig(userConfig);
+            CopilotConfig config = CopilotConfigMapper.fromUserConfig(userConfig);
             if (config != null && copilotController != null) {
                 copilotController.setCopilotConfig(sanitizeCopilotConfig(config));
             }
@@ -186,8 +190,7 @@ public class DecompaiServices {
         });
     }
 
-    private com.zenyard.decompai.ghidra.copilot.CopilotConfig sanitizeCopilotConfig(
-            com.zenyard.decompai.ghidra.copilot.CopilotConfig config) {
+    private CopilotConfig sanitizeCopilotConfig(CopilotConfig config) {
         if (config == null || options == null) {
             return config;
         }
@@ -198,10 +201,10 @@ public class DecompaiServices {
         }
         Object rawKey = config.getAdditionalParams().get("api_key");
         if (rawKey instanceof String && backendApiKey.equals(rawKey)) {
-            java.util.Map<String, Object> adjusted = new java.util.HashMap<>(config.getAdditionalParams());
+            Map<String, Object> adjusted = new HashMap<>(config.getAdditionalParams());
             adjusted.remove("api_key");
             Msg.warn(this, "Copilot config API key matches backend key; removing to avoid invalid LLM auth.");
-            return new com.zenyard.decompai.ghidra.copilot.CopilotConfig(
+            return new CopilotConfig(
                 config.getModelName(),
                 config.getModelProvider(),
                 adjusted
@@ -210,12 +213,12 @@ public class DecompaiServices {
         return config;
     }
 
-    private void logCopilotConfigSummary(com.zenyard.decompai.ghidra.copilot.CopilotConfig config) {
+    private void logCopilotConfigSummary(CopilotConfig config) {
         if (config == null) {
             return;
         }
-        java.util.Map<String, Object> params = config.getAdditionalParams();
-        java.util.Set<String> keys = params != null ? params.keySet() : java.util.Collections.emptySet();
+        Map<String, Object> params = config.getAdditionalParams();
+        Set<String> keys = params != null ? params.keySet() : Collections.emptySet();
         Object apiKey = params != null ? params.get("api_key") : null;
         String apiKeySummary = apiKey instanceof String
             ? "api_key=present(len=" + ((String) apiKey).length() + ")"
@@ -234,44 +237,16 @@ public class DecompaiServices {
         instance = null;
     }
     
-    public void analyzeCurrentFunction() {
-        if (currentProgram == null) {
-            Msg.showWarn(this, plugin.getTool().getActiveWindow(), 
-                "No Program", "No program is currently loaded.");
-            return;
-        }
-        
-        if (!options.isConfigured()) {
-            Msg.showWarn(this, plugin.getTool().getActiveWindow(),
-                "Not Configured", "DecompAI is not configured. Please set your API key in the configuration dialog.");
-            return;
-        }
-        
-        if (illuminatorController == null) {
-            Msg.showWarn(this, plugin.getTool().getActiveWindow(),
-                "Not Initialized", "Illuminator not initialized.");
-            return;
-        }
-        
-        // Get current address from tool's location
-        // For now, we'll need to get it from the context or current location
-        // This is a simplified version - in a full implementation, we'd get it from ActionContext
-        Address currentAddress = currentProgram.getMinAddress(); // Placeholder
-        
-        // TODO: Get actual current address from tool's location provider
-        // For now, analyze the first function as a placeholder
-        illuminatorController.analyzeFunctionAt(currentProgram, currentAddress);
-    }
     
     public Program getCurrentProgram() {
         return currentProgram;
     }
     
     /**
-     * Get the singleton instance of DecompaiServices.
+     * Get the singleton instance of ZenyardService.
      * @return The current instance, or null if not initialized
      */
-    public static DecompaiServices getInstance() {
+    public static ZenyardService getInstance() {
         return instance;
     }
     
@@ -341,7 +316,7 @@ public class DecompaiServices {
                 }
                 QueueRevisionsTask queueRevisionsTask = new QueueRevisionsTask(
                     plugin.getTool(), program, statusBarManager, eventDispatcher, true);
-                DecompaiGhidraPlugin.executeBackgroundTask(queueRevisionsTask);
+                ZenayardGhidraPlugin.executeBackgroundTask(queueRevisionsTask);
 
                 BinariesApi api = binariesApi;
                 if (api == null) {
@@ -350,7 +325,7 @@ public class DecompaiServices {
                 }
                 UploadRevisionsTask uploadRevisionsTask = new UploadRevisionsTask(
                     plugin.getTool(), api, statusBarManager, program, eventDispatcher);
-                DecompaiGhidraPlugin.executeBackgroundTask(uploadRevisionsTask);
+                ZenayardGhidraPlugin.executeBackgroundTask(uploadRevisionsTask);
 
                 DecompaiProgramProperties props = new DecompaiProgramProperties(program);
                 props.setString("changes_detected", "false");
@@ -383,7 +358,6 @@ public class DecompaiServices {
 
                 DecompaiProgramProperties props = new DecompaiProgramProperties(program);
                 props.setString("asked_initial_questions", "true");
-                props.setString("auto_apply_results", String.valueOf(result.isAutoApplyResults()));
                 props.setString("allow_preprocessing", String.valueOf(result.isAllowPreprocessing()));
                 if (result.getBinaryInstructions() != null) {
                     props.setString("binary_instructions", result.getBinaryInstructions());
@@ -470,4 +444,3 @@ public class DecompaiServices {
         this.foregroundTaskActive = active;
     }
 }
-

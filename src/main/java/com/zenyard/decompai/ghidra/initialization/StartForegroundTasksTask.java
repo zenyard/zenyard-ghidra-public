@@ -8,7 +8,7 @@ import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
 
-import com.zenyard.decompai.ghidra.DecompaiServices;
+import com.zenyard.decompai.ghidra.ZenyardService;
 import com.zenyard.decompai.ghidra.events.DecompaiEvent;
 import com.zenyard.decompai.ghidra.storage.DecompaiProgramProperties;
 import com.zenyard.decompai.ghidra.tasks.ForegroundTask;
@@ -25,10 +25,10 @@ public class StartForegroundTasksTask extends EventAwareTask {
     
     private final PluginTool tool;
     private final Program program;
-    private final DecompaiServices services;
+    private final ZenyardService services;
     private volatile boolean shouldStop = false;
     
-    public StartForegroundTasksTask(PluginTool tool, Program program, DecompaiServices services) {
+    public StartForegroundTasksTask(PluginTool tool, Program program, ZenyardService services) {
         super("Start Foreground Tasks", true, false, false,
             services != null ? services.getEventDispatcher() : null);
         this.tool = tool;
@@ -105,7 +105,7 @@ public class StartForegroundTasksTask extends EventAwareTask {
     
     /**
      * Wait for initial analysis to complete using event notification (no polling).
-     * Blocks on services lock until notified by the event handler in DecompaiGhidraPlugin.
+     * Blocks on services lock until notified by the event handler in ZenayardGhidraPlugin.
      */
     private void waitForAnalysisComplete(DecompaiProgramProperties props, TaskMonitor monitor) {
         // Check if already complete
@@ -115,7 +115,7 @@ public class StartForegroundTasksTask extends EventAwareTask {
         }
         
         // Wait for analysis completion using event notification (no polling loop)
-        // The event handler in DecompaiGhidraPlugin will call services.notifyAll() when analysis completes
+        // The event handler in ZenayardGhidraPlugin will call services.notifyAll() when analysis completes
         while (!monitor.isCancelled() && !shouldStop) {
             // Check property when notified (event-driven, not polling)
             alreadyCompleted = props.getString("initial_analysis_complete");

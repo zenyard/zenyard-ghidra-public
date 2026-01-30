@@ -9,9 +9,9 @@ import ghidra.framework.plugintool.PluginTool;
  */
 public class DecompaiStatusBarProvider extends ComponentProvider {
     
-    private final DecompaiStatusBarComponent component;
+    private final StatusBarComponent component;
     
-    public DecompaiStatusBarProvider(PluginTool tool, DecompaiStatusBarComponent component) {
+    public DecompaiStatusBarProvider(PluginTool tool, StatusBarComponent component) {
         super(tool, "DecompAI Status", "DecompAI");
         this.component = component;
     }
