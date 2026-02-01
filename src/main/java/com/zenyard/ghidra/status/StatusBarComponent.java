@@ -39,6 +39,7 @@ public class StatusBarComponent extends JPanel {
     private final JLabel unifiedProgressLabel;
     private final JButton initialUploadButton;
     private final JButton rerunButton;
+    private final JButton reviewTermsButton;
     private final JLabel warningIconLabel;
 
     public StatusBarComponent(PluginTool tool,
@@ -100,6 +101,18 @@ public class StatusBarComponent extends JPanel {
         unifiedStatusPanel.add(warningIconLabel);
         unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
 
+        reviewTermsButton = new JButton("Review Terms");
+        reviewTermsButton.setToolTipText("Review Terms of Use");
+        reviewTermsButton.setAlignmentY(Component.CENTER_ALIGNMENT);
+        reviewTermsButton.setVisible(false);
+        reviewTermsButton.addActionListener(event -> {
+            if (actions != null) {
+                actions.onReviewTerms();
+            }
+        });
+        unifiedStatusPanel.add(reviewTermsButton);
+        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
+
         unifiedStatusLabel = new GDLabel("");
         unifiedStatusLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
         unifiedStatusPanel.add(unifiedStatusLabel);
@@ -157,6 +170,7 @@ public class StatusBarComponent extends JPanel {
             initialUploadButton.setVisible(state.isShowInitialUpload());
             rerunButton.setVisible(state.isShowRerun());
             warningIconLabel.setVisible(state.isShowWarningIcon());
+            reviewTermsButton.setVisible(state.isShowReviewTerms());
             unifiedStatusPanel.revalidate();
             unifiedStatusPanel.repaint();
         });

@@ -10,6 +10,7 @@ import com.zenyard.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.ghidra.api.generated.api.UserApi;
 import com.zenyard.ghidra.copilot.CopilotConfig;
 import com.zenyard.ghidra.copilot.CopilotConfigMapper;
+import com.zenyard.ghidra.config.EulaDialog;
 import com.zenyard.ghidra.config.ZenyardOptions;
 import com.zenyard.ghidra.copilot.CopilotController;
 import com.zenyard.ghidra.copilot.CopilotProvider;
@@ -52,7 +53,7 @@ public class ZenyardService {
     
     private static ZenyardService instance;
     
-    private final ZenayardGhidraPlugin plugin;
+    private final ZenyardGhidraPlugin plugin;
     private final ZenyardOptions options;
     private Program currentProgram;
     
@@ -76,7 +77,7 @@ public class ZenyardService {
     private volatile boolean foregroundTaskActive = false;
     private final Object queueNotification = new Object();
     
-    public ZenyardService(ZenayardGhidraPlugin plugin, ZenyardOptions options) {
+    public ZenyardService(ZenyardGhidraPlugin plugin, ZenyardOptions options) {
         this.plugin = plugin;
         this.options = options;
         this.currentProgram = null;
@@ -316,7 +317,7 @@ public class ZenyardService {
                 }
                 QueueRevisionsTask queueRevisionsTask = new QueueRevisionsTask(
                     plugin.getTool(), program, statusBarManager, eventDispatcher, true);
-                ZenayardGhidraPlugin.executeBackgroundTask(queueRevisionsTask);
+                ZenyardGhidraPlugin.executeBackgroundTask(queueRevisionsTask);
 
                 BinariesApi api = binariesApi;
                 if (api == null) {
@@ -325,7 +326,7 @@ public class ZenyardService {
                 }
                 UploadRevisionsTask uploadRevisionsTask = new UploadRevisionsTask(
                     plugin.getTool(), api, statusBarManager, program, eventDispatcher);
-                ZenayardGhidraPlugin.executeBackgroundTask(uploadRevisionsTask);
+                ZenyardGhidraPlugin.executeBackgroundTask(uploadRevisionsTask);
 
                 ZenyardProgramProperties props = new ZenyardProgramProperties(program);
                 props.setString("changes_detected", "false");
@@ -369,6 +370,29 @@ public class ZenyardService {
                     ZenyardEvent.EventType.INITIAL_DIALOG_CONFIRMED, "StatusBar"));
 
                 statusBarManager.refreshDisplayNow();
+            }
+
+            @Override
+            public void onReviewTerms() {
+                if (options == null) {
+                    Msg.warn(this, "Review Terms ignored: options unavailable");
+                    return;
+                }
+                boolean accepted = EulaDialog.showDialog(plugin.getTool());
+                int acceptedVersion = accepted ? EulaDialog.EULA_VERSION : -1;
+                try {
+                    options.updateConfiguration(Map.of("accepted_eula_version", acceptedVersion));
+                    if (accepted) {
+                        Msg.showInfo(this, plugin.getTool().getActiveWindow(), "Zenyard",
+                            "EULA Terms accepted, restart Ghidra to start using Zenyard.");
+                    }
+                } catch (java.io.IOException e) {
+                    Msg.showError(this, plugin.getTool().getActiveWindow(), "Configuration Error",
+                        "Failed to update EULA acceptance in zenyard.json", e);
+                }
+                if (statusBarManager != null) {
+                    statusBarManager.refreshDisplayNow();
+                }
             }
         };
     }

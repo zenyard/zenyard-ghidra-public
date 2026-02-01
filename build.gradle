@@ -210,6 +210,10 @@ dependencies {
     
     // For logging
     runtimeOnly 'ch.qos.logback:logback-classic:1.4.14'
+
+    // Unit testing
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.13.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.11.3'
     
     // LangChain4j core (latest version 1.10.0)
     // Check for latest version at https://github.com/langchain4j/langchain4j
@@ -248,6 +252,10 @@ compileJava.dependsOn tasks.copyDependencies
 
 compileTestJava {
     options.encoding = 'UTF-8'
+}
+
+test {
+    useJUnitPlatform()
 }
 
 // OpenAPI Generator configuration

@@ -6,4 +6,5 @@ package com.zenyard.ghidra.status;
 public interface StatusBarActions {
     void onRerun();
     void onInitialUpload();
+    void onReviewTerms();
 }

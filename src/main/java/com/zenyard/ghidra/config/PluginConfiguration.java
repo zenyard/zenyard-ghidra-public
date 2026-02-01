@@ -33,14 +33,18 @@ public class PluginConfiguration {
     
     @SerializedName("verify_ssl")
     private final Boolean verifySsl;
+
+    @SerializedName("accepted_eula_version")
+    private final Integer acceptedEulaVersion;
     
     // Default values matching IDA plugin
     private static final String DEFAULT_SERVER_URL = "https://api.zenyard.com";
     private static final String DEFAULT_LOG_LEVEL = "INFO";
     private static final boolean DEFAULT_SHOW_INITIAL_UPLOAD_MESSAGE = true;
-    private static final boolean DEFAULT_REQUEST_BINARY_INSTRUCTIONS = false;
+    private static final boolean DEFAULT_REQUEST_BINARY_INSTRUCTIONS = true;
     private static final boolean DEFAULT_REQUIRE_CONFIRMATION_PER_DB = true;
     private static final boolean DEFAULT_VERIFY_SSL = true;
+    private static final int DEFAULT_ACCEPTED_EULA_VERSION = 0;
     
     // Constructor for Gson deserialization
     // Note: @SerializedName annotations are on fields, not constructor parameters
@@ -51,7 +55,8 @@ public class PluginConfiguration {
             Boolean showInitialUploadMessage,
             Boolean requestBinaryInstructions,
             Boolean requireConfirmationPerDb,
-            Boolean verifySsl) {
+            Boolean verifySsl,
+            Integer acceptedEulaVersion) {
         this.apiUrl = apiUrl != null ? apiUrl : DEFAULT_SERVER_URL;
         this.apiKey = apiKey != null ? apiKey : "";
         this.logLevel = logLevel != null ? logLevel : DEFAULT_LOG_LEVEL;
@@ -59,6 +64,7 @@ public class PluginConfiguration {
         this.requestBinaryInstructions = requestBinaryInstructions != null ? requestBinaryInstructions : DEFAULT_REQUEST_BINARY_INSTRUCTIONS;
         this.requireConfirmationPerDb = requireConfirmationPerDb != null ? requireConfirmationPerDb : DEFAULT_REQUIRE_CONFIRMATION_PER_DB;
         this.verifySsl = verifySsl != null ? verifySsl : DEFAULT_VERIFY_SSL;
+        this.acceptedEulaVersion = acceptedEulaVersion != null ? acceptedEulaVersion : DEFAULT_ACCEPTED_EULA_VERSION;
         
         validate();
     }
@@ -74,7 +80,8 @@ public class PluginConfiguration {
             DEFAULT_SHOW_INITIAL_UPLOAD_MESSAGE,
             DEFAULT_REQUEST_BINARY_INSTRUCTIONS,
             DEFAULT_REQUIRE_CONFIRMATION_PER_DB,
-            DEFAULT_VERIFY_SSL
+            DEFAULT_VERIFY_SSL,
+            DEFAULT_ACCEPTED_EULA_VERSION
         );
     }
     
@@ -90,7 +97,8 @@ public class PluginConfiguration {
             this.showInitialUploadMessage,
             this.requestBinaryInstructions,
             this.requireConfirmationPerDb,
-            this.verifySsl
+            this.verifySsl,
+            this.acceptedEulaVersion
         );
     }
     
@@ -109,6 +117,21 @@ public class PluginConfiguration {
             ? (Boolean) updates.get("require_confirmation_per_db") : this.requireConfirmationPerDb;
         Boolean newVerifySsl = updates.containsKey("verify_ssl")
             ? (Boolean) updates.get("verify_ssl") : this.verifySsl;
+        Integer newAcceptedEulaVersion = this.acceptedEulaVersion;
+        if (updates.containsKey("accepted_eula_version")) {
+            Object value = updates.get("accepted_eula_version");
+            if (value instanceof Number) {
+                newAcceptedEulaVersion = ((Number) value).intValue();
+            } else if (value instanceof String) {
+                try {
+                    newAcceptedEulaVersion = Integer.parseInt((String) value);
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException("Invalid accepted_eula_version: " + value);
+                }
+            } else if (value == null) {
+                newAcceptedEulaVersion = DEFAULT_ACCEPTED_EULA_VERSION;
+            }
+        }
         
         return new PluginConfiguration(
             newApiUrl,
@@ -117,7 +140,8 @@ public class PluginConfiguration {
             newShowInitialUploadMessage,
             newRequestBinaryInstructions,
             newRequireConfirmationPerDb,
-            newVerifySsl
+            newVerifySsl,
+            newAcceptedEulaVersion
         );
     }
     
@@ -176,6 +200,10 @@ public class PluginConfiguration {
     
     public boolean isVerifySsl() {
         return verifySsl;
+    }
+
+    public int getAcceptedEulaVersion() {
+        return acceptedEulaVersion != null ? acceptedEulaVersion : DEFAULT_ACCEPTED_EULA_VERSION;
     }
     
     public boolean isConfigured() {

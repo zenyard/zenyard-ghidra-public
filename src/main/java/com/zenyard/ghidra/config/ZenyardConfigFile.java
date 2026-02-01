@@ -89,6 +89,18 @@ public class ZenyardConfigFile {
         // Write to file
         Files.writeString(configPath, jsonContent);
     }
+
+    /**
+     * Create a default configuration file if it doesn't exist.
+     * Returns the default configuration that was written.
+     */
+    public static PluginConfiguration createDefaultConfiguration() throws IOException {
+        PluginConfiguration defaultConfig = PluginConfiguration.getDefault();
+        writeConfiguration(defaultConfig);
+        Msg.info(ZenyardConfigFile.class,
+            "Zenyard: Created default configuration at " + getConfigPath());
+        return defaultConfig;
+    }
     
     /**
      * Update specific configuration fields without full rewrite.

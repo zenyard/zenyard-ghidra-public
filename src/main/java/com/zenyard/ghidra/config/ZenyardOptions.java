@@ -56,7 +56,15 @@ public class ZenyardOptions {
                         // Should not happen, but fall through to defaults
                     }
                 }
-                // Use defaults silently (user can configure via dialog)
+                // Create default config file and use defaults
+                try {
+                    this.config = ZenyardConfigFile.createDefaultConfiguration();
+                    return;
+                } catch (IOException ioException) {
+                    // Fall back to defaults if file creation fails
+                    Msg.warn(this, "Zenyard: Failed to create default configuration file. "
+                        + "Using defaults. Configure via Tools → Zenyard → Configuration...", ioException);
+                }
                 Msg.info(this, "Zenyard: Configuration file not found. Using defaults. " 
                     + "Configure via Tools → Zenyard → Configuration...");
             }
@@ -89,7 +97,8 @@ public class ZenyardOptions {
                     showInitialUploadMessage,
                     requestBinaryInstructions,
                     true, // require_confirmation_per_db (default)
-                    true  // verify_ssl (default)
+                    true, // verify_ssl (default)
+                    PluginConfiguration.getDefault().getAcceptedEulaVersion()
                 );
                 
                 // Write to config file
@@ -145,6 +154,14 @@ public class ZenyardOptions {
     
     public boolean isVerifySsl() {
         return config.isVerifySsl();
+    }
+
+    public int getAcceptedEulaVersion() {
+        return config.getAcceptedEulaVersion();
+    }
+
+    public boolean isEulaAccepted(int eulaVersion) {
+        return config.getAcceptedEulaVersion() == eulaVersion;
     }
     
     public boolean isConfigured() {

@@ -14,6 +14,7 @@ import ghidra.util.Msg;
 import com.zenyard.ghidra.events.EventDispatcher;
 import com.zenyard.ghidra.storage.ZenyardProgramProperties;
 import com.zenyard.ghidra.ZenyardService;
+import com.zenyard.ghidra.config.ZenyardOptions;
 
 /**
  * Integrates with Ghidra's native StatusBar to display analysis progress, errors, and hints.
@@ -190,20 +191,28 @@ public class StatusBarManager {
     private void refreshDisplay() {
         Optional<TaskStatus> activeTask = getActiveTask();
         StatusBarState state;
+        StatusBarState current = viewModel.getStateSnapshot();
+        if (isEulaRejected()) {
+            state = StatusBarState.empty()
+                .withShowReviewTerms(true)
+                .withStatus("Zenyard disabled — review terms to re-enable")
+                .withShowWarningIcon(current.isShowWarningIcon());
+            viewModel.updateState(state);
+            return;
+        }
         if (activeTask.isPresent()) {
             TaskStatus task = activeTask.get();
-            StatusBarState current = viewModel.getStateSnapshot();
             state = new StatusBarState(task.taskId, task.priority, task.status, task.progress,
                 task.indeterminate, current.isShowRerun(), current.isShowInitialUpload(),
-                current.isShowWarningIcon());
+                current.isShowWarningIcon(), current.isShowReviewTerms());
         } else {
-            StatusBarState current = viewModel.getStateSnapshot();
             boolean showInitialUpload = hasPersistedInitialQuestionsDeferred();
             if (showInitialUpload) {
                 state = StatusBarState.empty()
                     .withShowInitialUpload(true)
                     .withStatus("Click to analyze with Zenyard")
-                    .withShowWarningIcon(current.isShowWarningIcon());
+                    .withShowWarningIcon(current.isShowWarningIcon())
+                    .withShowReviewTerms(current.isShowReviewTerms());
             } else {
                 boolean showRerun = canShowRerun() &&
                     (current.isShowRerun() || hasPersistedChangesDetected());
@@ -211,9 +220,12 @@ public class StatusBarManager {
                     state = StatusBarState.empty()
                         .withShowRerun(true)
                         .withStatus("Updates detected — Click to analyze")
-                        .withShowWarningIcon(current.isShowWarningIcon());
+                        .withShowWarningIcon(current.isShowWarningIcon())
+                        .withShowReviewTerms(current.isShowReviewTerms());
                 } else {
-                    state = StatusBarState.empty().withShowWarningIcon(current.isShowWarningIcon());
+                    state = StatusBarState.empty()
+                        .withShowWarningIcon(current.isShowWarningIcon())
+                        .withShowReviewTerms(current.isShowReviewTerms());
                 }
             }
         }
@@ -246,6 +258,18 @@ public class StatusBarManager {
             return false;
         }
         return services.getTrackChangesTaskManager().shouldProcessEvents();
+    }
+
+    private boolean isEulaRejected() {
+        ZenyardService services = ZenyardService.getInstance();
+        if (services == null) {
+            return false;
+        }
+        ZenyardOptions options = services.getOptions();
+        if (options == null) {
+            return false;
+        }
+        return options.getAcceptedEulaVersion() < 0;
     }
 
     private boolean hasPersistedChangesDetected() {

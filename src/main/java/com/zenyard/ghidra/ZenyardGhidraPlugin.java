@@ -2,6 +2,7 @@ package com.zenyard.ghidra;
 
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import javax.swing.SwingUtilities;
@@ -22,9 +23,11 @@ import ghidra.util.Swing;
 
 import com.zenyard.ghidra.api.generated.ApiClient;
 import com.zenyard.ghidra.api.generated.api.BinariesApi;
+import com.zenyard.ghidra.config.EulaDialog;
 import com.zenyard.ghidra.config.ZenyardConfigFile;
 import com.zenyard.ghidra.config.ZenyardOptions;
 import com.zenyard.ghidra.config.LicenseConfigDialog;
+import com.zenyard.ghidra.config.PluginConfiguration;
 import com.zenyard.ghidra.events.ZenyardEvent;
 import com.zenyard.ghidra.events.EventConsumer;
 import com.zenyard.ghidra.events.EventDispatcher;
@@ -63,11 +66,11 @@ import ghidra.util.task.TaskMonitor;
     packageName = "com.zenyard.ghidra",
     category = "Reverse Engineering",
     shortDescription = "Zenyard - AI-powered reverse engineering assistance",
-    description = "Provides AI-powered reverse engineering assistance through the Zenyard service. " 
-                  + "Features include function/variable highlighting, renaming, and LLM-assisted analysis.",
+    description = "In-depth binary understanding with a purpose built AI agent that helps you get straight to the" +
+                  "meaningful parts and understand them faster.",
     eventsConsumed = { FirstTimeAnalyzedPluginEvent.class }
 )
-public class ZenayardGhidraPlugin extends ProgramPlugin implements EventConsumer {
+public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer {
     
     private ZenyardOptions options;
     private ZenyardService services;
@@ -75,18 +78,11 @@ public class ZenayardGhidraPlugin extends ProgramPlugin implements EventConsumer
     private ApplyInferencesTask applyInferencesTask; // Reference to continuous apply task
     private static final String WAITING_FOR_GHIDRA_TASK_ID = "waiting_for_ghidra";
     
-    public ZenayardGhidraPlugin(PluginTool tool) {
+    public ZenyardGhidraPlugin(PluginTool tool) {
         super(tool);
         
         // Initialize options (reads from config file)
         this.options = new ZenyardOptions(tool);
-        
-        // If config file doesn't exist and API key is empty, show config dialog
-        if (!ZenyardConfigFile.configFileExists() && !options.isConfigured()) {
-            SwingUtilities.invokeLater(() -> {
-                showConfigurationDialog();
-            });
-        }
         
         // Initialize services (will be created when program is opened)
         this.services = null;
@@ -128,7 +124,7 @@ public class ZenayardGhidraPlugin extends ProgramPlugin implements EventConsumer
         
         if (event instanceof FirstTimeAnalyzedPluginEvent) {
             FirstTimeAnalyzedPluginEvent ev = (FirstTimeAnalyzedPluginEvent) event;
-            Msg.debug(this, "ZenayardGhidraPlugin: Received FirstTimeAnalyzedPluginEvent");
+            Msg.debug(this, "ZenyardGhidraPlugin: Received FirstTimeAnalyzedPluginEvent");
             Program program = ev.getProgram();
             if (program != null && program.equals(currentProgram)) {
                 Swing.runLater(() -> handleAnalysisComplete(program));
@@ -140,13 +136,18 @@ public class ZenayardGhidraPlugin extends ProgramPlugin implements EventConsumer
     protected void programActivated(Program program) {
         super.programActivated(program);
         
-        // Initialize services when a program is activated
+        // Initialize services when a program is activated (needed for status bar actions)
         if (services == null) {
             services = new ZenyardService(this, options);
         }
-        
+
+        // Gate extension activation on EULA acceptance
+        if (!ensureEulaAccepted()) {
+            return;
+        }
+
         services.onProgramActivated(program);
-        
+
         EventDispatcher eventDispatcher = services.getEventDispatcher();
         eventDispatcher.subscribe(this);
 
@@ -162,6 +163,9 @@ public class ZenayardGhidraPlugin extends ProgramPlugin implements EventConsumer
         if (binariesApi != null && statusBarManager != null) {
             startBackgroundTasks(program, binariesApi, statusBarManager);
         }
+
+        // Show configuration dialog after EULA acceptance if needed
+        showConfigurationDialogIfNeeded();
         
         // Check if analysis is already complete (for programs analyzed before plugin activation)
         ZenyardProgramProperties props = new ZenyardProgramProperties(program);
@@ -269,7 +273,7 @@ public class ZenayardGhidraPlugin extends ProgramPlugin implements EventConsumer
             @Override
             public void actionPerformed(ActionContext context) {
                 if (services == null) {
-                    services = new ZenyardService(ZenayardGhidraPlugin.this, options);
+                    services = new ZenyardService(ZenyardGhidraPlugin.this, options);
                     Program program = getCurrentProgram();
                     if (program != null) {
                         services.onProgramActivated(program);
@@ -297,6 +301,46 @@ public class ZenayardGhidraPlugin extends ProgramPlugin implements EventConsumer
     private void showConfigurationDialog() {
         LicenseConfigDialog dialog = new LicenseConfigDialog(tool, options);
         tool.showDialog(dialog);
+    }
+
+    private void showConfigurationDialogIfNeeded() {
+        if (!ZenyardConfigFile.configFileExists() && !options.isConfigured()) {
+            SwingUtilities.invokeLater(this::showConfigurationDialog);
+        }
+    }
+
+    private boolean ensureEulaAccepted() {
+        if (options.isEulaAccepted(EulaDialog.EULA_VERSION)) {
+            return true;
+        }
+        boolean accepted = EulaDialog.showDialog(tool);
+        int acceptedVersion = accepted ? EulaDialog.EULA_VERSION : -1;
+        try {
+            options.updateConfiguration(Map.of("accepted_eula_version", acceptedVersion));
+        } catch (java.io.IOException e) {
+            Msg.showError(this, tool.getActiveWindow(), "Configuration Error",
+                "Failed to update EULA acceptance in zenyard.json", e);
+        }
+        if (services != null && services.getStatusBarManager() != null) {
+            services.getStatusBarManager().refreshDisplayNow();
+        }
+        if (!accepted) {
+            return false;
+        }
+        try {
+            if (!ZenyardConfigFile.configFileExists()) {
+                ZenyardConfigFile.writeConfiguration(PluginConfiguration.getDefault());
+                options.reloadConfiguration();
+            }
+        } catch (java.io.IOException e) {
+            Msg.showError(this, tool.getActiveWindow(), "Configuration Error",
+                "Failed to create default zenyard.json", e);
+            return false;
+        }
+        if (!options.isConfigured()) {
+            showConfigurationDialog();
+        }
+        return options.isConfigured();
     }
     
     public ZenyardOptions getOptions() {
@@ -469,13 +513,13 @@ public class ZenayardGhidraPlugin extends ProgramPlugin implements EventConsumer
     @Override
     public void handleEvent(ZenyardEvent event) {
         if (event.getType() == ZenyardEvent.EventType.INITIAL_UPLOAD_COMPLETE) {
-            Msg.info(this, "ZenayardGhidraPlugin: Received INITIAL_UPLOAD_COMPLETE event");
+            Msg.info(this, "ZenyardGhidraPlugin: Received INITIAL_UPLOAD_COMPLETE event");
             // Show InitialUploadMessageDialog after upload completes
             SwingUtilities.invokeLater(() -> {
                 if (currentProgram != null && !currentProgram.isClosed()) {
                     handleInitialUploadComplete(currentProgram);
                 } else {
-                    Msg.warn(this, "ZenayardGhidraPlugin: Cannot show dialog - program is null or closed");
+                    Msg.warn(this, "ZenyardGhidraPlugin: Cannot show dialog - program is null or closed");
                 }
             });
         }
@@ -495,7 +539,7 @@ public class ZenayardGhidraPlugin extends ProgramPlugin implements EventConsumer
             try {
                 task.monitoredRun(monitor);
             } catch (Exception e) {
-                Msg.error(ZenayardGhidraPlugin.class, "Error executing background task: " + task.getTaskTitle(), e);
+                Msg.error(ZenyardGhidraPlugin.class, "Error executing background task: " + task.getTaskTitle(), e);
             }
         });
         taskThread.setDaemon(true);
