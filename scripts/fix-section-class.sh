@@ -10,7 +10,7 @@ set -e
 # Get the script directory and project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SECTION_FILE="$PROJECT_ROOT/build/generated/src/main/java/com/zenyard/decompai/ghidra/api/generated/model/Section.java"
+SECTION_FILE="$PROJECT_ROOT/build/generated/src/main/java/com/zenyard/ghidra/api/generated/model/Section.java"
 
 if [ ! -f "$SECTION_FILE" ]; then
     echo "Warning: $SECTION_FILE not found. Skipping Section.getClass() fix."

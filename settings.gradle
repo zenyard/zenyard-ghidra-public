@@ -5,4 +5,4 @@ pluginManagement {
     }
 }
 
-rootProject.name = 'decompai-ghidra'
+rootProject.name = 'zenyard-ghidra'

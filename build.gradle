@@ -322,11 +322,11 @@ openApiGenerate {
     library = 'native'
     inputSpec = openApiJsonFile
     outputDir = "${buildDir}/generated"
-    apiPackage = 'com.zenyard.decompai.ghidra.api.generated.api'
-    modelPackage = 'com.zenyard.decompai.ghidra.api.generated.model'
-    invokerPackage = 'com.zenyard.decompai.ghidra.api.generated'
-    groupId = 'com.zenyard.decompai.ghidra'
-    id = 'decompai-api-client'
+    apiPackage = 'com.zenyard.ghidra.api.generated.api'
+    modelPackage = 'com.zenyard.ghidra.api.generated.model'
+    invokerPackage = 'com.zenyard.ghidra.api.generated'
+    groupId = 'com.zenyard.ghidra'
+    id = 'zenyard-api-client'
     skipValidateSpec = false
     logToStderr = true
     generateApiTests = false
@@ -369,7 +369,7 @@ task fixSectionClass(type: Exec) {
     workingDir = projectDir
     commandLine = ['bash', 'scripts/fix-section-class.sh']
     onlyIf {
-        file("${buildDir}/generated/src/main/java/com/zenyard/decompai/ghidra/api/generated/model/Section.java").exists()
+        file("${buildDir}/generated/src/main/java/com/zenyard/ghidra/api/generated/model/Section.java").exists()
     }
 }
 
