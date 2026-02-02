@@ -20,6 +20,7 @@ import ghidra.util.MessageType;
 import com.zenyard.ghidra.api.generated.ApiClient;
 import com.zenyard.ghidra.api.generated.ApiException;
 import com.zenyard.ghidra.api.generated.api.UserApi;
+import com.zenyard.ghidra.polling.ConnectionErrorHandler;
 
 /**
  * Reusable configuration panel for Zenyard API key and server settings.
@@ -190,11 +191,25 @@ public class LicenseConfigPanel extends JPanel {
             });
         })
         .exceptionally(throwable -> {
+            Throwable rootCause = ConnectionErrorHandler.findRootCause(throwable);
+            String statusMessage = getConnectionStatusMessage(rootCause);
             java.awt.EventQueue.invokeLater(() -> {
-                setStatusText("Connection failed", MessageType.ERROR);
+                setStatusText(statusMessage, MessageType.ERROR);
                 testConnectionButton.setEnabled(true);
             });
             return null;
         });
+    }
+
+    private String getConnectionStatusMessage(Throwable rootCause) {
+        if (rootCause instanceof ApiException) {
+            ApiException apiException = (ApiException) rootCause;
+            if (apiException.getCode() == 401) {
+                return "Invalid API key";
+            }
+        } else if (ConnectionErrorHandler.isConnectionError(rootCause)) {
+            return "Server not responding";
+        }
+        return "Connection failed";
     }
 }

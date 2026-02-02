@@ -17,6 +17,7 @@ import java.awt.Image;
 
 public class ZenyardDialogComponentProvider extends DialogComponentProvider {
     private static final int LOGO_MAX_SIZE_PX = 32;
+    private GDLabel headerTitleLabel;
 
     public ZenyardDialogComponentProvider(String title, boolean isModal) {
         super(title, isModal);
@@ -39,9 +40,9 @@ public class ZenyardDialogComponentProvider extends DialogComponentProvider {
             dialogIcon = scaleIcon(imageIcon, LOGO_MAX_SIZE_PX);
         }
 
-        JLabel titleLabel = new GDLabel(title);
-        Font currentFont = titleLabel.getFont();
-        titleLabel.setFont(currentFont.deriveFont(Font.BOLD));
+        headerTitleLabel = new GDLabel(title);
+        Font currentFont = headerTitleLabel.getFont();
+        headerTitleLabel.setFont(currentFont.deriveFont(Font.BOLD));
 
         JPanel titlePanel = new JPanel(new BorderLayout());
         titlePanel.setBorder(BorderFactory.createCompoundBorder(BorderFactory.createEtchedBorder(),
@@ -55,12 +56,21 @@ public class ZenyardDialogComponentProvider extends DialogComponentProvider {
         JPanel centerPanel = new JPanel();
         centerPanel.setLayout(new BoxLayout(centerPanel, BoxLayout.X_AXIS));
         centerPanel.add(Box.createHorizontalGlue());
-        centerPanel.add(titleLabel);
+        centerPanel.add(headerTitleLabel);
         centerPanel.add(Box.createHorizontalGlue());
 
         titlePanel.add(centerPanel, BorderLayout.CENTER);
 
         return titlePanel;
+    }
+
+    protected void updateTitlePanel(String title) {
+        if (headerTitleLabel == null) {
+            return;
+        }
+        headerTitleLabel.setText(title);
+        headerTitleLabel.revalidate();
+        headerTitleLabel.repaint();
     }
 
     private ImageIcon scaleIcon(ImageIcon icon, int maxSizePx) {

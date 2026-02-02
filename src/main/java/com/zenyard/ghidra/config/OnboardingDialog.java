@@ -58,7 +58,7 @@ public class OnboardingDialog extends ZenyardDialogComponentProvider {
 
     private void buildPanel() {
         JPanel contentPanel = new JPanel(new BorderLayout());
-        JPanel titlePanel = createTitlePanel("Zenyard Setup");
+        JPanel titlePanel = createTitlePanel(getHeaderTitleForStep());
         contentPanel.add(titlePanel, BorderLayout.NORTH);
 
         cardLayout = new CardLayout();
@@ -195,6 +195,7 @@ public class OnboardingDialog extends ZenyardDialogComponentProvider {
 
     private void showStep() {
         cardLayout.show(cardPanel, steps[stepIndex]);
+        updateTitlePanel(getHeaderTitleForStep());
         updateButtonState();
     }
 
@@ -207,6 +208,17 @@ public class OnboardingDialog extends ZenyardDialogComponentProvider {
         nextButton.setEnabled(nextEnabled);
         nextButton.setText(stepIndex == steps.length - 1 ? "Finish" : "Next");
     }
+
+    private String getHeaderTitleForStep() {
+        if (STEP_EULA.equals(steps[stepIndex])) {
+            return "The Fine Print";
+        }
+        if (STEP_CONFIG.equals(steps[stepIndex])) {
+            return "Wire It Up (API Key + Server URL)";
+        }
+        return "Hello, reverse engineer";
+    }
+
 
     private String getPluginDescription() {
         PluginInfo info = ZenyardGhidraPlugin.class.getAnnotation(PluginInfo.class);

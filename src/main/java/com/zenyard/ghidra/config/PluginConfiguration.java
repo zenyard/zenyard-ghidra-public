@@ -38,7 +38,7 @@ public class PluginConfiguration {
     private final Integer acceptedEulaVersion;
     
     // Default values matching IDA plugin
-    private static final String DEFAULT_SERVER_URL = "https://api.zenyard.com";
+    private static final String DEFAULT_SERVER_URL = "https://api.zenyard.ai";
     private static final String DEFAULT_LOG_LEVEL = "INFO";
     private static final boolean DEFAULT_SHOW_INITIAL_UPLOAD_MESSAGE = true;
     private static final boolean DEFAULT_REQUEST_BINARY_INSTRUCTIONS = true;
