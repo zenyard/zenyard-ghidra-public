@@ -200,11 +200,12 @@ public class StatusBarManager {
             viewModel.updateState(state);
             return;
         }
+        boolean showReviewTerms = false;
         if (activeTask.isPresent()) {
             TaskStatus task = activeTask.get();
             state = new StatusBarState(task.taskId, task.priority, task.status, task.progress,
                 task.indeterminate, current.isShowRerun(), current.isShowInitialUpload(),
-                current.isShowWarningIcon(), current.isShowReviewTerms());
+                current.isShowWarningIcon(), showReviewTerms);
         } else {
             boolean showInitialUpload = hasPersistedInitialQuestionsDeferred();
             if (showInitialUpload) {
@@ -212,7 +213,7 @@ public class StatusBarManager {
                     .withShowInitialUpload(true)
                     .withStatus("Click to analyze with Zenyard")
                     .withShowWarningIcon(current.isShowWarningIcon())
-                    .withShowReviewTerms(current.isShowReviewTerms());
+                    .withShowReviewTerms(showReviewTerms);
             } else {
                 boolean showRerun = canShowRerun() &&
                     (current.isShowRerun() || hasPersistedChangesDetected());
@@ -221,11 +222,11 @@ public class StatusBarManager {
                         .withShowRerun(true)
                         .withStatus("Updates detected — Click to analyze")
                         .withShowWarningIcon(current.isShowWarningIcon())
-                        .withShowReviewTerms(current.isShowReviewTerms());
+                        .withShowReviewTerms(showReviewTerms);
                 } else {
                     state = StatusBarState.empty()
                         .withShowWarningIcon(current.isShowWarningIcon())
-                        .withShowReviewTerms(current.isShowReviewTerms());
+                        .withShowReviewTerms(showReviewTerms);
                 }
             }
         }

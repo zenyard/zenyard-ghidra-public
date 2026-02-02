@@ -11,6 +11,7 @@ import com.zenyard.ghidra.api.generated.api.UserApi;
 import com.zenyard.ghidra.copilot.CopilotConfig;
 import com.zenyard.ghidra.copilot.CopilotConfigMapper;
 import com.zenyard.ghidra.config.EulaDialog;
+import com.zenyard.ghidra.config.OnboardingDialog;
 import com.zenyard.ghidra.config.ZenyardOptions;
 import com.zenyard.ghidra.copilot.CopilotController;
 import com.zenyard.ghidra.copilot.CopilotProvider;
@@ -378,17 +379,16 @@ public class ZenyardService {
                     Msg.warn(this, "Review Terms ignored: options unavailable");
                     return;
                 }
-                boolean accepted = EulaDialog.showDialog(plugin.getTool());
+                boolean accepted = OnboardingDialog.showDialog(plugin.getTool(), options);
                 int acceptedVersion = accepted ? EulaDialog.EULA_VERSION : -1;
                 try {
                     options.updateConfiguration(Map.of("accepted_eula_version", acceptedVersion));
-                    if (accepted) {
-                        Msg.showInfo(this, plugin.getTool().getActiveWindow(), "Zenyard",
-                            "EULA Terms accepted, restart Ghidra to start using Zenyard.");
-                    }
                 } catch (java.io.IOException e) {
                     Msg.showError(this, plugin.getTool().getActiveWindow(), "Configuration Error",
                         "Failed to update EULA acceptance in zenyard.json", e);
+                }
+                if (accepted) {
+                    plugin.activateAfterEulaAcceptance();
                 }
                 if (statusBarManager != null) {
                     statusBarManager.refreshDisplayNow();

@@ -25,10 +25,6 @@ public class EulaDialog extends ZenyardDialogComponentProvider {
     public static final int EULA_VERSION = 1;
 
     private static final String EULA_TEXT = String.join("\n",
-        "Terms of Use",
-        "",
-        "Last Updated: February 1, 2026",
-        "",
         "Please review the terms and conditions that govern your use of the Zenyard platform (the “Solution”).",
         "By using the Solution (as defined below), you acknowledge and agree to these Terms of Use. We are pleased to provide you with access to the Solution under these terms. If you do not agree to these Terms of Use, please refrain from using the Solution.",
         "",
@@ -232,5 +228,9 @@ public class EulaDialog extends ZenyardDialogComponentProvider {
         boolean accepted = dialog.isAccepted();
         Msg.info(EulaDialog.class, "Zenyard: EULA dialog result accepted=" + accepted);
         return accepted;
+    }
+
+    public static String getEulaText() {
+        return EULA_TEXT;
     }
 }

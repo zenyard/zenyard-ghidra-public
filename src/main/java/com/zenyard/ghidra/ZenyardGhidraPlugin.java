@@ -24,6 +24,7 @@ import ghidra.util.Swing;
 import com.zenyard.ghidra.api.generated.ApiClient;
 import com.zenyard.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.ghidra.config.EulaDialog;
+import com.zenyard.ghidra.config.OnboardingDialog;
 import com.zenyard.ghidra.config.ZenyardConfigFile;
 import com.zenyard.ghidra.config.ZenyardOptions;
 import com.zenyard.ghidra.config.LicenseConfigDialog;
@@ -146,70 +147,7 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
             return;
         }
 
-        services.onProgramActivated(program);
-
-        EventDispatcher eventDispatcher = services.getEventDispatcher();
-        eventDispatcher.subscribe(this);
-
-        // Initialize track changes task manager with EventDispatcher
-        trackChangesTaskManager = new TrackChangesTaskManager(tool, eventDispatcher);
-        if (services != null) {
-            services.setTrackChangesTaskManager(trackChangesTaskManager);
-        }
-        
-        // Always start background tasks - they will check their own prerequisites
-        BinariesApi binariesApi = services.getBinariesApi();
-        StatusBarManager statusBarManager = services.getStatusBarManager();
-        if (binariesApi != null && statusBarManager != null) {
-            startBackgroundTasks(program, binariesApi, statusBarManager);
-        }
-
-        // Show configuration dialog after EULA acceptance if needed
-        showConfigurationDialogIfNeeded();
-        
-        // Check if analysis is already complete (for programs analyzed before plugin activation)
-        ZenyardProgramProperties props = new ZenyardProgramProperties(program);
-        String alreadyCompleted = props.getString("initial_analysis_complete");
-        
-        if (!"true".equals(alreadyCompleted)) {
-            // Analysis not complete - register status bar task to show "Waiting for Ghidra"
-            if (statusBarManager != null) {
-                statusBarManager.registerTask(WAITING_FOR_GHIDRA_TASK_ID, 
-                    StatusBarPriorities.WAITING_FOR_GHIDRA);
-                statusBarManager.updateTaskStatus(WAITING_FOR_GHIDRA_TASK_ID, "Waiting for Ghidra", null, true);
-            }
-        } else if (trackChangesTaskManager != null) {
-            // Analysis already complete from a previous session; re-enable change tracking.
-            trackChangesTaskManager.setInitialAnalysisComplete(true);
-            trackChangesTaskManager.setIgnoreEvents(false);
-        }
-        
-        // Always start all initialization tasks - they will check their own state and prerequisites
-        // Tasks will handle their own state checking and use events for prerequisites
-        
-        // 1. AskInitialQuestionsTask - waits for ANALYSIS_COMPLETE, publishes READY_FOR_QUESTIONS
-        AskInitialQuestionsTask askQuestionsTask = new AskInitialQuestionsTask(
-            tool, program, services);
-        executeBackgroundTask(askQuestionsTask);
-        
-        // 2. ShowInitialQuestionsTask - waits for READY_FOR_QUESTIONS, publishes INITIAL_DIALOG_CONFIRMED
-        ShowInitialQuestionsTask showQuestionsTask = new ShowInitialQuestionsTask(
-            tool, program, services);
-        executeBackgroundTask(showQuestionsTask);
-        
-        // 3. StartForegroundTasksTask - processes foreground task queue (may be removed later)
-        StartForegroundTasksTask startForegroundTasksTask = new StartForegroundTasksTask(
-            tool, program, services);
-        executeBackgroundTask(startForegroundTasksTask);
-        
-        // 4. RegisterBinaryTask - start it unconditionally
-        // It will check if already registered and wait for prerequisites (ANALYSIS_COMPLETE + INITIAL_DIALOG_CONFIRMED events)
-        // Publishes BINARY_REGISTERED and BINARY_ID_AVAILABLE events on completion
-        if (binariesApi != null && statusBarManager != null) {
-            RegisterBinaryTask registerTask = new RegisterBinaryTask(
-                tool, binariesApi, options, null, statusBarManager, program, services);
-            executeBackgroundTask(registerTask);
-        }
+        activateForProgram(program);
     }
     
     
@@ -309,11 +247,96 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
         }
     }
 
+    public void activateAfterEulaAcceptance() {
+        if (!options.isEulaAccepted(EulaDialog.EULA_VERSION)) {
+            return;
+        }
+        if (services == null) {
+            services = new ZenyardService(this, options);
+        }
+        if (trackChangesTaskManager != null) {
+            return;
+        }
+        Program program = getCurrentProgram();
+        if (program == null || program.isClosed()) {
+            return;
+        }
+        activateForProgram(program);
+    }
+
+    private void activateForProgram(Program program) {
+        if (services == null) {
+            return;
+        }
+        services.onProgramActivated(program);
+
+        EventDispatcher eventDispatcher = services.getEventDispatcher();
+        eventDispatcher.subscribe(this);
+
+        // Initialize track changes task manager with EventDispatcher
+        trackChangesTaskManager = new TrackChangesTaskManager(tool, eventDispatcher);
+        services.setTrackChangesTaskManager(trackChangesTaskManager);
+        
+        // Always start background tasks - they will check their own prerequisites
+        BinariesApi binariesApi = services.getBinariesApi();
+        StatusBarManager statusBarManager = services.getStatusBarManager();
+        if (binariesApi != null && statusBarManager != null) {
+            startBackgroundTasks(program, binariesApi, statusBarManager);
+        }
+
+        // Show configuration dialog after EULA acceptance if needed
+        showConfigurationDialogIfNeeded();
+        
+        // Check if analysis is already complete (for programs analyzed before plugin activation)
+        ZenyardProgramProperties props = new ZenyardProgramProperties(program);
+        String alreadyCompleted = props.getString("initial_analysis_complete");
+        
+        if (!"true".equals(alreadyCompleted)) {
+            // Analysis not complete - register status bar task to show "Waiting for Ghidra"
+            if (statusBarManager != null) {
+                statusBarManager.registerTask(WAITING_FOR_GHIDRA_TASK_ID, 
+                    StatusBarPriorities.WAITING_FOR_GHIDRA);
+                statusBarManager.updateTaskStatus(WAITING_FOR_GHIDRA_TASK_ID, "Waiting for Ghidra", null, true);
+            }
+        } else if (trackChangesTaskManager != null) {
+            // Analysis already complete from a previous session; re-enable change tracking.
+            trackChangesTaskManager.setInitialAnalysisComplete(true);
+            trackChangesTaskManager.setIgnoreEvents(false);
+        }
+        
+        // Always start all initialization tasks - they will check their own state and prerequisites
+        // Tasks will handle their own state checking and use events for prerequisites
+        
+        // 1. AskInitialQuestionsTask - waits for ANALYSIS_COMPLETE, publishes READY_FOR_QUESTIONS
+        AskInitialQuestionsTask askQuestionsTask = new AskInitialQuestionsTask(
+            tool, program, services);
+        executeBackgroundTask(askQuestionsTask);
+        
+        // 2. ShowInitialQuestionsTask - waits for READY_FOR_QUESTIONS, publishes INITIAL_DIALOG_CONFIRMED
+        ShowInitialQuestionsTask showQuestionsTask = new ShowInitialQuestionsTask(
+            tool, program, services);
+        executeBackgroundTask(showQuestionsTask);
+        
+        // 3. StartForegroundTasksTask - processes foreground task queue (may be removed later)
+        StartForegroundTasksTask startForegroundTasksTask = new StartForegroundTasksTask(
+            tool, program, services);
+        executeBackgroundTask(startForegroundTasksTask);
+        
+        // 4. RegisterBinaryTask - start it unconditionally
+        // It will check if already registered and wait for prerequisites (ANALYSIS_COMPLETE + INITIAL_DIALOG_CONFIRMED events)
+        // Publishes BINARY_REGISTERED and BINARY_ID_AVAILABLE events on completion
+        if (binariesApi != null && statusBarManager != null) {
+            RegisterBinaryTask registerTask = new RegisterBinaryTask(
+                tool, binariesApi, options, null, statusBarManager, program, services);
+            executeBackgroundTask(registerTask);
+        }
+    }
+
     private boolean ensureEulaAccepted() {
         if (options.isEulaAccepted(EulaDialog.EULA_VERSION)) {
             return true;
         }
-        boolean accepted = EulaDialog.showDialog(tool);
+        boolean accepted = OnboardingDialog.showDialog(tool, options);
         int acceptedVersion = accepted ? EulaDialog.EULA_VERSION : -1;
         try {
             options.updateConfiguration(Map.of("accepted_eula_version", acceptedVersion));
