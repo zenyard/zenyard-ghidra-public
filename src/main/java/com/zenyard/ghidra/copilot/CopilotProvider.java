@@ -27,7 +27,7 @@ public class CopilotProvider extends ComponentProvider {
     private java.awt.KeyEventDispatcher ghidraKeyDispatcher;
     
     public CopilotProvider(PluginTool tool, CopilotController controller) {
-        super(tool, "Zenyard Copilot", "Zenyard");
+        super(tool, "", "Zenyard");
         this.controller = controller;
         setDefaultWindowPosition(WindowPosition.BOTTOM);
         setWindowGroup("Console");

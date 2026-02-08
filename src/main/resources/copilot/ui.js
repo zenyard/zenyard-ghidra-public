@@ -3,9 +3,13 @@
   const input = document.getElementById("input");
   const sendBtn = document.getElementById("sendBtn");
   const stopBtn = document.getElementById("stopBtn");
+  const closeBtn = document.getElementById("closeBtn");
+  const clearBtn = document.getElementById("clearBtn");
   const typingIndicator = document.getElementById("typingIndicator");
   const app = document.getElementById("app");
   const bridgeEl = document.getElementById("dom-bridge");
+  const emptyState = document.getElementById("emptyState");
+  const statusPill = document.getElementById("statusPill");
 
   const state = {
     messages: [],
@@ -13,10 +17,28 @@
     error: null,
     thinking: false,
     thinkingText: null,
+    autocomplete: null,
   };
 
   let lastStreamingIndex = null;
   let lastStreamingText = "";
+
+  const AUTOCOMPLETE_DEBOUNCE_MS = 200;
+  const AUTOCOMPLETE_RESULT_LIMIT = 20;
+  let autocompleteTimer = null;
+  let autocompleteRequestCounter = 0;
+  const autocompleteState = {
+    open: false,
+    items: [],
+    activeIndex: 0,
+    mention: null,
+    pendingRequestId: null,
+  };
+  const autocompleteEl = document.createElement("div");
+  autocompleteEl.className = "autocomplete hidden";
+  if (app) {
+    app.appendChild(autocompleteEl);
+  }
 
   // Track rendered positions per message for incremental rendering
   const renderedPositions = new Map();
@@ -50,6 +72,404 @@
     }
   }
 
+  function handleLinkClick(event) {
+    const link = event.target?.closest?.("a");
+    if (!link) {
+      return;
+    }
+    const href = link.getAttribute("href");
+    if (!href || !href.startsWith("ghidra://")) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    dispatchBridgeEvent("copilot-navigate", { url: href });
+  }
+
+  function normalizeInputContent() {
+    if (!input) {
+      return;
+    }
+    if (input.innerHTML === "<br>" || input.innerHTML === "<div><br></div>") {
+      input.innerHTML = "";
+    }
+  }
+
+  function setInputText(text) {
+    if (!input) {
+      return;
+    }
+    input.innerText = text;
+    const range = document.createRange();
+    range.selectNodeContents(input);
+    range.collapse(false);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    input.focus();
+  }
+
+  function isMentionToken(node) {
+    return node && node.nodeType === Node.ELEMENT_NODE
+      && node.classList.contains("mention-token");
+  }
+
+  function serializeInputToMarkdown() {
+    if (!input) {
+      return "";
+    }
+    const serializeNode = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        return (node.textContent || "").replace(/\u200B/g, "");
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) {
+        return "";
+      }
+      const tag = node.tagName;
+      if (tag === "BR") {
+        return "\n";
+      }
+      if (tag === "A") {
+        const href = node.getAttribute("href");
+        const label = node.textContent || "";
+        return href ? `[${label}](${href})` : label;
+      }
+      if (node.classList && node.classList.contains("mention-token")) {
+        const href = node.getAttribute("data-href");
+        const label = node.textContent || "";
+        return href ? `[${label}](${href})` : label;
+      }
+      const parts = [];
+      node.childNodes.forEach((child) => {
+        parts.push(serializeNode(child));
+      });
+      if (tag === "DIV" || tag === "P") {
+        return `${parts.join("")}\n`;
+      }
+      return parts.join("");
+    };
+
+    const pieces = [];
+    input.childNodes.forEach((child) => {
+      pieces.push(serializeNode(child));
+    });
+    return pieces.join("").replace(/\n+$/g, "");
+  }
+
+  function findFirstTextNode(node) {
+    if (!node) {
+      return null;
+    }
+    if (node.nodeType === Node.TEXT_NODE) {
+      return node;
+    }
+    for (let i = 0; i < node.childNodes.length; i += 1) {
+      const found = findFirstTextNode(node.childNodes[i]);
+      if (found) {
+        return found;
+      }
+    }
+    return null;
+  }
+
+  function findLastTextNode(node) {
+    if (!node) {
+      return null;
+    }
+    if (node.nodeType === Node.TEXT_NODE) {
+      return node;
+    }
+    for (let i = node.childNodes.length - 1; i >= 0; i -= 1) {
+      const found = findLastTextNode(node.childNodes[i]);
+      if (found) {
+        return found;
+      }
+    }
+    return null;
+  }
+
+  function resolveSelectionContext() {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      return null;
+    }
+    if (!input || !input.contains(selection.focusNode)) {
+      return null;
+    }
+    if (selection.focusNode.nodeType === Node.TEXT_NODE) {
+      return { node: selection.focusNode, offset: selection.focusOffset };
+    }
+    if (selection.focusNode.nodeType === Node.ELEMENT_NODE) {
+      const element = selection.focusNode;
+      const index = selection.focusOffset;
+      const before = element.childNodes[index - 1];
+      const after = element.childNodes[index];
+      const beforeText = findLastTextNode(before);
+      if (beforeText) {
+        return { node: beforeText, offset: beforeText.textContent.length };
+      }
+      const afterText = findFirstTextNode(after);
+      if (afterText) {
+        return { node: afterText, offset: 0 };
+      }
+    }
+    return null;
+  }
+
+  function getMentionFromSelection() {
+    const context = resolveSelectionContext();
+    if (!context) {
+      return null;
+    }
+    const text = context.node.textContent || "";
+    const before = text.slice(0, context.offset);
+    const atIndex = before.lastIndexOf("@");
+    if (atIndex === -1) {
+      return null;
+    }
+    const charBefore = atIndex > 0 ? before[atIndex - 1] : "";
+    if (charBefore && !/[\s([{<>"'.,:;!?]/.test(charBefore)) {
+      return null;
+    }
+    const query = before.slice(atIndex + 1);
+    if (query.length === 0) {
+      return null;
+    }
+    if (/\s/.test(query)) {
+      return null;
+    }
+    return {
+      query,
+      node: context.node,
+      startOffset: atIndex,
+      endOffset: context.offset
+    };
+  }
+
+  function getAdjacentMention(selection, direction) {
+    if (!selection || selection.rangeCount === 0) {
+      return null;
+    }
+    const node = selection.focusNode;
+    const offset = selection.focusOffset;
+    if (!input || !input.contains(node)) {
+      return null;
+    }
+    const parentElement = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    const closestToken = parentElement?.closest?.(".mention-token");
+    if (closestToken) {
+      return closestToken;
+    }
+    if (node.nodeType === Node.TEXT_NODE) {
+      const textLength = (node.textContent || "").length;
+      if (direction === "backward" && offset === 0) {
+        const prev = node.previousSibling || node.parentNode?.previousSibling;
+        return isMentionToken(prev) ? prev : null;
+      }
+      if (direction === "forward" && offset === textLength) {
+        const next = node.nextSibling || node.parentNode?.nextSibling;
+        return isMentionToken(next) ? next : null;
+      }
+      return null;
+    }
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const children = node.childNodes;
+      if (direction === "backward") {
+        const prev = children[offset - 1];
+        return isMentionToken(prev) ? prev : null;
+      }
+      const next = children[offset];
+      return isMentionToken(next) ? next : null;
+    }
+    return null;
+  }
+
+  function removeMentionToken(token) {
+    if (!token || !token.parentNode) {
+      return;
+    }
+    const parent = token.parentNode;
+    const siblings = Array.from(parent.childNodes);
+    const index = siblings.indexOf(token);
+    const prevSibling = siblings[index - 1] || null;
+    const nextSibling = siblings[index + 1] || null;
+    token.remove();
+    const selection = window.getSelection();
+    if (!selection) {
+      return;
+    }
+    selection.removeAllRanges();
+    const range = document.createRange();
+    const prevText = findLastTextNode(prevSibling);
+    let nextText = findFirstTextNode(nextSibling);
+    if (!nextText) {
+      nextText = document.createTextNode("\u200B");
+      if (nextSibling) {
+        parent.insertBefore(nextText, nextSibling);
+      } else {
+        parent.appendChild(nextText);
+      }
+    }
+    if (prevText) {
+      range.setStart(prevText, prevText.textContent.length);
+      range.collapse(true);
+      selection.addRange(range);
+      return;
+    }
+    range.setStart(nextText, Math.min(1, nextText.textContent.length));
+    range.collapse(true);
+    selection.addRange(range);
+  }
+
+  function updateAutocompletePosition() {
+    if (!app || !input) {
+      return;
+    }
+    const appRect = app.getBoundingClientRect();
+    const inputRect = input.getBoundingClientRect();
+    autocompleteEl.style.left = `${inputRect.left - appRect.left}px`;
+    autocompleteEl.style.top = `${inputRect.top - appRect.top - 8}px`;
+    autocompleteEl.style.width = `${inputRect.width}px`;
+  }
+
+  function closeAutocomplete() {
+    autocompleteState.open = false;
+    autocompleteState.items = [];
+    autocompleteState.activeIndex = 0;
+    autocompleteState.mention = null;
+    autocompleteEl.classList.add("hidden");
+    autocompleteEl.innerHTML = "";
+  }
+
+  function renderAutocomplete() {
+    if (!autocompleteState.open || autocompleteState.items.length === 0) {
+      closeAutocomplete();
+      return;
+    }
+    autocompleteEl.innerHTML = "";
+    autocompleteState.items.forEach((item, index) => {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "autocomplete-item";
+      option.textContent = item.name;
+      option.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        selectAutocomplete(index);
+      });
+      option.addEventListener("mouseenter", () => {
+        autocompleteState.activeIndex = index;
+        updateAutocompleteActiveState();
+      });
+      autocompleteEl.appendChild(option);
+    });
+    updateAutocompleteActiveState();
+    autocompleteEl.classList.remove("hidden");
+    updateAutocompletePosition();
+  }
+
+  function updateAutocompleteActiveState() {
+    const options = autocompleteEl.querySelectorAll(".autocomplete-item");
+    options.forEach((option, index) => {
+      option.classList.toggle("active", index === autocompleteState.activeIndex);
+    });
+    const active = options[autocompleteState.activeIndex];
+    if (active && typeof active.scrollIntoView === "function") {
+      active.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function openAutocomplete(items) {
+    autocompleteState.items = items.slice(0, AUTOCOMPLETE_RESULT_LIMIT);
+    autocompleteState.activeIndex = 0;
+    autocompleteState.open = autocompleteState.items.length > 0;
+    renderAutocomplete();
+  }
+
+  function moveAutocompleteSelection(delta) {
+    const count = autocompleteState.items.length;
+    if (!autocompleteState.open || count === 0) {
+      return;
+    }
+    autocompleteState.activeIndex = (autocompleteState.activeIndex + delta + count) % count;
+    if (autocompleteState.activeIndex < 0) {
+      autocompleteState.activeIndex = 0;
+    }
+    renderAutocomplete();
+  }
+
+  function selectAutocomplete(index) {
+    const item = autocompleteState.items[index];
+    if (!item) {
+      return;
+    }
+    const mention = autocompleteState.mention;
+    if (!mention) {
+      closeAutocomplete();
+      return;
+    }
+    const range = document.createRange();
+    range.setStart(mention.node, mention.startOffset);
+    range.setEnd(mention.node, mention.endOffset);
+    range.deleteContents();
+    const token = document.createElement("span");
+    token.className = "mention-token";
+    token.setAttribute("contenteditable", "false");
+    token.setAttribute("data-href", `ghidra://function/${item.address}`);
+    token.textContent = item.name;
+    range.insertNode(token);
+    const spacer = document.createTextNode("\u200B ");
+    token.after(spacer);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    const caretRange = document.createRange();
+    caretRange.setStart(spacer, spacer.textContent.length);
+    caretRange.collapse(true);
+    selection.addRange(caretRange);
+    input.focus();
+    closeAutocomplete();
+  }
+
+  function scheduleAutocomplete() {
+    if (!input) {
+      return;
+    }
+    if (autocompleteTimer) {
+      clearTimeout(autocompleteTimer);
+    }
+    autocompleteTimer = setTimeout(() => {
+      normalizeInputContent();
+      const mention = getMentionFromSelection();
+      if (!mention || mention.query.length === 0) {
+        closeAutocomplete();
+        return;
+      }
+      autocompleteState.mention = mention;
+      const requestId = `req-${Date.now()}-${autocompleteRequestCounter++}`;
+      autocompleteState.pendingRequestId = requestId;
+      dispatchBridgeEvent("copilot-autocomplete", { query: mention.query, requestId });
+    }, AUTOCOMPLETE_DEBOUNCE_MS);
+  }
+
+  function applyAutocompleteState(nextAutocomplete) {
+    if (!nextAutocomplete || !nextAutocomplete.requestId) {
+      return;
+    }
+    if (nextAutocomplete.requestId !== autocompleteState.pendingRequestId) {
+      return;
+    }
+    const currentMention = getMentionFromSelection();
+    if (!currentMention || currentMention.query.length === 0) {
+      closeAutocomplete();
+      return;
+    }
+    const results = Array.isArray(nextAutocomplete.results) ? nextAutocomplete.results : [];
+    if (results.length === 0) {
+      closeAutocomplete();
+      return;
+    }
+    openAutocomplete(results);
+  }
+
   marked.setOptions({
     gfm: true,
     breaks: true,
@@ -57,8 +477,43 @@
     headerIds: false,
   });
 
+  const PURIFY_CONFIG = {
+    USE_PROFILES: { html: true },
+    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|ghidra):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i
+  };
+
   function sanitize(html) {
-    return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+    return DOMPurify.sanitize(html, PURIFY_CONFIG);
+  }
+
+  function linkifyGhidraUrls(text) {
+    if (!text || !text.includes("ghidra://")) {
+      return text;
+    }
+    const pattern = /ghidra:\/\/[^\s)]+/g;
+    let result = "";
+    let lastIndex = 0;
+    let hasChanges = false;
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      const start = match.index;
+      const end = pattern.lastIndex;
+      const url = match[0];
+      const prevChar = start > 0 ? text[start - 1] : "";
+      if (prevChar === "(") {
+        result += text.slice(lastIndex, end);
+      } else {
+        result += text.slice(lastIndex, start);
+        result += `[${url}](${url})`;
+        hasChanges = true;
+      }
+      lastIndex = end;
+    }
+    if (!hasChanges) {
+      return text;
+    }
+    result += text.slice(lastIndex);
+    return result;
   }
 
   function normalizeLanguage(codeEl) {
@@ -427,9 +882,25 @@
       container.appendChild(chips);
     }
 
+    let body = container;
+    if (!message.fromUser) {
+      const bodyEl = document.createElement("div");
+      bodyEl.className = "message-body";
+      const avatar = document.createElement("div");
+      avatar.className = "assistant-avatar";
+      const logo = document.createElement("img");
+      logo.className = "avatar-logo";
+      logo.src = "assets/Avatar.svg";
+      logo.alt = "";
+      avatar.appendChild(logo);
+      bodyEl.appendChild(avatar);
+      container.appendChild(bodyEl);
+      body = bodyEl;
+    }
+
     const bubble = document.createElement("div");
     bubble.className = "bubble";
-    container.appendChild(bubble);
+    body.appendChild(bubble);
 
     return container;
   }
@@ -460,7 +931,7 @@
     // Render new complete blocks
     if (result.blocks.length > 0) {
       result.blocks.forEach(block => {
-        const blockHTML = marked.parse(block.text);
+        const blockHTML = marked.parse(linkifyGhidraUrls(block.text));
         const tempDiv = document.createElement("div");
         tempDiv.innerHTML = sanitize(blockHTML);
         
@@ -476,8 +947,6 @@
     
     // Update streaming content (incomplete portion)
     streamingContent.textContent = result.streamingText;
-    
-    ensureStreamingIndicator(bubble);
 
     bubble.dataset.finalized = "false";
     messageEl.dataset.lastText = text;
@@ -493,37 +962,13 @@
     renderedPositions.delete(messageIndex);
     
     // Render final markdown
-    const html = marked.parse(text);
+    const html = marked.parse(linkifyGhidraUrls(text));
     bubble.innerHTML = sanitize(html);
     enhanceCodeBlocks(bubble);
     bubble.dataset.finalized = "true";
     messageEl.dataset.lastText = text;
     lastStreamingText = "";
     lastStreamingIndex = null;
-  }
-
-  function ensureStreamingIndicator(bubble) {
-    let indicator = bubble.querySelector(".streaming-indicator");
-    if (!indicator) {
-      indicator = document.createElement("div");
-      indicator.className = "streaming-indicator";
-
-      const dots = document.createElement("div");
-      dots.className = "streaming-dots";
-      for (let i = 0; i < 3; i += 1) {
-        const dot = document.createElement("span");
-        dot.className = "streaming-dot";
-        dots.appendChild(dot);
-      }
-
-      const label = document.createElement("span");
-      label.className = "streaming-label";
-      label.textContent = "Streaming";
-
-      indicator.appendChild(dots);
-      indicator.appendChild(label);
-      bubble.appendChild(indicator);
-    }
   }
 
   function renderError(error) {
@@ -544,12 +989,23 @@
   }
 
   function renderMessages(nextState) {
-    if (nextState.messages.length < state.messages.length) {
+    const shouldClear =
+      nextState.messages.length === 0 ||
+      nextState.messages.length < state.messages.length;
+    if (shouldClear) {
+      const preservedEmptyState = emptyState;
       chat.innerHTML = "";
+      if (preservedEmptyState) {
+        chat.appendChild(preservedEmptyState);
+      }
       renderedPositions.clear();
     }
 
     renderError(nextState.error);
+
+    if (emptyState) {
+      emptyState.classList.toggle("hidden", nextState.messages.length > 0);
+    }
 
     nextState.messages.forEach((message, index) => {
       let messageEl = chat.querySelector(`.message[data-index="${index}"]`);
@@ -560,7 +1016,9 @@
 
       if (message.fromUser) {
         const bubble = messageEl.querySelector(".bubble");
-        bubble.textContent = message.text;
+        const text = message.text || "";
+        const html = marked.parse(linkifyGhidraUrls(text));
+        bubble.innerHTML = sanitize(html);
         return;
       }
 
@@ -584,6 +1042,11 @@
         label.textContent = nextState.thinkingText || "Thinking...";
       }
     }
+    if (statusPill) {
+      const label = nextState.thinkingText || (showThinking ? "Thinking..." : "Ready");
+      statusPill.textContent = label;
+      statusPill.classList.toggle("busy", showThinking);
+    }
     if (stopBtn) {
       stopBtn.classList.toggle("hidden", !(nextState.loading || nextState.thinking));
     }
@@ -597,6 +1060,7 @@
     state.error = nextState.error || null;
     state.thinking = Boolean(nextState.thinking);
     state.thinkingText = nextState.thinkingText || null;
+    state.autocomplete = nextState.autocomplete || null;
     logToHost("CopilotUI.darkTheme type=" + typeof nextState.darkTheme +
       " value=" + String(nextState.darkTheme));
     if (nextState.darkTheme === true || nextState.darkTheme === false) {
@@ -608,6 +1072,7 @@
       }
     }
     renderMessages(nextState);
+    applyAutocompleteState(state.autocomplete);
   }
 
   if (window.__copilotStateQueue && Array.isArray(window.__copilotStateQueue)) {
@@ -650,12 +1115,13 @@
   }
 
   function sendMessage() {
-    const text = input.value.trim();
+    const text = serializeInputToMarkdown().trim();
     if (!text) {
       return;
     }
     dispatchBridgeEvent("copilot-send", { message: text });
-    input.value = "";
+    input.innerHTML = "";
+    closeAutocomplete();
   }
 
   dispatchBridgeEvent("copilot-loaded", {});
@@ -663,13 +1129,143 @@
   stopBtn.addEventListener("click", () => {
     dispatchBridgeEvent("copilot-stop", {});
   });
+  if (closeBtn) {
+    closeBtn.addEventListener("click", () => {
+      dispatchBridgeEvent("copilot-close", {});
+    });
+  }
+  if (clearBtn) {
+    clearBtn.addEventListener("click", () => {
+      dispatchBridgeEvent("copilot-clear", {});
+    });
+  }
+  if (chat) {
+    chat.addEventListener("click", handleLinkClick);
+  }
+  if (emptyState) {
+    emptyState.addEventListener("click", (event) => {
+      const target = event.target?.closest?.(".empty-chip");
+      if (!target) {
+        return;
+      }
+      const suggestion = target.dataset.suggestion;
+      if (!suggestion) {
+        return;
+      }
+      event.preventDefault();
+      setInputText(suggestion);
+    });
+  }
 
   input.addEventListener("keydown", (event) => {
+    if (autocompleteState.open) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        moveAutocompleteSelection(1);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        moveAutocompleteSelection(-1);
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        selectAutocomplete(autocompleteState.activeIndex);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeAutocomplete();
+        return;
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       sendMessage();
     }
   });
+
+  input.addEventListener("input", () => {
+    normalizeInputContent();
+    scheduleAutocomplete();
+  });
+  input.addEventListener("click", () => {
+    if (!autocompleteState.open) {
+      return;
+    }
+    const mention = getMentionFromSelection();
+    if (!mention) {
+      closeAutocomplete();
+    }
+  });
+  input.addEventListener("keyup", (event) => {
+    if (!autocompleteState.open) {
+      return;
+    }
+    if (event.key.startsWith("Arrow") || event.key === "Home" || event.key === "End") {
+      const mention = getMentionFromSelection();
+      if (!mention) {
+        closeAutocomplete();
+      }
+    }
+  });
+  input.addEventListener("blur", () => {
+    setTimeout(() => {
+      if (document.activeElement === input) {
+        return;
+      }
+      closeAutocomplete();
+    }, 100);
+  });
+
+  input.addEventListener("click", (event) => {
+    const mentionToken = event.target?.closest?.(".mention-token");
+    const href = mentionToken?.getAttribute("data-href")
+      || event.target?.closest?.("a")?.getAttribute?.("href");
+    if (href && href.startsWith("ghidra://")) {
+      event.preventDefault();
+      event.stopPropagation();
+      dispatchBridgeEvent("copilot-navigate", { url: href });
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (!autocompleteState.open || event.defaultPrevented) {
+      return;
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      selectAutocomplete(autocompleteState.activeIndex);
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveAutocompleteSelection(1);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveAutocompleteSelection(-1);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeAutocomplete();
+    }
+  }, true);
+
+  window.addEventListener("keydown", (event) => {
+    if (!autocompleteState.open) {
+      return;
+    }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      selectAutocomplete(autocompleteState.activeIndex);
+    }
+  }, true);
 
   document.addEventListener("focusin", (event) => {
     if (app && app.contains(event.target)) {
@@ -689,5 +1285,16 @@
 
   window.CopilotUI = {
     setState,
+    isAutocompleteOpen: () => autocompleteState.open,
+    acceptAutocomplete: () => {
+      if (autocompleteState.open) {
+        selectAutocomplete(autocompleteState.activeIndex);
+      }
+    },
+    moveAutocompleteSelection: (delta) => {
+      if (autocompleteState.open) {
+        moveAutocompleteSelection(delta);
+      }
+    },
   };
 })();

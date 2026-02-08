@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -7,9 +7,61 @@
   <link rel="stylesheet" href="ui.css" />
   <link rel="stylesheet" href="prism.css" />
 </head>
-<body>
+<body data-theme="light">
   <div id="app" class="app">
-    <main id="chat" class="chat"></main>
+    <header class="app-header">
+      <div class="header-left">
+        <div class="header-avatar" aria-hidden="true">
+          <img class="avatar-logo" src="assets/Avatar.svg" alt="" />
+        </div>
+        <span class="header-title">Zenyard Copilot</span>
+      </div>
+      <div class="header-actions">
+        <button id="clearBtn" class="header-btn icon" type="button" title="Clear chat">
+          <span class="icon-wrap" aria-hidden="true">
+            <img class="icon icon-light" src="assets/header_clear_light.svg" alt="" />
+            <img class="icon icon-dark" src="assets/header_clear_dark.svg" alt="" />
+          </span>
+        </button>
+        <button id="closeBtn" class="header-btn icon" type="button" title="Close" aria-label="Close">
+          <span class="icon-wrap" aria-hidden="true">
+            <svg class="icon icon-light" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M4 4L12 12" stroke="#0A0A0A" stroke-width="1.33333" stroke-linecap="round"/>
+              <path d="M12 4L4 12" stroke="#0A0A0A" stroke-width="1.33333" stroke-linecap="round"/>
+            </svg>
+            <svg class="icon icon-dark" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M4 4L12 12" stroke="#F3F4F6" stroke-width="1.33333" stroke-linecap="round"/>
+              <path d="M12 4L4 12" stroke="#F3F4F6" stroke-width="1.33333" stroke-linecap="round"/>
+            </svg>
+          </span>
+        </button>
+        <span id="statusPill" class="status-pill">Ready</span>
+      </div>
+    </header>
+
+    <main id="chat" class="chat">
+      <section id="emptyState" class="empty-state">
+        <div class="empty-orb"></div>
+        <h1 class="empty-title">Ask Copilot about this program</h1>
+        <p class="empty-subtitle">
+          Summaries, explanations, and navigation for the current analysis.
+        </p>
+        <div class="empty-actions">
+          <button class="empty-chip" data-suggestion="Summarize what this function does.">
+            Summarize this function
+          </button>
+          <button class="empty-chip" data-suggestion="Explain the control flow in this function.">
+            Explain control flow
+          </button>
+          <button class="empty-chip" data-suggestion="Find where this function is called.">
+            Find callers
+          </button>
+          <button class="empty-chip" data-suggestion="What does this program do overall?">
+            Program overview
+          </button>
+        </div>
+      </section>
+    </main>
 
     <div id="typingIndicator" class="typing hidden">
       <span class="dot"></span>
@@ -19,18 +71,20 @@
     </div>
 
     <footer class="input-bar">
-      <textarea id="input" class="input" rows="2" placeholder="Ask Copilot..."></textarea>
+      <div id="input" class="input" contenteditable="true" role="textbox" aria-multiline="true"
+        data-placeholder="Ask the Copilot..."></div>
       <button id="stopBtn" class="btn btn-secondary btn-icon hidden" title="Stop">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
           <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="2"/>
           <rect x="5" y="5" width="6" height="6" fill="currentColor"/>
         </svg>
       </button>
-      <button id="sendBtn" class="btn btn-primary btn-icon" title="Send">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M4 12L20 4L16 20L12 12L4 12Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-          <path d="M12 12L16 20L20 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-        </svg>
+      <button id="sendBtn" class="btn btn-primary send-button" title="Send">
+        <span class="icon-wrap" aria-hidden="true">
+          <img class="icon icon-light" src="assets/send_light.svg" alt="" />
+          <img class="icon icon-dark" src="assets/send_dark.svg" alt="" />
+        </span>
+        <span>Send</span>
       </button>
     </footer>
   </div>

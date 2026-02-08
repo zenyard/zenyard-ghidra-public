@@ -47,6 +47,7 @@ public class DownloadInferencesTask extends StatusBarAwareTask {
     private final Program program;
     private volatile boolean shouldStop = false;
     private int consecutiveConnectionFailures = 0;
+    private boolean lastConnected = true;
     
     // Event waiting
     private final Object waitLock = new Object();
@@ -164,6 +165,7 @@ public class DownloadInferencesTask extends StatusBarAwareTask {
                         
                         Msg.warn(this, "Connection error downloading inferences: " + rootCause.getMessage() 
                             + " (attempt " + updatedFailures + ", backoff " + backoffMs + "ms)");
+                        updateConnectivity(false);
                         
                         try {
                             Thread.sleep(backoffMs);
@@ -319,9 +321,14 @@ public class DownloadInferencesTask extends StatusBarAwareTask {
      */
     private GetInferencesResponse fetchInferencePage(UUID binaryId, int revision, int cursor) {
         try {
-            return binariesApi.getInferences(revision, binaryId, cursor, MAX_INFERENCES_PER_REQUEST);
+            GetInferencesResponse response = binariesApi.getInferences(revision, binaryId, cursor, MAX_INFERENCES_PER_REQUEST);
+            updateConnectivity(true);
+            return response;
         } catch (Exception e) {
             Msg.warn(this, "Error fetching inference page: " + e.getMessage());
+            if (ConnectionErrorHandler.isConnectionError(e)) {
+                updateConnectivity(false);
+            }
             return null;
         }
     }
@@ -410,6 +417,17 @@ public class DownloadInferencesTask extends StatusBarAwareTask {
     private void setInferenceCursor(int cursor) {
         ZenyardProgramProperties props = new ZenyardProgramProperties(program);
         props.setInt("inference_cursor", cursor);
+    }
+
+    private void updateConnectivity(boolean connected) {
+        if (lastConnected == connected) {
+            return;
+        }
+        lastConnected = connected;
+        java.util.Map<String, Object> payload = new java.util.HashMap<>();
+        payload.put("connected", connected);
+        publishEvent(new ZenyardEvent(ZenyardEvent.EventType.SERVER_CONNECTIVITY_CHANGED,
+            getTaskTitle(), payload));
     }
     
     /**

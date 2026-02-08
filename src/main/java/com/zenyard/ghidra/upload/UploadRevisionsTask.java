@@ -19,6 +19,7 @@ import com.zenyard.ghidra.api.generated.model.Function;
 import com.zenyard.ghidra.api.generated.model.GlobalVariable;
 import com.zenyard.ghidra.api.generated.model.ModelObject;
 import com.zenyard.ghidra.api.generated.model.Range;
+import com.zenyard.ghidra.ZenyardService;
 import com.zenyard.ghidra.events.ZenyardEvent;
 import com.zenyard.ghidra.events.EventDispatcher;
 import com.zenyard.ghidra.tasks.StatusBarAwareTask;
@@ -27,6 +28,7 @@ import com.zenyard.ghidra.storage.SyncStatus;
 import com.zenyard.ghidra.storage.SyncStatusStorage;
 import com.zenyard.ghidra.status.StatusBarManager;
 import com.zenyard.ghidra.status.StatusBarPriorities;
+import com.zenyard.ghidra.usage.UsageState;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
@@ -136,6 +138,9 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
         }
         try {
             try {
+            if (isUsageBlocked()) {
+                return;
+            }
             // Get binary ID from properties
             ZenyardProgramProperties props = new ZenyardProgramProperties(program);
             String binaryIdStr = props.getString("binary_id");
@@ -201,6 +206,10 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
             
             if (monitor.isCancelled() || shouldStop) {
                 Msg.info(this, "UploadRevisionsTask: Cancelled or stopped, aborting upload");
+                return;
+            }
+
+            if (isUsageBlocked()) {
                 return;
             }
             
@@ -349,6 +358,19 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
             runningFlag.set(false);
             RUNNING_UPLOADS.remove(program, runningFlag);
         }
+    }
+
+    private boolean isUsageBlocked() {
+        ZenyardService services = ZenyardService.getInstance();
+        if (services == null) {
+            return false;
+        }
+        UsageState usageState = services.getUsageState();
+        if (usageState != null && usageState.isBlocked()) {
+            UsageState.showBlockedDialog(tool.getActiveWindow(), usageState);
+            return true;
+        }
+        return false;
     }
 
     private void finishAndAnalyzeWithRetry(UUID binaryId, FinishAndAnalyzeCurrentRevisionParams finishParams,

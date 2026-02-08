@@ -196,7 +196,9 @@ public class StatusBarManager {
             state = StatusBarState.empty()
                 .withShowReviewTerms(true)
                 .withStatus("Zenyard disabled — review terms to re-enable")
-                .withShowWarningIcon(current.isShowWarningIcon());
+                .withShowWarningIcon(current.isShowWarningIcon())
+                .withUsageDisplay(current.getUsageText(), current.getUsageTooltip(),
+                    current.isUsageVisible(), current.getUsageLevel());
             viewModel.updateState(state);
             return;
         }
@@ -205,7 +207,8 @@ public class StatusBarManager {
             TaskStatus task = activeTask.get();
             state = new StatusBarState(task.taskId, task.priority, task.status, task.progress,
                 task.indeterminate, current.isShowRerun(), current.isShowInitialUpload(),
-                current.isShowWarningIcon(), showReviewTerms);
+                current.isShowWarningIcon(), showReviewTerms, current.getUsageText(),
+                current.getUsageTooltip(), current.isUsageVisible(), current.getUsageLevel());
         } else {
             boolean showInitialUpload = hasPersistedInitialQuestionsDeferred();
             if (showInitialUpload) {
@@ -213,7 +216,9 @@ public class StatusBarManager {
                     .withShowInitialUpload(true)
                     .withStatus("Click to analyze with Zenyard")
                     .withShowWarningIcon(current.isShowWarningIcon())
-                    .withShowReviewTerms(showReviewTerms);
+                    .withShowReviewTerms(showReviewTerms)
+                    .withUsageDisplay(current.getUsageText(), current.getUsageTooltip(),
+                        current.isUsageVisible(), current.getUsageLevel());
             } else {
                 boolean showRerun = canShowRerun() &&
                     (current.isShowRerun() || hasPersistedChangesDetected());
@@ -222,11 +227,15 @@ public class StatusBarManager {
                         .withShowRerun(true)
                         .withStatus("Updates detected — Click to analyze")
                         .withShowWarningIcon(current.isShowWarningIcon())
-                        .withShowReviewTerms(showReviewTerms);
+                        .withShowReviewTerms(showReviewTerms)
+                        .withUsageDisplay(current.getUsageText(), current.getUsageTooltip(),
+                            current.isUsageVisible(), current.getUsageLevel());
                 } else {
                     state = StatusBarState.empty()
                         .withShowWarningIcon(current.isShowWarningIcon())
-                        .withShowReviewTerms(showReviewTerms);
+                        .withShowReviewTerms(showReviewTerms)
+                        .withUsageDisplay(current.getUsageText(), current.getUsageTooltip(),
+                            current.isUsageVisible(), current.getUsageLevel());
                 }
             }
         }

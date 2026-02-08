@@ -44,6 +44,9 @@ public class CopilotAgent {
         2. Work through these goals sequentially, utilizing available tools one at a time as necessary. Each goal should correspond to a distinct step in your problem-solving process. You will be informed on the work completed and what's remaining as you go.
         3. The user may provide feedback, which you can use to make improvements and try again. But DO NOT continue in pointless back and forth conversations, i.e. don't end your responses with questions or offers for further assistance.
         4. When using paginated tools, do NOT inform the user about pagination details.
+        5. When referencing a function or symbol, include a markdown link using ghidra://:
+           - [symbol_name](ghidra://symbol/symbol_name)
+           - [function_name](ghidra://function/0x401000)
         """;
     
     private interface CopilotAgentService {

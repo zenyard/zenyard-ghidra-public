@@ -57,7 +57,10 @@ public class ZenyardEvent {
         ANALYSIS_STATUS_UPDATED,
 
         /** Server connectivity changed (payload: connected = true/false) */
-        SERVER_CONNECTIVITY_CHANGED
+        SERVER_CONNECTIVITY_CHANGED,
+
+        /** User usage updated (payload: usageState) */
+        USAGE_UPDATED
     }
     
     private final EventType type;

@@ -95,6 +95,7 @@ public class TrackChangesTask implements EventProducer {
     private TransactionListener transactionListener;
     private volatile boolean ignoreEvents = true;
     private volatile boolean initialAnalysisComplete = false;
+    private volatile boolean trackingEnabled = false;
     private volatile boolean trackingEditLabelTransaction = false;
     private final Set<Address> editLabelAffectedAddresses = new HashSet<>();
     
@@ -215,6 +216,13 @@ public class TrackChangesTask implements EventProducer {
      */
     public void setInitialAnalysisComplete(boolean complete) {
         this.initialAnalysisComplete = complete;
+    }
+
+    /**
+     * Set whether change tracking is enabled after initialization.
+     */
+    public void setTrackingEnabled(boolean enabled) {
+        this.trackingEnabled = enabled;
     }
     
     /**
@@ -503,11 +511,16 @@ public class TrackChangesTask implements EventProducer {
     }
 
     public boolean shouldProcessEvents() {
-        Msg.debug(this, "shouldProcessEvents: ignoreEvents=" + ignoreEvents + ", initialAnalysisComplete=" + initialAnalysisComplete + ", program=" + program + ", program.isClosed=" + program.isClosed());
-        return !ignoreEvents && 
-        initialAnalysisComplete && 
-        program != null && 
-        !program.isClosed();
+        Msg.debug(this, "shouldProcessEvents: ignoreEvents=" + ignoreEvents
+            + ", initialAnalysisComplete=" + initialAnalysisComplete
+            + ", trackingEnabled=" + trackingEnabled
+            + ", program=" + program
+            + ", program.isClosed=" + program.isClosed());
+        return !ignoreEvents
+            && initialAnalysisComplete
+            && trackingEnabled
+            && program != null
+            && !program.isClosed();
     }
 
     private boolean isInitialAnalysisComplete() {

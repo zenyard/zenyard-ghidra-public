@@ -35,6 +35,7 @@ public class TrackChangesTaskManager {
          
         currentProgram = program;
         trackChangesTask = new TrackChangesTask(program, syncStatusStorage, eventDispatcher);
+        trackChangesTask.setTrackingEnabled(false);
         
         // Register domain object listener with program
         program.addListener(trackChangesTask.getListener());
@@ -73,6 +74,23 @@ public class TrackChangesTaskManager {
         if (trackChangesTask != null) {
             trackChangesTask.setInitialAnalysisComplete(complete);
         }
+    }
+
+    /**
+     * Enable change tracking after program initialization completes.
+     * Flushes pending events while tracking is disabled to avoid marking
+     * objects dirty during initial database/application state restoration.
+     */
+    public void enableTrackingAfterInitialization() {
+        if (currentProgram == null || trackChangesTask == null) {
+            return;
+        }
+        trackChangesTask.setIgnoreEvents(true);
+        if (!currentProgram.isClosed()) {
+            currentProgram.flushEvents();
+        }
+        trackChangesTask.setTrackingEnabled(true);
+        trackChangesTask.setIgnoreEvents(false);
     }
 
     public boolean shouldProcessEvents() {

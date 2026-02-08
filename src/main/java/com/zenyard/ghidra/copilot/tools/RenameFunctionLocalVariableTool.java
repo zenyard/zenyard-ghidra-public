@@ -4,8 +4,16 @@ import dev.langchain4j.agent.tool.Tool;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
+import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.LocalVariable;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.pcode.HighFunction;
+import ghidra.program.model.pcode.HighFunctionDBUtil;
+import ghidra.program.model.pcode.HighSymbol;
+import ghidra.program.model.pcode.HighVariable;
+import ghidra.program.model.symbol.SourceType;
+import ghidra.program.model.pcode.Varnode;
 
 /**
  * Tool to rename a local variable in a function.
@@ -21,12 +29,12 @@ public class RenameFunctionLocalVariableTool {
     }
     
     @Tool("Rename a local variable in the given function")
-    public void renameFunctionLocalVariable(String address, String fromName, String toName) {
+    public String renameFunctionLocalVariable(String address, String fromName, String toName) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("address", address);
         args.put("from_name", fromName);
         args.put("to_name", toName);
-        ToolUtils.executeTool(context, "rename_function_local_variable", args, () -> {
+        return ToolUtils.executeTool(context, "rename_function_local_variable", args, () -> {
             try {
                 context.checkCancelled();
 
@@ -40,8 +48,13 @@ public class RenameFunctionLocalVariableTool {
                     throw new ToolExecutionException("Failed to retrieve function from address: " + address);
                 }
 
+                if (!com.zenyard.ghidra.illum.InferenceNameUtils.isValidName(toName)) {
+                    throw new ToolExecutionException("Invalid local variable name: " + toName);
+                }
+
                 // Use transaction for program modification
                 int transactionId = program.startTransaction("Zenyard: Rename local variable");
+                boolean committed = false;
                 try {
                     // Decompile function to get HighFunction
                     DecompInterface decompiler = new DecompInterface();
@@ -62,29 +75,81 @@ public class RenameFunctionLocalVariableTool {
                                 + (results.getErrorMessage() != null ? results.getErrorMessage() : "Unknown error"));
                         }
 
-                        // TODO: Implement variable renaming using HighFunction API
-                        // This requires accessing HighVariable objects and renaming them
-                        // For now, this is a placeholder
-                        // In a full implementation, we'd use:
-                        // HighFunction highFunction = results.getHighFunction();
-                        // HighVariable var = highFunction.getLocalSymbolMap().getVariable(fromName);
-                        // if (var != null) {
-                        //     var.setName(toName);
-                        // }
+                        HighFunction highFunction = results.getHighFunction();
+                        if (highFunction == null) {
+                            throw new ToolExecutionException("No high function available for " + address);
+                        }
+
+                        HighSymbol symbol = findSymbolByName(highFunction, fromName);
+                        if (symbol == null) {
+                            throw new ToolExecutionException(
+                                "Variable '" + fromName + "' not found in function at " + address);
+                        }
+
+                        HighVariable highVar = symbol.getHighVariable();
+                        if (highVar == null) {
+                            throw new ToolExecutionException(
+                                "No high variable available for '" + fromName + "' in function at " + address);
+                        }
+
+                        Varnode storage = highVar.getRepresentative();
+                        if (storage == null) {
+                            throw new ToolExecutionException(
+                                "Variable '" + fromName + "' has no representative storage");
+                        }
+
+                        Address storageAddress = storage.getAddress();
+                        if (storageAddress.isUniqueAddress()) {
+                            throw new ToolExecutionException(
+                                "Variable '" + fromName + "' uses unique storage and cannot be renamed");
+                        }
+                        if (!storageAddress.isStackAddress() && !storageAddress.isRegisterAddress()) {
+                            throw new ToolExecutionException(
+                                "Variable '" + fromName + "' is not a local variable");
+                        }
+
+                        LocalVariable localVar = com.zenyard.ghidra.illum.InferenceNameUtils
+                            .findLocalVariableByStorage(function, storage);
+                        if (localVar == null) {
+                            HighFunctionDBUtil.commitLocalNamesToDatabase(highFunction, SourceType.USER_DEFINED);
+                            localVar = com.zenyard.ghidra.illum.InferenceNameUtils
+                                .findLocalVariableByStorage(function, storage);
+                        }
+
+                        if (localVar == null) {
+                            throw new ToolExecutionException(
+                                "Unable to resolve local variable for '" + fromName + "' in function at " + address);
+                        }
+
+                        localVar.setName(toName, SourceType.USER_DEFINED);
+                        committed = true;
+                        return String.format(
+                            "Renamed local variable '%s' to '%s' in function at %s",
+                            fromName, toName, address);
 
                     } finally {
                         decompiler.closeProgram();
                     }
                 } finally {
-                    program.endTransaction(transactionId, true);
+                    program.endTransaction(transactionId, committed);
                 }
-                return null;
             } catch (ToolExecutionException e) {
                 throw e;
             } catch (Exception e) {
                 throw new ToolExecutionException("Failed to rename local variable: " + e.getMessage(), e);
             }
         });
+    }
+
+    private HighSymbol findSymbolByName(HighFunction highFunction, String variableName) {
+        java.util.Iterator<HighSymbol> symbols = highFunction.getLocalSymbolMap().getSymbols();
+        while (symbols.hasNext()) {
+            HighSymbol s = symbols.next();
+            if (s.getName().equals(variableName)) {
+                return s;
+            }
+        }
+        return null;
     }
 }
 

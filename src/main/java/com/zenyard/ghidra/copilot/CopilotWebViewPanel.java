@@ -25,6 +25,8 @@ import javafx.application.Platform;
 import javafx.concurrent.Worker;
 import javafx.embed.swing.JFXPanel;
 import javafx.scene.Scene;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.web.WebEngine;
 import javafx.scene.web.WebView;
 import netscape.javascript.JSObject;
@@ -138,6 +140,39 @@ public class CopilotWebViewPanel extends JPanel {
                 }
             });
 
+            webView.addEventFilter(KeyEvent.KEY_PRESSED, event -> {
+                if (webEngine == null) {
+                    return;
+                }
+                if (event.getCode() != KeyCode.TAB && event.getCode() != KeyCode.ENTER
+                        && event.getCode() != KeyCode.UP && event.getCode() != KeyCode.DOWN) {
+                    return;
+                }
+                try {
+                    Object open = webEngine.executeScript(
+                        "window.CopilotUI && window.CopilotUI.isAutocompleteOpen && window.CopilotUI.isAutocompleteOpen()"
+                    );
+                    if (open instanceof Boolean && (Boolean) open) {
+                        if (event.getCode() == KeyCode.TAB || event.getCode() == KeyCode.ENTER) {
+                            webEngine.executeScript(
+                                "window.CopilotUI && window.CopilotUI.acceptAutocomplete && window.CopilotUI.acceptAutocomplete()"
+                            );
+                        } else if (event.getCode() == KeyCode.UP) {
+                            webEngine.executeScript(
+                                "window.CopilotUI && window.CopilotUI.moveAutocompleteSelection && window.CopilotUI.moveAutocompleteSelection(-1)"
+                            );
+                        } else if (event.getCode() == KeyCode.DOWN) {
+                            webEngine.executeScript(
+                                "window.CopilotUI && window.CopilotUI.moveAutocompleteSelection && window.CopilotUI.moveAutocompleteSelection(1)"
+                            );
+                        }
+                        event.consume();
+                    }
+                } catch (Exception e) {
+                    Msg.debug(this, "Copilot autocomplete key intercept failed: " + e.getMessage());
+                }
+            });
+
             fxPanel.setScene(new Scene(webView));
             URL uiUrl = getClass().getResource("/copilot/ui.html");
             if (uiUrl == null) {
@@ -189,8 +224,11 @@ public class CopilotWebViewPanel extends JPanel {
         ((EventTarget) bridge).addEventListener("copilot-clear", listener, false);
         ((EventTarget) bridge).addEventListener("copilot-stop", listener, false);
         ((EventTarget) bridge).addEventListener("copilot-focus", listener, false);
+        ((EventTarget) bridge).addEventListener("copilot-navigate", listener, false);
+        ((EventTarget) bridge).addEventListener("copilot-autocomplete", listener, false);
         ((EventTarget) bridge).addEventListener("copilot-log", listener, false);
         ((EventTarget) bridge).addEventListener("copilot-loaded", listener, false);
+        ((EventTarget) bridge).addEventListener("copilot-close", listener, false);
         Msg.info(this, "Copilot DOM bridge listeners attached");
         pushStateToDom();
     }
@@ -220,6 +258,21 @@ public class CopilotWebViewPanel extends JPanel {
             }
             return;
         }
+        if ("copilot-navigate".equals(type)) {
+            String url = getPayloadString(payload, "url");
+            if (url != null && controller != null) {
+                SwingUtilities.invokeLater(() -> controller.navigateToLink(url));
+            }
+            return;
+        }
+        if ("copilot-autocomplete".equals(type)) {
+            String query = getPayloadString(payload, "query");
+            String requestId = getPayloadString(payload, "requestId");
+            if (controller != null) {
+                SwingUtilities.invokeLater(() -> controller.requestAutocomplete(query, requestId));
+            }
+            return;
+        }
         if ("copilot-focus".equals(type)) {
             Object focused = payload.get("focused");
             if (focused instanceof Boolean) {
@@ -237,6 +290,12 @@ public class CopilotWebViewPanel extends JPanel {
             String message = getPayloadString(payload, "message");
             if (message != null) {
                 Msg.debug(this, "Copilot UI: " + message);
+            }
+            return;
+        }
+        if ("copilot-close".equals(type)) {
+            if (controller != null) {
+                SwingUtilities.invokeLater(() -> controller.closePanel());
             }
             return;
         }
@@ -311,13 +370,22 @@ public class CopilotWebViewPanel extends JPanel {
         }
         boolean darkTheme = ThemeManager.getInstance().isDarkTheme();
         Msg.debug(this, "Copilot UI: darkTheme = " + darkTheme);
+        UiAutocomplete autocomplete = null;
+        String autocompleteRequestId = viewModel.getAutocompleteRequestId();
+        if (autocompleteRequestId != null) {
+            autocomplete = new UiAutocomplete(
+                autocompleteRequestId,
+                viewModel.getAutocompleteItems()
+            );
+        }
         return new UiState(
             mapped,
             viewModel.isLoading(),
             viewModel.getError(),
             darkTheme,
             viewModel.isThinking(),
-            viewModel.getThinkingText()
+            viewModel.getThinkingText(),
+            autocomplete
         );
     }
 
@@ -363,6 +431,7 @@ public class CopilotWebViewPanel extends JPanel {
         private final boolean darkTheme;
         private final boolean thinking;
         private final String thinkingText;
+        private final UiAutocomplete autocomplete;
 
         private UiState(
                 List<UiMessage> messages,
@@ -370,13 +439,25 @@ public class CopilotWebViewPanel extends JPanel {
                 String error,
                 boolean darkTheme,
                 boolean thinking,
-                String thinkingText) {
+                String thinkingText,
+                UiAutocomplete autocomplete) {
             this.messages = messages;
             this.loading = loading;
             this.error = error;
             this.darkTheme = darkTheme;
             this.thinking = thinking;
             this.thinkingText = thinkingText;
+            this.autocomplete = autocomplete;
+        }
+    }
+
+    private static final class UiAutocomplete {
+        private final String requestId;
+        private final List<CopilotViewModel.AutocompleteItem> results;
+
+        private UiAutocomplete(String requestId, List<CopilotViewModel.AutocompleteItem> results) {
+            this.requestId = requestId;
+            this.results = results;
         }
     }
 

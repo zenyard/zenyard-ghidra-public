@@ -5,6 +5,8 @@ import java.net.UnknownHostException;
 import java.net.http.HttpTimeoutException;
 import java.util.concurrent.TimeoutException;
 
+import com.zenyard.ghidra.api.generated.ApiException;
+
 /**
  * Utility class for handling connection errors and exponential backoff.
  * Provides common functionality for polling tasks that need to handle
@@ -35,6 +37,12 @@ public class ConnectionErrorHandler {
      */
     public static boolean isConnectionError(Throwable e) {
         Throwable rootCause = findRootCause(e);
+        if (rootCause instanceof ApiException) {
+            int statusCode = ((ApiException) rootCause).getCode();
+            if (statusCode == 0 || statusCode >= 500) {
+                return true;
+            }
+        }
         return rootCause instanceof ConnectException 
                || rootCause instanceof UnknownHostException
                || rootCause instanceof HttpTimeoutException

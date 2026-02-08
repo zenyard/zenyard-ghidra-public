@@ -25,6 +25,7 @@ import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
 
 import com.zenyard.ghidra.ZenyardService;
+import com.zenyard.ghidra.usage.UsageState;
 
 /**
  * Background task to register a binary with the API.
@@ -101,6 +102,9 @@ public class RegisterBinaryTask extends StatusBarAwareTask {
     @Override
     protected void doRun(TaskMonitor monitor) {
         try {
+            if (isUsageBlocked()) {
+                return;
+            }
             // Check if already registered (initial state check)
             ZenyardProgramProperties props = new ZenyardProgramProperties(program);
             String existingBinaryId = props.getString("binary_id");
@@ -158,6 +162,10 @@ public class RegisterBinaryTask extends StatusBarAwareTask {
             }
             
             if (monitor.isCancelled() || shouldStop) {
+                return;
+            }
+
+            if (isUsageBlocked()) {
                 return;
             }
 
@@ -273,6 +281,19 @@ public class RegisterBinaryTask extends StatusBarAwareTask {
             Msg.showError(this, parent, "Registration Error", errorMessage, e);
             throw new RuntimeException("Failed to register binary", e);
         }
+    }
+
+    private boolean isUsageBlocked() {
+        ZenyardService services = ZenyardService.getInstance();
+        if (services == null) {
+            return false;
+        }
+        UsageState usageState = services.getUsageState();
+        if (usageState != null && usageState.isBlocked()) {
+            UsageState.showBlockedDialog(tool.getActiveWindow(), usageState);
+            return true;
+        }
+        return false;
     }
     
     /**

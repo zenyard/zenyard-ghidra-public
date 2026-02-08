@@ -41,6 +41,27 @@ public class CopilotViewModel {
             return timestamp;
         }
     }
+
+    /**
+     * Represents an autocomplete suggestion.
+     */
+    public static class AutocompleteItem {
+        private final String name;
+        private final String address;
+
+        public AutocompleteItem(String name, String address) {
+            this.name = name;
+            this.address = address;
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        public String getAddress() {
+            return address;
+        }
+    }
     
     private final List<Message> messages;
     private final List<Runnable> listeners;
@@ -48,6 +69,8 @@ public class CopilotViewModel {
     private String error;
     private boolean thinking;
     private String thinkingText;
+    private List<AutocompleteItem> autocompleteItems;
+    private String autocompleteRequestId;
     
     public CopilotViewModel() {
         this.messages = new CopyOnWriteArrayList<>();
@@ -56,6 +79,8 @@ public class CopilotViewModel {
         this.error = null;
         this.thinking = false;
         this.thinkingText = null;
+        this.autocompleteItems = new ArrayList<>();
+        this.autocompleteRequestId = null;
     }
     
     /**
@@ -193,6 +218,23 @@ public class CopilotViewModel {
                 addMessage(text, false);
             }
         }
+    }
+
+    /**
+     * Set autocomplete results for the current query.
+     */
+    public void setAutocomplete(List<AutocompleteItem> items, String requestId) {
+        this.autocompleteItems = items != null ? new ArrayList<>(items) : new ArrayList<>();
+        this.autocompleteRequestId = requestId;
+        notifyListeners();
+    }
+
+    public List<AutocompleteItem> getAutocompleteItems() {
+        return new ArrayList<>(autocompleteItems);
+    }
+
+    public String getAutocompleteRequestId() {
+        return autocompleteRequestId;
     }
 }
 

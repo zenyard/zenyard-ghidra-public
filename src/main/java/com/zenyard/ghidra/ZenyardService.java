@@ -27,8 +27,10 @@ import com.zenyard.ghidra.status.StatusBarViewModel;
 import com.zenyard.ghidra.storage.ZenyardProgramProperties;
 import com.zenyard.ghidra.tracking.TrackChangesTaskManager;
 import com.zenyard.ghidra.tasks.ForegroundTask;
+import com.zenyard.ghidra.ui.UsageDetailsDialog;
 import com.zenyard.ghidra.upload.QueueRevisionsTask;
 import com.zenyard.ghidra.upload.UploadRevisionsTask;
+import com.zenyard.ghidra.usage.UsageState;
 import com.zenyard.ghidra.util.LoggerUtil;
 import com.zenyard.ghidra.events.EventDispatcher;
 
@@ -71,6 +73,7 @@ public class ZenyardService {
     private EventDispatcher eventDispatcher;
     private AnalysisProgressMonitor analysisProgressMonitor;
     private volatile boolean userConfigFetchStarted;
+    private volatile UsageState usageState = UsageState.unknown();
     
     // Foreground task queue infrastructure
     private final Deque<ForegroundTask> foregroundTaskQueue = new ArrayDeque<>();
@@ -127,6 +130,7 @@ public class ZenyardService {
             fetchUserConfigAsync();
         }
         plugin.getTool().addComponentProvider(copilotProvider, false);
+        plugin.getTool().getWindowManager().showComponentHeader(copilotProvider, false);
         
         // Illuminator will be initialized when program is activated
     }
@@ -287,6 +291,14 @@ public class ZenyardService {
     public UserApi getUserApi() {
         return userApi;
     }
+
+    public UsageState getUsageState() {
+        return usageState;
+    }
+
+    public void setUsageState(UsageState usageState) {
+        this.usageState = usageState != null ? usageState : UsageState.unknown();
+    }
     
     public TrackChangesTaskManager getTrackChangesTaskManager() {
         return trackChangesTaskManager;
@@ -310,6 +322,10 @@ public class ZenyardService {
                 Program program = getCurrentProgram();
                 if (program == null || program.isClosed()) {
                     Msg.warn(this, "Status bar rerun ignored: no active program");
+                    return;
+                }
+                if (isUsageBlocked()) {
+                    showUsageBlockedDialog();
                     return;
                 }
                 if (statusBarManager == null || eventDispatcher == null) {
@@ -344,6 +360,10 @@ public class ZenyardService {
                 Program program = getCurrentProgram();
                 if (program == null || program.isClosed()) {
                     Msg.warn(this, "Status bar initial upload ignored: no active program");
+                    return;
+                }
+                if (isUsageBlocked()) {
+                    showUsageBlockedDialog();
                     return;
                 }
                 if (statusBarManager == null || eventDispatcher == null) {
@@ -394,7 +414,21 @@ public class ZenyardService {
                     statusBarManager.refreshDisplayNow();
                 }
             }
+
+            @Override
+            public void onUsageDetails() {
+                UsageDetailsDialog.showDialog(plugin.getTool(), getUsageState());
+            }
         };
+    }
+
+    private boolean isUsageBlocked() {
+        UsageState state = usageState;
+        return state != null && state.isBlocked();
+    }
+
+    private void showUsageBlockedDialog() {
+        UsageState.showBlockedDialog(plugin.getTool().getActiveWindow(), usageState);
     }
     
     public AnalysisProgressMonitor getAnalysisProgressMonitor() {

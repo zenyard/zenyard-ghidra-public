@@ -7,4 +7,5 @@ public interface StatusBarActions {
     void onRerun();
     void onInitialUpload();
     void onReviewTerms();
+    void onUsageDetails();
 }

@@ -5,6 +5,7 @@ import java.util.Set;
 import com.zenyard.ghidra.ZenyardService;
 import com.zenyard.ghidra.events.ZenyardEvent;
 import com.zenyard.ghidra.events.EventConsumer;
+import com.zenyard.ghidra.usage.UsageState;
 
 /**
  * Updates the status bar state based on events.
@@ -20,7 +21,8 @@ public class StatusBarEventController implements EventConsumer {
     public Set<ZenyardEvent.EventType> getSubscribedEventTypes() {
         return Set.of(
             ZenyardEvent.EventType.CHANGES_DETECTED,
-            ZenyardEvent.EventType.SERVER_CONNECTIVITY_CHANGED
+            ZenyardEvent.EventType.SERVER_CONNECTIVITY_CHANGED,
+            ZenyardEvent.EventType.USAGE_UPDATED
         );
     }
 
@@ -33,6 +35,22 @@ public class StatusBarEventController implements EventConsumer {
             }
             StatusBarState current = viewModel.getStateSnapshot();
             viewModel.updateState(current.withShowWarningIcon(!connected));
+            return;
+        }
+
+        if (event.getType() == ZenyardEvent.EventType.USAGE_UPDATED) {
+            UsageState usageState = event.getPayloadValue("usageState", UsageState.class);
+            if (usageState == null) {
+                return;
+            }
+            StatusBarState current = viewModel.getStateSnapshot();
+            StatusBarState next = current.withUsageDisplay(
+                usageState.getDisplayText(),
+                usageState.getTooltip(),
+                usageState.isVisible(),
+                usageState.getDisplayLevel()
+            );
+            viewModel.updateState(next);
             return;
         }
 

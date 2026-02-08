@@ -23,6 +23,7 @@ import ghidra.util.Swing;
 
 import com.zenyard.ghidra.api.generated.ApiClient;
 import com.zenyard.ghidra.api.generated.api.BinariesApi;
+import com.zenyard.ghidra.api.generated.api.UserApi;
 import com.zenyard.ghidra.config.EulaDialog;
 import com.zenyard.ghidra.config.OnboardingDialog;
 import com.zenyard.ghidra.config.ZenyardConfigFile;
@@ -41,6 +42,7 @@ import com.zenyard.ghidra.illum.SymbolTreeHighlighter;
 import com.zenyard.ghidra.polling.ApplyInferencesTask;
 import com.zenyard.ghidra.polling.DownloadInferencesTask;
 import com.zenyard.ghidra.polling.PollServerStatusTask;
+import com.zenyard.ghidra.polling.PollUsageTask;
 import com.zenyard.ghidra.storage.ZenyardProgramProperties;
 import com.zenyard.ghidra.storage.SyncStatusStorage;
 import com.zenyard.ghidra.status.StatusBarManager;
@@ -299,9 +301,9 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
                 statusBarManager.updateTaskStatus(WAITING_FOR_GHIDRA_TASK_ID, "Waiting for Ghidra", null, true);
             }
         } else if (trackChangesTaskManager != null) {
-            // Analysis already complete from a previous session; re-enable change tracking.
+            // Analysis already complete from a previous session; enable tracking after init.
             trackChangesTaskManager.setInitialAnalysisComplete(true);
-            trackChangesTaskManager.setIgnoreEvents(false);
+            trackChangesTaskManager.enableTrackingAfterInitialization();
         }
         
         // Always start all initialization tasks - they will check their own state and prerequisites
@@ -398,6 +400,7 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
         // Get event dispatcher
         EventDispatcher eventDispatcher = services.getEventDispatcher();
         ApiClient apiClient = services.getApiClient();
+        UserApi userApi = services.getUserApi();
         if (apiClient == null) {
             Msg.debug(this, "PollServerStatusTask: ApiClient unavailable, skipping poller startup");
             return;
@@ -407,6 +410,12 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
         PollServerStatusTask pollStatusTask = new PollServerStatusTask(
             tool, apiClient, program, eventDispatcher);
         executeBackgroundTask(pollStatusTask);
+
+        if (userApi != null) {
+            PollUsageTask pollUsageTask = new PollUsageTask(
+                userApi, services, eventDispatcher);
+            executeBackgroundTask(pollUsageTask);
+        }
         
         // Start continuous ApplyInferencesTask that waits for NEW_INFERENCES_AVAILABLE events
         applyInferencesTask = new ApplyInferencesTask(
@@ -521,7 +530,7 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
         }
         if (trackChangesTaskManager != null) {
             trackChangesTaskManager.setInitialAnalysisComplete(true);
-            trackChangesTaskManager.setIgnoreEvents(false);
+            trackChangesTaskManager.enableTrackingAfterInitialization();
         }
     }
 

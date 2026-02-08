@@ -2,7 +2,9 @@ package com.zenyard.ghidra.status;
 
 import java.awt.BorderLayout;
 import java.awt.Component;
+import java.awt.Cursor;
 import java.awt.Dimension;
+import java.awt.Font;
 
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -13,6 +15,9 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JProgressBar;
 import javax.swing.SwingUtilities;
+import java.awt.Color;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 
 import docking.widgets.label.GDLabel;
 import ghidra.framework.plugintool.PluginTool;
@@ -41,6 +46,8 @@ public class StatusBarComponent extends JPanel {
     private final JButton rerunButton;
     private final JButton reviewTermsButton;
     private final JLabel warningIconLabel;
+    private final JLabel usageLabel;
+    private final Font usageBaseFont;
 
     public StatusBarComponent(PluginTool tool,
             StatusBarViewModel viewModel,
@@ -131,6 +138,24 @@ public class StatusBarComponent extends JPanel {
         unifiedProgressLabel.setVisible(false);
         unifiedStatusPanel.add(unifiedProgressLabel);
 
+        unifiedStatusPanel.add(Box.createHorizontalGlue());
+        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
+
+        usageLabel = new GDLabel("");
+        usageLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
+        usageLabel.setVisible(false);
+        usageLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        usageLabel.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                if (actions != null) {
+                    actions.onUsageDetails();
+                }
+            }
+        });
+        unifiedStatusPanel.add(usageLabel);
+        usageBaseFont = usageLabel.getFont();
+
         unifiedStatusPanel.setVisible(true);
         add(unifiedStatusPanel, BorderLayout.CENTER);
 
@@ -171,9 +196,35 @@ public class StatusBarComponent extends JPanel {
             rerunButton.setVisible(state.isShowRerun());
             warningIconLabel.setVisible(state.isShowWarningIcon());
             reviewTermsButton.setVisible(state.isShowReviewTerms());
+            updateUsageDisplay(state);
             unifiedStatusPanel.revalidate();
             unifiedStatusPanel.repaint();
         });
+    }
+
+    private void updateUsageDisplay(StatusBarState state) {
+        if (!state.isUsageVisible()) {
+            usageLabel.setVisible(false);
+            usageLabel.setText("");
+            usageLabel.setToolTipText("");
+            return;
+        }
+        usageLabel.setText(state.getUsageText() != null ? state.getUsageText() : "");
+        usageLabel.setToolTipText(state.getUsageTooltip());
+        usageLabel.setVisible(true);
+
+        switch (state.getUsageLevel()) {
+            case EXPIRED:
+            case OVER_LIMIT:
+                usageLabel.setForeground(Color.RED);
+                usageLabel.setFont(usageBaseFont.deriveFont(12f));
+                break;
+            case NORMAL:
+            default:
+                usageLabel.setForeground(Color.GRAY);
+                usageLabel.setFont(usageBaseFont.deriveFont(10f));
+                break;
+        }
     }
 
     private void setIcon(JLabel label, String resourcePath, String fallbackText) {
