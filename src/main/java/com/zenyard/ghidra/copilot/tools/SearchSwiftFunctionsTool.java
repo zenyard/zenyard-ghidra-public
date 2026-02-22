@@ -1,5 +1,6 @@
 package com.zenyard.ghidra.copilot.tools;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Program;
@@ -8,7 +9,7 @@ import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
 import com.zenyard.ghidra.copilot.tools.models.Function;
-import com.zenyard.ghidra.copilot.tools.models.PagedResults;
+import com.zenyard.ghidra.copilot.tools.models.ToolOutput;
 import com.zenyard.ghidra.api.generated.model.SwiftFunction;
 
 /**
@@ -25,14 +26,11 @@ public class SearchSwiftFunctionsTool {
         this.program = context.getProgram();
     }
     
-    @Tool("Returns a paginated list of functions with Swift source code matching the given regex pattern. " 
-          + "If next_cursor is not empty, there are more pages which can be fetched using the cursor parameter.")
-    public PagedResults<Function> searchSwiftFunctions(String regex, String cursor) {
+    @Tool("Search functions whose inferred Swift source matches a regex pattern.")
+    public ToolOutput searchSwiftFunctions(
+            @P("Java regex pattern matched against Swift source text.") String regex) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("regex", regex);
-        if (cursor != null) {
-            args.put("cursor", cursor);
-        }
         return ToolUtils.executeTool(context, "search_swift_functions", args, () -> {
             try {
                 context.checkCancelled();
@@ -50,25 +48,30 @@ public class SearchSwiftFunctionsTool {
                         "Invalid regex pattern: " + regex + ". " + e.getMessage(), e);
                 }
 
-                // Use pagination helper with filter for Swift functions matching regex
-                return PaginationHelper.paginateFunctions(
-                    program,
-                    cursor,
-                    null, // No name filter
-                    func -> Function.fromGhidraFunction(func),
-                    func -> {
-                        // Additional filter: check if Swift source matches regex
-                        Address functionAddress = func.getEntryPoint();
-                        SwiftFunction swiftFunction = SwiftUtils.findLatestSwiftFunctionInference(
-                            program, functionAddress);
-                        if (swiftFunction == null || swiftFunction.getSource() == null
-                            || swiftFunction.getSource().isEmpty()) {
-                            return false; // Skip functions without Swift source
-                        }
-                        // Check if Swift source matches regex
-                        return pattern.matcher(swiftFunction.getSource()).find();
+                java.util.List<Function> results = new java.util.ArrayList<>();
+                ghidra.program.model.listing.FunctionIterator iterator =
+                    program.getFunctionManager().getFunctions(true);
+                while (iterator.hasNext()) {
+                    ghidra.program.model.listing.Function func = iterator.next();
+                    Address functionAddress = func.getEntryPoint();
+                    SwiftFunction swiftFunction = SwiftUtils.findLatestSwiftFunctionInference(
+                        program, functionAddress);
+                    if (swiftFunction == null || swiftFunction.getSource() == null
+                        || swiftFunction.getSource().isEmpty()) {
+                        continue;
                     }
-                );
+                    if (pattern.matcher(swiftFunction.getSource()).find()) {
+                        results.add(Function.fromGhidraFunction(func));
+                    }
+                }
+                StringBuilder output = new StringBuilder();
+                for (Function func : results) {
+                    output.append(func.getName())
+                        .append(" ")
+                        .append(func.getAddress())
+                        .append("\n");
+                }
+                return ToolUtils.persistLargeOutput(context, "swift-functions", output.toString(), results.size());
 
             } catch (ToolExecutionException e) {
                 throw e;

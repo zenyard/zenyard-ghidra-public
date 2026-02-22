@@ -30,14 +30,23 @@ import com.zenyard.ghidra.api.generated.ApiClient;
 import com.zenyard.ghidra.api.generated.ApiException;
 import com.zenyard.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.ghidra.api.generated.api.UserApi;
+import com.zenyard.ghidra.copilot.deepagent.CopilotDeepAgent;
+import com.zenyard.ghidra.copilot.deepagent.CopilotDeepAgentConfig;
+import com.zenyard.ghidra.copilot.deepagent.CopilotDeepState;
+import com.zenyard.ghidra.copilot.deepagent.DeepAgentMemoryAdapter;
+import com.zenyard.ghidra.copilot.deepagent.LangSmithTracer;
+import com.zenyard.ghidra.copilot.storage.CopilotArtifactStorage;
 import com.zenyard.ghidra.copilot.tools.CopilotToolRegistry;
+import com.zenyard.ghidra.config.PluginConfiguration;
+import com.zenyard.ghidra.config.ZenyardConfigFile;
 import com.zenyard.ghidra.copilot.tools.ToolUtils;
 import com.zenyard.ghidra.copilot.tools.ToolExecutionListener;
+import com.zenyard.ghidra.ZenyardService;
+import com.zenyard.ghidra.usage.UsageState;
+import org.bsc.langgraph4j.NodeOutput;
 
-import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.memory.ChatMemory;
 import dev.langchain4j.model.chat.ChatModel;
-import dev.langchain4j.model.output.Response;
 
 /**
  * Manages conversation state, interacts with LangChain4j agent, and subscribes to program/decompiler context.
@@ -57,12 +66,21 @@ public class CopilotController {
     private CopilotViewModel viewModel; // Optional view-model
     private Program currentProgram;
     
+    private CopilotDeepAgent deepAgent;
+    private DeepAgentMemoryAdapter deepAgentMemoryAdapter;
     private CopilotAgent agent;
     private CopilotMemory memory;
     private CopilotStreamHandler streamHandler;
     private CopilotConfig copilotConfig;
     private CopilotSummarizer summarizer;
     private ToolExecutionListener toolExecutionListener;
+    private CopilotArtifactStorage artifactStorage;
+    private int toolCount;
+    private int subAgentCount;
+    private String lastObservedActiveTodo;
+    private long lastObservedActiveTodoSinceMs;
+    private volatile long currentRunSendStartNs;
+    private volatile long currentRunLastTodoDoneNs;
     
     public CopilotController(CopilotProvider provider, ApiClient apiClient, BinariesApi binariesApi, UserApi userApi, PluginTool tool) {
         this.provider = provider;
@@ -70,11 +88,44 @@ public class CopilotController {
         this.tool = tool;
         this.viewModel = null; // Optional - can be set later
         this.currentProgram = null;
+        this.deepAgent = null;
+        this.deepAgentMemoryAdapter = null;
         this.agent = null;
         this.memory = null;
         this.streamHandler = null;
         this.copilotConfig = null;
         this.toolExecutionListener = null;
+        this.artifactStorage = null;
+        this.toolCount = 0;
+        this.subAgentCount = 0;
+        this.lastObservedActiveTodo = "";
+        this.lastObservedActiveTodoSinceMs = 0L;
+        this.currentRunSendStartNs = 0L;
+        this.currentRunLastTodoDoneNs = 0L;
+    }
+
+    private static final class DeepAgentRunResult {
+        private final String response;
+        private final long finalStateNs;
+        private final long finalTextNs;
+        private final boolean usedFallback;
+        private final boolean usedStreamBuffer;
+        private final int streamBufferChars;
+
+        private DeepAgentRunResult(
+                String response,
+                long finalStateNs,
+                long finalTextNs,
+                boolean usedFallback,
+                boolean usedStreamBuffer,
+                int streamBufferChars) {
+            this.response = response;
+            this.finalStateNs = finalStateNs;
+            this.finalTextNs = finalTextNs;
+            this.usedFallback = usedFallback;
+            this.usedStreamBuffer = usedStreamBuffer;
+            this.streamBufferChars = streamBufferChars;
+        }
     }
     
     /**
@@ -86,6 +137,9 @@ public class CopilotController {
         if (viewModel != null) {
             this.streamHandler = new CopilotStreamHandler(viewModel);
             this.toolExecutionListener = createToolExecutionListener(viewModel);
+            boolean incrementalStream = getBooleanParam(
+                copilotConfig, false, "deepagent_ui_incremental_stream", "deepAgentUiIncrementalStream");
+            viewModel.setStreamDeltaEnabled(incrementalStream);
         }
     }
     
@@ -102,6 +156,11 @@ public class CopilotController {
      */
     public void setCopilotConfig(CopilotConfig config) {
         this.copilotConfig = config;
+        if (viewModel != null) {
+            boolean incrementalStream = getBooleanParam(
+                config, false, "deepagent_ui_incremental_stream", "deepAgentUiIncrementalStream");
+            viewModel.setStreamDeltaEnabled(incrementalStream);
+        }
         if (currentProgram != null) {
             initializeAgent();
         }
@@ -117,8 +176,10 @@ public class CopilotController {
         }
         
         try {
-            // Create streaming chat model
-            dev.langchain4j.model.chat.StreamingChatModel chatModel =
+            // Create planning and streaming chat models
+            dev.langchain4j.model.chat.ChatModel planningModel =
+                CopilotAgent.createChatModel(copilotConfig);
+            dev.langchain4j.model.chat.StreamingChatModel streamingModel =
                 CopilotAgent.createStreamingChatModel(copilotConfig);
             
             // Create streaming summarization model (separate LLM with maxTokens=10k)
@@ -131,31 +192,73 @@ public class CopilotController {
             // Create memory with TokenCountEstimator
             memory = new CopilotMemory(COPILOT_THREAD_ID, tokenCountEstimator);
             ChatMemory chatMemory = memory.getChatMemory();
+            deepAgentMemoryAdapter = new DeepAgentMemoryAdapter(chatMemory);
             
             // Create summarizer (also needs TokenCountEstimator)
             dev.langchain4j.model.TokenCountEstimator summarizationEstimator = getTokenCountEstimator(null, copilotConfig);
             summarizer = new CopilotSummarizer(summarizationModel, summarizationEstimator);
             
+            artifactStorage = new CopilotArtifactStorage(currentProgram);
+
+            CopilotDeepAgentConfig deepAgentConfig = buildDeepAgentConfig(copilotConfig);
+
+            LangSmithTracer langSmithTracer = createLangSmithTracer();
+
             // Create tools
             CopilotToolRegistry toolRegistry = new CopilotToolRegistry(
                 currentProgram,
-                TaskMonitor.DUMMY, // TODO: Use actual TaskMonitor if available
+                // NOTE: Copilot currently runs in background task style; use DUMMY until
+                // request-scoped monitor propagation is introduced across controller/tool layers.
+                TaskMonitor.DUMMY,
                 tool,
-                toolExecutionListener
+                toolExecutionListener,
+                artifactStorage,
+                CopilotAgent.createSubAgentStreamingChatModel(copilotConfig),
+                CopilotPrompts.SYSTEM_PROMPT,
+                deepAgentConfig.subAgentTimeoutMs(),
+                deepAgentConfig.subAgentRecursionLimit(),
+                langSmithTracer,
+                createSubAgentProgressListener()
             );
             List<Object> tools = toolRegistry.getAllTools();
             
-            // Create agent
-            agent = new CopilotAgent(chatModel, chatMemory, tools, streamHandler);
-            
-            // Set summarizer and memory on agent
-            agent.setSummarizer(summarizer, memory);
+            // Create deep agent graphs
+            deepAgent = new CopilotDeepAgent(
+                planningModel,
+                streamingModel,
+                tools,
+                streamHandler,
+                deepAgentMemoryAdapter,
+                null,
+                CopilotPrompts.SYSTEM_PROMPT,
+                shouldSanitizeToolMessages(copilotConfig),
+                deepAgentConfig,
+                langSmithTracer
+            );
         } catch (Exception e) {
             Msg.showError(this, null, "Copilot Initialization Error",
                 "Failed to initialize Copilot agent: " + e.getMessage(), e);
         }
     }
-    
+
+    private static LangSmithTracer createLangSmithTracer() {
+        try {
+            PluginConfiguration pluginConfig = ZenyardConfigFile.readConfiguration();
+            String apiKey = pluginConfig.getLangsmithApiKey();
+            if (apiKey == null || apiKey.isBlank()) {
+                return new LangSmithTracer();
+            }
+            return new LangSmithTracer(
+                    apiKey,
+                    pluginConfig.getLangsmithEndpoint(),
+                    pluginConfig.getLangsmithProject());
+        } catch (Exception e) {
+            Msg.debug(CopilotController.class,
+                    "LangSmith tracer: config not available, tracing disabled");
+            return new LangSmithTracer();
+        }
+    }
+
     /**
      * Clear the conversation.
      */
@@ -164,8 +267,14 @@ public class CopilotController {
         if (memory != null) {
             memory.clear();
         }
+        if (deepAgentMemoryAdapter != null) {
+            deepAgentMemoryAdapter.clear();
+        }
         if (viewModel != null) {
             viewModel.clearMessages();
+            viewModel.clearTodos();
+            viewModel.clearToolHistory();
+            viewModel.clearSubAgentStreaming();
         }
     }
     
@@ -471,6 +580,21 @@ public class CopilotController {
     }
     
     public void sendMessage(String message) {
+        ZenyardService services = ZenyardService.getInstance();
+        if (services != null) {
+            if (!services.isServerConnected()) {
+                return;
+            }
+            UsageState usageState = services.getUsageState();
+            if (usageState != null && usageState.isBlocked()) {
+                return;
+            }
+        }
+        currentRunSendStartNs = System.nanoTime();
+        currentRunLastTodoDoneNs = 0L;
+        if (streamHandler != null) {
+            streamHandler.reset();
+        }
         // Use view-model if available, otherwise update provider directly
         if (viewModel != null) {
             viewModel.addMessage(message, true);
@@ -486,8 +610,8 @@ public class CopilotController {
             });
         }
         
-        // Ensure agent is initialized
-        if (agent == null) {
+        // Ensure deep agent is initialized
+        if (deepAgent == null) {
             if (copilotConfig == null) {
                 handleError("Copilot settings not configured. Please configure Copilot settings.", null);
                 return;
@@ -497,21 +621,94 @@ public class CopilotController {
                 return;
             }
             initializeAgent();
-            if (agent == null) {
+            if (deepAgent == null) {
                 handleError("Copilot agent failed to initialize. Please check logs.", null);
                 return;
             }
         }
         
-        // Send message to agent asynchronously
+        // Send message to deep agent asynchronously
         CompletableFuture.supplyAsync(() -> {
             try {
-                Response<AiMessage> response = agent.chat(message);
-                return response.content().text();
+                NodeOutput<CopilotDeepState> lastOutput = null;
+                for (NodeOutput<CopilotDeepState> output : (Iterable<NodeOutput<CopilotDeepState>>) () ->
+                        deepAgent.stream(message).stream().iterator()) {
+                    lastOutput = output;
+                    if (output == null) {
+                        continue;
+                    }
+                    CopilotDeepState state = output.state();
+                    if (state == null || viewModel == null) {
+                        continue;
+                    }
+                    CopilotDeepState snapshot = state;
+                    SwingUtilities.invokeLater(() -> syncDeepStateToViewModel(snapshot, viewModel));
+                }
+                if (lastOutput == null || lastOutput.state() == null) {
+                    throw new RuntimeException("Deep agent stream completed without state");
+                }
+                long finalStateNs = System.nanoTime();
+                CopilotDeepState finalState = lastOutput.state();
+                if (viewModel != null) {
+                    CopilotDeepState finalSnapshot = finalState;
+                    SwingUtilities.invokeLater(() -> syncDeepStateToViewModel(finalSnapshot, viewModel));
+                }
+                String text = finalState.finalResponse().orElse("");
+                boolean usedStreamBuffer = false;
+                int streamBufferChars = 0;
+                if ((text == null || text.isBlank()) && streamHandler != null) {
+                    String streamed = streamHandler.getCompleteMessage();
+                    streamBufferChars = streamed != null ? streamed.length() : 0;
+                    if (streamed != null && !streamed.isBlank()) {
+                        text = streamed;
+                        usedStreamBuffer = true;
+                    }
+                }
+                boolean usedFallback = false;
+                if (text == null || text.isBlank()) {
+                    usedFallback = true;
+                    Object fallback = deepAgent.buildFinalResponse(finalState)
+                        .get(CopilotDeepState.FINAL_RESPONSE);
+                    text = fallback != null ? String.valueOf(fallback) : "";
+                }
+                String safeText = text != null ? text : "";
+                long finalTextNs = System.nanoTime();
+                if (deepAgent != null) {
+                    deepAgent.endTrace(safeText);
+                }
+                return new DeepAgentRunResult(
+                    safeText,
+                    finalStateNs,
+                    finalTextNs,
+                    usedFallback,
+                    usedStreamBuffer,
+                    streamBufferChars
+                );
             } catch (Exception e) {
+                if (deepAgent != null) {
+                    deepAgent.endTrace("Error: " + e.getMessage());
+                }
                 throw new RuntimeException("Error during agent chat: " + e.getMessage(), e);
             }
-        }).thenAccept(response -> {
+        }).thenAccept(result -> {
+            long uiAppendScheduledNs = System.nanoTime();
+            long runStartNs = currentRunSendStartNs;
+            long lastTodoDoneNs = currentRunLastTodoDoneNs;
+            long stateMs = Math.max(0L, (result.finalStateNs - runStartNs) / 1_000_000L);
+            long textMs = Math.max(0L, (result.finalTextNs - runStartNs) / 1_000_000L);
+            long uiScheduleMs = Math.max(0L, (uiAppendScheduledNs - runStartNs) / 1_000_000L);
+            long todoTailMs = lastTodoDoneNs > 0L
+                ? Math.max(0L, (result.finalTextNs - lastTodoDoneNs) / 1_000_000L)
+                : -1L;
+            Msg.info(this,
+                "DeepAgent timing: stateMs=" + stateMs
+                    + " textMs=" + textMs
+                    + " uiScheduleMs=" + uiScheduleMs
+                    + " todoTailMs=" + todoTailMs
+                    + " usedFallback=" + result.usedFallback
+                    + " usedStreamBuffer=" + result.usedStreamBuffer
+                    + " streamBufferChars=" + result.streamBufferChars);
+
             // Use view-model if available, otherwise update provider directly
             SwingUtilities.invokeLater(() -> {
                 if (viewModel != null) {
@@ -522,11 +719,15 @@ public class CopilotController {
                     if (!messages.isEmpty()) {
                         CopilotViewModel.Message last = messages.get(messages.size() - 1);
                         if (!last.isFromUser() && (last.getText() == null || last.getText().isEmpty())) {
-                            viewModel.appendToLastMessage(response);
+                            viewModel.appendToLastMessage(result.response);
                         }
                     }
+
+                    // Auto-finalize and collapse TODO panel once a final response is shown.
+                    viewModel.finalizeTodos(null);
+                    viewModel.setTodoMinimized(true);
                 } else {
-                    provider.appendMessage("Zenyard: " + response);
+                    provider.appendMessage("Zenyard: " + result.response);
                 }
             });
         }).exceptionally(throwable -> {
@@ -557,23 +758,271 @@ public class CopilotController {
         });
     }
 
+    private boolean shouldSanitizeToolMessages(CopilotConfig config) {
+        if (config == null) {
+            return false;
+        }
+        String policy = getStringParam(config, "tool_message_sanitize", "toolMessageSanitize", "tool_message_policy");
+        if ("always".equalsIgnoreCase(policy) || "true".equalsIgnoreCase(policy)) {
+            return true;
+        }
+        if ("never".equalsIgnoreCase(policy) || "false".equalsIgnoreCase(policy)) {
+            return false;
+        }
+        Boolean explicit = getBooleanParam(config, false, "sanitize_tool_messages", "sanitizeToolMessages");
+        return explicit != null && explicit;
+    }
+
+    private CopilotDeepAgentConfig buildDeepAgentConfig(CopilotConfig config) {
+        if (config == null) {
+            return CopilotDeepAgentConfig.defaults();
+        }
+
+        int recursionLimit = getIntParam(config, 1000, "deepagent_recursion_limit", "deepAgentRecursionLimit");
+        boolean debug = getBooleanParam(config, false, "deepagent_debug", "deepAgentDebug");
+        boolean checkpointing = getBooleanParam(config, false, "deepagent_checkpointing", "deepAgentCheckpointing");
+        boolean releaseThread = getBooleanParam(config, false, "deepagent_release_thread", "deepAgentReleaseThread");
+        boolean interruptBeforeEdge = getBooleanParam(config, false, "deepagent_interrupt_before_edge", "deepAgentInterruptBeforeEdge");
+        boolean parallelToolExecution = getBooleanParam(
+            config, false, "deepagent_parallel_tools", "deepAgentParallelTools");
+        int parallelToolMaxConcurrency = getIntParam(
+            config, 4, "deepagent_parallel_tool_concurrency", "deepAgentParallelToolConcurrency");
+        int responseStreamingTimeoutMs = getIntParam(
+            config, 120_000, "deepagent_response_stream_timeout_ms", "deepAgentResponseStreamTimeoutMs");
+
+        java.util.Set<String> returnDirectTools = getStringSetParam(
+            config, "deepagent_return_direct_tools", "deepAgentReturnDirectTools");
+        java.util.Set<String> interruptsBefore = getStringSetParam(
+            config, "deepagent_interrupt_before", "deepAgentInterruptBefore");
+        java.util.Set<String> interruptsAfter = getStringSetParam(
+            config, "deepagent_interrupt_after", "deepAgentInterruptAfter");
+        String graphId = getStringParam(config, "deepagent_graph_id", "deepAgentGraphId");
+        if (graphId == null || graphId.isBlank()) {
+            graphId = "copilot-deepagent";
+        }
+
+        org.bsc.langgraph4j.checkpoint.BaseCheckpointSaver checkpointSaver = null;
+        if (checkpointing || !interruptsBefore.isEmpty() || !interruptsAfter.isEmpty()) {
+            checkpointSaver = new org.bsc.langgraph4j.checkpoint.MemorySaver();
+        }
+
+        int contextWindowTokens = getIntParam(
+            config, 200_000, "deepagent_context_window_tokens", "deepAgentContextWindowTokens");
+        int summarizationKeepMessages = getIntParam(
+            config, 20, "deepagent_summarization_keep_messages", "deepAgentSummarizationKeepMessages");
+        int toolArgTruncateThreshold = getIntParam(
+            config, 5000, "deepagent_tool_arg_truncate_threshold", "deepAgentToolArgTruncateThreshold");
+        long subAgentTimeoutMs = (long) getIntParam(
+            config, 180_000, "deepagent_subagent_timeout_ms", "deepAgentSubAgentTimeoutMs");
+        int subAgentRecursionLimit = getIntParam(
+            config, 25, "deepagent_subagent_recursion_limit", "deepAgentSubAgentRecursionLimit");
+        long toolCallTimeoutMs = (long) getIntParam(
+            config, 60_000, "deepagent_tool_call_timeout_ms", "deepAgentToolCallTimeoutMs");
+
+        return new CopilotDeepAgentConfig(
+            recursionLimit,
+            debug,
+            returnDirectTools,
+            parallelToolExecution,
+            parallelToolMaxConcurrency,
+            responseStreamingTimeoutMs,
+            "copilot-" + COPILOT_THREAD_ID,
+            checkpointSaver,
+            interruptsBefore,
+            interruptsAfter,
+            releaseThread,
+            interruptBeforeEdge,
+            graphId,
+            contextWindowTokens,
+            0.8,
+            summarizationKeepMessages,
+            toolArgTruncateThreshold,
+            subAgentTimeoutMs,
+            subAgentRecursionLimit,
+            toolCallTimeoutMs
+        );
+    }
+
+    private String getStringParam(CopilotConfig config, String... keys) {
+        if (config == null || config.getAdditionalParams() == null || keys == null) {
+            return null;
+        }
+        for (String key : keys) {
+            if (key == null || key.isBlank()) {
+                continue;
+            }
+            Object value = config.getAdditionalParams().get(key);
+            if (value == null) {
+                continue;
+            }
+            String text = String.valueOf(value).trim();
+            if (!text.isBlank()) {
+                return text;
+            }
+        }
+        return null;
+    }
+
+
+    private Integer getIntParam(CopilotConfig config, int defaultValue, String... keys) {
+        String text = getStringParam(config, keys);
+        if (text == null) {
+            return defaultValue;
+        }
+        try {
+            return Integer.parseInt(text);
+        } catch (NumberFormatException ex) {
+            return defaultValue;
+        }
+    }
+
+    private Boolean getBooleanParam(CopilotConfig config, boolean defaultValue, String... keys) {
+        String text = getStringParam(config, keys);
+        if (text == null) {
+            return defaultValue;
+        }
+        return Boolean.parseBoolean(text);
+    }
+
+    private java.util.Set<String> getStringSetParam(CopilotConfig config, String... keys) {
+        if (config == null || config.getAdditionalParams() == null || keys == null) {
+            return java.util.Set.of();
+        }
+        for (String key : keys) {
+            if (key == null || key.isBlank()) {
+                continue;
+            }
+            Object value = config.getAdditionalParams().get(key);
+            if (value == null) {
+                continue;
+            }
+            if (value instanceof java.util.Collection<?> collection) {
+                java.util.Set<String> out = new java.util.LinkedHashSet<>();
+                for (Object item : collection) {
+                    if (item == null) {
+                        continue;
+                    }
+                    String text = String.valueOf(item).trim();
+                    if (!text.isBlank()) {
+                        out.add(text);
+                    }
+                }
+                return out;
+            }
+            String text = String.valueOf(value);
+            if (text == null || text.isBlank()) {
+                continue;
+            }
+            String[] split = text.split(",");
+            java.util.Set<String> out = new java.util.LinkedHashSet<>();
+            for (String item : split) {
+                if (item == null) {
+                    continue;
+                }
+                String normalized = item.trim();
+                if (!normalized.isBlank()) {
+                    out.add(normalized);
+                }
+            }
+            return out;
+        }
+        return java.util.Set.of();
+    }
+
+    public void setTodoMinimized(boolean minimized) {
+        if (viewModel != null) {
+            viewModel.setTodoMinimized(minimized);
+        }
+    }
+
+    private com.zenyard.ghidra.copilot.deepagent.CopilotTaskToolBuilder.SubAgentProgressListener
+            createSubAgentProgressListener() {
+        return new com.zenyard.ghidra.copilot.deepagent.CopilotTaskToolBuilder.SubAgentProgressListener() {
+            @Override
+            public void onSubAgentStart(String agentType, String description) {
+                if (viewModel != null) {
+                    SwingUtilities.invokeLater(() -> {
+                        viewModel.setThinking(true, "Running " + agentType + " subagent...");
+                        viewModel.setSubAgentStreaming(agentType, "");
+                    });
+                }
+            }
+
+            @Override
+            public void onSubAgentEnd(String agentType, boolean success) {
+                if (viewModel != null) {
+                    SwingUtilities.invokeLater(() -> {
+                        viewModel.clearSubAgentStreaming();
+                        viewModel.setThinking(true, "Thinking...");
+                    });
+                }
+            }
+
+            @Override
+            public void onSubAgentToken(String agentType, String token) {
+                if (viewModel != null) {
+                    SwingUtilities.invokeLater(() ->
+                        viewModel.appendSubAgentToken(token));
+                }
+            }
+        };
+    }
+
     private ToolExecutionListener createToolExecutionListener(CopilotViewModel model) {
         return new ToolExecutionListener() {
             @Override
             public void onToolStart(String toolName, java.util.Map<String, Object> arguments) {
-                SwingUtilities.invokeLater(() -> model.setThinking(true, "Running " + toolName + "..."));
+                SwingUtilities.invokeLater(() ->
+                    model.setThinking(true, "Running " + toolName + "..."));
             }
 
             @Override
             public void onToolSuccess(String toolName, long durationMs) {
-                SwingUtilities.invokeLater(() -> model.setThinking(false, null));
+                SwingUtilities.invokeLater(() -> {
+                    model.addToolHistory(toolName);
+                    model.setThinking(false, null);
+                });
             }
 
             @Override
             public void onToolError(String toolName, Throwable error, long durationMs) {
-                SwingUtilities.invokeLater(() -> model.setThinking(false, null));
+                SwingUtilities.invokeLater(() ->
+                    model.setThinking(false, null));
             }
         };
+    }
+
+    private void syncDeepStateToViewModel(CopilotDeepState state, CopilotViewModel model) {
+        if (state == null || model == null) {
+            return;
+        }
+        String previousActive = lastObservedActiveTodo;
+        String active = state.activeTodo().orElse("");
+        long now = System.currentTimeMillis();
+        if (!java.util.Objects.equals(lastObservedActiveTodo, active)) {
+            lastObservedActiveTodo = active;
+            lastObservedActiveTodoSinceMs = now;
+        }
+        if (previousActive != null && !previousActive.isBlank() && active.isBlank()) {
+            currentRunLastTodoDoneNs = System.nanoTime();
+        }
+        long activeAgeMs = !active.isBlank() ? Math.max(0L, now - lastObservedActiveTodoSinceMs) : 0L;
+        List<String> displayTodos = new ArrayList<>(state.todos());
+        String displayActive = active;
+        List<String> displayCompleted = new ArrayList<>(state.completedTodos());
+        List<String> displayFailed = new ArrayList<>(state.failedTodos());
+
+        String effectiveActive = displayActive;
+        if (!displayActive.isBlank() && activeAgeMs > 5000L) {
+            effectiveActive = "";
+        }
+        model.syncTodoState(
+            displayTodos,
+            effectiveActive.isBlank() ? null : effectiveActive,
+            displayCompleted,
+            displayFailed
+        );
+        model.setToolHistory(new ArrayList<>(state.toolEvents()));
     }
 }
 

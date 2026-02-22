@@ -214,7 +214,7 @@ public class StaticToolsExecutor {
                         .collect(Collectors.toList());
                     InferenceStorage inferenceStorage = new InferenceStorage(program);
                     InferenceApplier inferenceApplier = new InferenceApplier(overviewAnnotator, inferenceStorage, tool);
-                    inferenceApplier.applyInferences(program, convertedInferences);
+                    inferenceApplier.applyInferences(program, convertedInferences, monitor);
                 }
                 
                 monitor.setProgress(100);
@@ -320,7 +320,7 @@ public class StaticToolsExecutor {
                         .collect(Collectors.toList());
                     InferenceStorage inferenceStorage = new InferenceStorage(program);
                     InferenceApplier inferenceApplier = new InferenceApplier(overviewAnnotator, inferenceStorage, tool);
-                    inferenceApplier.applyInferences(program, convertedInferences);
+                    inferenceApplier.applyInferences(program, convertedInferences, monitor);
                 }
                 
                 monitor.setProgress(100);

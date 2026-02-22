@@ -3,6 +3,7 @@ package com.zenyard.ghidra.copilot.tools;
 import java.util.ArrayList;
 import java.util.List;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
@@ -12,8 +13,8 @@ import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceIterator;
 import ghidra.program.model.symbol.ReferenceManager;
 
-import com.zenyard.ghidra.copilot.tools.models.PagedResults;
 import com.zenyard.ghidra.copilot.tools.models.Xref;
+import com.zenyard.ghidra.copilot.tools.models.ToolOutput;
 
 /**
  * Tool to get all references TO an address.
@@ -26,15 +27,11 @@ public class GetXrefsToTool {
         this.context = context;
     }
     
-    @Tool("Returns all references TO the given address. " +
-          "This includes all reference types (calls, data references, etc.). " +
-          "If next_cursor is not empty, there are more pages which can be fetched using the cursor parameter.")
-    public PagedResults<Xref> getXrefsTo(String address, String cursor) {
+    @Tool("Return all references TO a target address (calls, data references, and other ref types).")
+    public ToolOutput getXrefsTo(
+            @P("Target address (hex like `0x401000`).") String address) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("address", address);
-        if (cursor != null) {
-            args.put("cursor", cursor);
-        }
         return ToolUtils.executeTool(context, "get_xrefs_to", args, () -> {
             try {
                 context.checkCancelled();
@@ -55,24 +52,11 @@ public class GetXrefsToTool {
                 List<Xref> allXrefs = new ArrayList<>();
                 FunctionManager functionManager = program.getFunctionManager();
                 
-                // Parse cursor
-                Address cursorAddress = cursor != null ? ToolUtils.parseAddress(program, cursor) : null;
-                boolean pastCursor = (cursorAddress == null);
-                
                 while (refIter.hasNext()) {
                     context.checkCancelled();
                     
                     Reference ref = refIter.next();
                     Address fromAddress = ref.getFromAddress();
-                    
-                    // Skip until past cursor
-                    if (!pastCursor) {
-                        if (fromAddress.compareTo(cursorAddress) > 0) {
-                            pastCursor = true;
-                        } else {
-                            continue;
-                        }
-                    }
                     
                     // Get context (function name if in a function)
                     Function fromFunc = functionManager.getFunctionContaining(fromAddress);
@@ -88,19 +72,18 @@ public class GetXrefsToTool {
                     ));
                 }
                 
-                // Paginate
-                int pageSize = 200;
-                List<Xref> pageXrefs;
-                String nextCursor = null;
-                
-                if (allXrefs.size() > pageSize) {
-                    pageXrefs = allXrefs.subList(0, pageSize);
-                    nextCursor = pageXrefs.get(pageSize - 1).getFromAddress();
-                } else {
-                    pageXrefs = allXrefs;
+                StringBuilder output = new StringBuilder();
+                for (Xref xref : allXrefs) {
+                    output.append(xref.getFromAddress())
+                        .append(" -> ")
+                        .append(xref.getToAddress())
+                        .append(" ")
+                        .append(xref.getReferenceType())
+                        .append(" ")
+                        .append(xref.getContext())
+                        .append("\n");
                 }
-                
-                return new PagedResults<>(pageXrefs, nextCursor);
+                return ToolUtils.persistLargeOutput(context, "xrefs-to", output.toString(), allXrefs.size());
             } catch (ToolExecutionException e) {
                 throw e;
             } catch (Exception e) {

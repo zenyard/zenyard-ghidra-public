@@ -29,54 +29,6 @@ if (System.env.GHIDRA_INSTALL_DIR) {
 else if (project.hasProperty("GHIDRA_INSTALL_DIR")) {
     ghidraInstallDir = project.getProperty("GHIDRA_INSTALL_DIR")
 }
-else {
-    // Try to auto-detect common Ghidra installation locations
-    def commonPaths = []
-    
-    // macOS common locations
-    if (System.getProperty("os.name").toLowerCase().contains("mac")) {
-        def appsDir = new File("/Applications")
-        if (appsDir.exists() && appsDir.isDirectory()) {
-            def ghidraApp = appsDir.listFiles()?.find { 
-                it.isDirectory() && it.name.startsWith("ghidra_") 
-            }
-            if (ghidraApp != null) {
-                commonPaths.add(ghidraApp.absolutePath)
-            }
-        }
-        commonPaths.add(new File(System.getProperty("user.home"), "ghidra_11.0").absolutePath)
-        commonPaths.add(new File(System.getProperty("user.home"), "ghidra_11.1").absolutePath)
-        commonPaths.add(new File(System.getProperty("user.home"), "ghidra_11.2").absolutePath)
-    }
-    
-    // Linux/Unix common locations
-    commonPaths.add(new File(System.getProperty("user.home"), "ghidra_11.0").absolutePath)
-    commonPaths.add(new File(System.getProperty("user.home"), "ghidra_11.1").absolutePath)
-    commonPaths.add(new File(System.getProperty("user.home"), "ghidra_11.2").absolutePath)
-    commonPaths.add("/opt/ghidra")
-    commonPaths.add("/usr/local/ghidra")
-    
-    // Check for relative path (e.g., ../ghidra)
-    def projectRoot = project.projectDir.parentFile
-    if (projectRoot != null) {
-        def relativeGhidra = new File(projectRoot, "ghidra")
-        if (relativeGhidra.exists()) {
-            commonPaths.add(relativeGhidra.absolutePath)
-        }
-    }
-    
-    // Try each path until we find a valid Ghidra installation
-    for (path in commonPaths) {
-        if (path != null) {
-            def testFile = new File(path, "application.properties")
-            if (testFile.exists()) {
-                ghidraInstallDir = path
-                println "Auto-detected Ghidra installation: ${ghidraInstallDir}"
-                break
-            }
-        }
-    }
-}
 
 if (ghidraInstallDir == null) {
     def errorMsg = """
@@ -154,8 +106,35 @@ repositories {
     mavenCentral()
 }
 
-def javafxVersion = '21.0.9'
-def javafxPlatforms = ['mac', 'mac-aarch64', 'win', 'linux']
+// NOTE on JavaFX + Ghidra extensions:
+// OpenJFX publishes platform-specific JARs (linux/win/mac/mac-aarch64) that *all contain the same Java classes*,
+// plus different native libraries. In a Ghidra extension, every JAR under lib/ ends up on the classpath together.
+// If you ship multiple platform JARs side-by-side, classloading order becomes non-deterministic and JavaFX may
+// initialize from the wrong platform JAR, causing startup failures like:
+//   java.lang.RuntimeException: No toolkit found
+//
+// Therefore: build and distribute one extension ZIP per target platform.
+def detectJavafxPlatform = {
+    def os = (System.getProperty("os.name") ?: "").toLowerCase(Locale.ROOT)
+    def arch = (System.getProperty("os.arch") ?: "").toLowerCase(Locale.ROOT)
+    def isAarch64 = arch.contains("aarch64") || arch.contains("arm64")
+    if (os.contains("mac") || os.contains("darwin")) {
+        return isAarch64 ? "mac-aarch64" : "mac"
+    }
+    if (os.contains("win")) {
+        return isAarch64 ? "win-aarch64" : "win"
+    }
+    if (os.contains("linux")) {
+        return isAarch64 ? "linux-aarch64" : "linux"
+    }
+    // Default to linux to keep behavior predictable in CI.
+    return "linux"
+}
+
+def javafxVersion = '21.0.10'
+def javafxTargetPlatform = (project.findProperty("javafxPlatform") ?: detectJavafxPlatform()).toString()
+def javafxMavenPlatforms = ['mac', 'mac-aarch64', 'win', 'linux']
+println "JavaFX target platform: ${javafxTargetPlatform} (override with -PjavafxPlatform=<platform>)"
 
 // Ensure lib/ only contains jars from the current resolved runtimeClasspath
 tasks.named('copyDependencies').configure {
@@ -186,15 +165,35 @@ dependencies {
     
     // For JSON processing
     implementation 'com.google.code.gson:gson:2.10.1'
+    implementation 'org.yaml:snakeyaml:2.2'
 
-    // JavaFX (WebView + Swing embedding) - include all desktop platforms
-    javafxPlatforms.each { platform ->
-        implementation "org.openjfx:javafx-base:${javafxVersion}:${platform}"
-        implementation "org.openjfx:javafx-controls:${javafxVersion}:${platform}"
-        implementation "org.openjfx:javafx-graphics:${javafxVersion}:${platform}"
-        implementation "org.openjfx:javafx-web:${javafxVersion}:${platform}"
-        implementation "org.openjfx:javafx-media:${javafxVersion}:${platform}"
-        implementation "org.openjfx:javafx-swing:${javafxVersion}:${platform}"
+    // JavaFX (WebView + Swing embedding) - only modules needed for WebView + JFXPanel
+    // Required: base, graphics, controls (for web), swing (JFXPanel), web (WebView), media (transitive of web)
+    // Omitted: fxml (unused - avoid bloating extension)
+    def javafxModules = ['javafx-base', 'javafx-controls', 'javafx-graphics', 'javafx-media', 'javafx-swing', 'javafx-web']
+
+    // Build for a single target platform. Override with:
+    //   ./gradlew -PjavafxPlatform=linux buildExtension
+    // Valid values: linux, win, mac, mac-aarch64, linux-aarch64, win-aarch64
+    if (javafxMavenPlatforms.contains(javafxTargetPlatform)) {
+        javafxModules.each { module ->
+            implementation "org.openjfx:${module}:${javafxVersion}:${javafxTargetPlatform}"
+        }
+    } else {
+        // JavaFX ARM64 from JDK 21 full (extracted via scripts/extract-javafx-from-jdk.sh)
+        // org.openjfx doesn't publish linux-aarch64/win-aarch64 - use third-party jars from JDK.
+        def javafxThirdPartyDir = file("${projectDir}/third-party/javafx")
+        javafxModules.each { module ->
+            def jarFile = file("${javafxThirdPartyDir}/${javafxTargetPlatform}/${module}-${javafxVersion}-${javafxTargetPlatform}.jar")
+            if (!jarFile.exists()) {
+                throw new GradleException(
+                    "Missing JavaFX jar for ${javafxTargetPlatform}: ${jarFile}\n" +
+                    "Run ./scripts/extract-javafx-from-jdk.sh to populate third-party/javafx/, " +
+                    "or build for a supported Maven platform: ${javafxMavenPlatforms}"
+                )
+            }
+            implementation files(jarFile)
+        }
     }
     
     // OpenAPI Generator dependencies (required by generated client)
@@ -224,11 +223,24 @@ dependencies {
     // Note: vertex-ai module uses beta versions
     implementation 'dev.langchain4j:langchain4j-vertex-ai-gemini:1.10.0-beta18'
 
+    // LangGraph4j (Deep Agents)
+    implementation platform('org.bsc.langgraph4j:langgraph4j-bom:1.8.0')
+    implementation 'org.bsc.langgraph4j:langgraph4j-core'
+    implementation 'org.bsc.langgraph4j:langgraph4j-langchain4j'
+    implementation 'org.bsc.langgraph4j:langgraph4j-agent-executor'
+
     // Explicit transitive dependencies used at runtime
     api 'com.google.code.findbugs:jsr305:3.0.2'
     implementation 'com.google.auth:google-auth-library-oauth2-http:1.37.1'
     runtimeOnly 'dev.langchain4j:langchain4j-http-client-jdk:1.10.0'
     
+    // LangSmith tracing (vendored JAR + transitive deps)
+    implementation files("${projectDir}/third-party/langsmith/langchain4j-langsmith-1.0.0-20240303.jar")
+    implementation 'com.squareup.retrofit2:retrofit:2.5.0'
+    implementation 'com.squareup.retrofit2:converter-gson:2.5.0'
+    implementation 'com.squareup.retrofit2:converter-scalars:2.5.0'
+    implementation 'io.gsonfire:gson-fire:1.9.0'
+
     // Memory stores (for persistent memory if needed)
     // Note: embeddings module may use different versioning
     // (removed) langchain4j-embeddings-all-minilm-l6-v2 is unused in current codebase
@@ -408,7 +420,10 @@ tasks.named('checkstyleMain').configure {
     }
 }
 
-// Exclude non-extension files from the packaged ZIP
+// Linux ARM64: libjfxwebkit.so is already in javafx-web JAR; JavaFX's NativeLibLoader
+// extracts it to ~/.openjfx/cache/ and loads it. No manual extraction needed.
+// Windows ARM64: jfxwebkit.dll is not distributed; place in os/win_arm_64/ when obtained.
+
 tasks.named('buildExtension').configure {
     exclude(
         '.github/**',
@@ -422,6 +437,8 @@ tasks.named('buildExtension').configure {
         'gradlew',
         'gradlew.bat',
         'README.md',
+        'third-party/**',
+        'os/linux_arm_64/**',
         '**/.DS_Store'
     )
 }

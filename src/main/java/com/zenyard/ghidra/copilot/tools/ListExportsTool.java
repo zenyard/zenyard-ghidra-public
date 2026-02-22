@@ -9,7 +9,7 @@ import ghidra.program.model.symbol.Symbol;
 import ghidra.program.model.symbol.SymbolIterator;
 import ghidra.program.model.symbol.SymbolTable;
 
-import com.zenyard.ghidra.copilot.tools.models.PagedResults;
+import com.zenyard.ghidra.copilot.tools.models.ToolOutput;
 
 /**
  * Tool to list exported symbols (entry points).
@@ -22,13 +22,9 @@ public class ListExportsTool {
         this.context = context;
     }
     
-    @Tool("Returns a paginated list of exported symbols (entry points) in the program. " +
-          "If next_cursor is not empty, there are more pages which can be fetched using the cursor parameter.")
-    public PagedResults<String> listExports(String cursor) {
+    @Tool("Returns a list of exported symbols (entry points) in the program.")
+    public ToolOutput listExports() {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
-        if (cursor != null) {
-            args.put("cursor", cursor);
-        }
         return ToolUtils.executeTool(context, "list_exports", args, () -> {
             try {
                 context.checkCancelled();
@@ -43,10 +39,6 @@ public class ListExportsTool {
                 
                 List<String> allExports = new ArrayList<>();
                 
-                // Parse cursor (use symbol name as cursor)
-                String cursorName = cursor;
-                boolean pastCursor = (cursorName == null);
-                
                 while (allSymbols.hasNext()) {
                     context.checkCancelled();
                     
@@ -59,39 +51,15 @@ public class ListExportsTool {
                     
                     String symbolName = symbol.getName();
                     
-                    // Skip until past cursor
-                    if (!pastCursor) {
-                        if (symbolName.compareTo(cursorName) > 0) {
-                            pastCursor = true;
-                        } else {
-                            continue;
-                        }
-                    }
-                    
                     String exportStr = symbolName + " -> " + ToolUtils.formatAddress(symbol.getAddress());
                     allExports.add(exportStr);
                 }
-                
-                // Paginate
-                int pageSize = 200;
-                List<String> pageExports;
-                String nextCursor = null;
-                
-                if (allExports.size() > pageSize) {
-                    pageExports = allExports.subList(0, pageSize);
-                    // Extract symbol name from last export string
-                    String lastExport = pageExports.get(pageSize - 1);
-                    int arrowIndex = lastExport.indexOf(" -> ");
-                    if (arrowIndex > 0) {
-                        nextCursor = lastExport.substring(0, arrowIndex);
-                    } else {
-                        nextCursor = lastExport;
-                    }
-                } else {
-                    pageExports = allExports;
+
+                StringBuilder output = new StringBuilder();
+                for (String entry : allExports) {
+                    output.append(entry).append("\n");
                 }
-                
-                return new PagedResults<>(pageExports, nextCursor);
+                return ToolUtils.persistLargeOutput(context, "exports", output.toString(), allExports.size());
             } catch (ToolExecutionException e) {
                 throw e;
             } catch (Exception e) {

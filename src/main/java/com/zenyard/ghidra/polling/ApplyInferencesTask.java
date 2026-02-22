@@ -46,6 +46,7 @@ public class ApplyInferencesTask extends StatusBarAwareTask {
     private final Object waitLock = new Object();
     private volatile boolean shouldStop = false;
     private volatile boolean newInferencesAvailable = false;
+    private volatile TaskMonitor runningMonitor;
     
     public ApplyInferencesTask(PluginTool tool, 
                               DownloadInferencesTask.InferenceQueue inferenceQueue,
@@ -83,6 +84,10 @@ public class ApplyInferencesTask extends StatusBarAwareTask {
         } else if (event.getType() == ZenyardEvent.EventType.PROGRAM_DEACTIVATED) {
             synchronized (waitLock) {
                 shouldStop = true;
+                // Actively cancel the monitor to abort decompiler calls quickly.
+                if (runningMonitor != null) {
+                    runningMonitor.cancel();
+                }
                 waitLock.notify(); // Wake up any waiting threads
             }
         }
@@ -90,6 +95,7 @@ public class ApplyInferencesTask extends StatusBarAwareTask {
     
     @Override
     protected void doRun(TaskMonitor monitor) {
+        runningMonitor = monitor;
         Msg.info(this, "ApplyInferencesTask: Starting, waiting for new inferences");
         FunctionOverviewAnnotator overviewAnnotator = new FunctionOverviewAnnotator();
         InferenceStorage inferenceStorage = new InferenceStorage(program);
@@ -133,6 +139,7 @@ public class ApplyInferencesTask extends StatusBarAwareTask {
                 Msg.info(this, "ApplyInferencesTask: Queue is empty, continuing to wait");
             }
         }
+        runningMonitor = null;
     }
     
     /**
@@ -171,7 +178,7 @@ public class ApplyInferencesTask extends StatusBarAwareTask {
 
                         if (!batch.isEmpty()) {
                             try {
-                                inferenceApplier.applyInferences(program, batch);
+                                inferenceApplier.applyInferences(program, batch, monitor, () -> shouldStop);
                                 totalApplied[0] += batch.size();
                                 // Update status bar with progress
                                 if (statusBarManager != null) {
@@ -181,7 +188,19 @@ public class ApplyInferencesTask extends StatusBarAwareTask {
                                     Msg.info(this, "ApplyInferencesTask: Applied " + batch.size() + " results");
                                 }
                             } catch (Exception e) {
-                                // Error applying inferences - continue with next batch
+                                Msg.error(this, "ApplyInferencesTask: Error applying batch of "
+                                    + batch.size() + " inferences: " + e.getMessage(), e);
+                                // Closing/unloading the program can terminate transactions or close the DB
+                                // mid-batch. Continuing to apply inferences after that just spams errors
+                                // and can prolong shutdown.
+                                if (shouldStop || monitor.isCancelled()
+                                    || program == null || program.isClosed()
+                                    || String.valueOf(e.getMessage()).contains("Database is closed")
+                                    || String.valueOf(e.getMessage()).contains("Transaction has been terminated")
+                                    || String.valueOf(e.getMessage()).contains("Attempted to end Transaction")) {
+                                    shouldStop = true;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -190,7 +209,6 @@ public class ApplyInferencesTask extends StatusBarAwareTask {
                 throw new RuntimeException("Failed while applying inferences", e);
             }
             
-            // Update status bar with final messageππ
             if (statusBarManager != null && totalApplied[0] > 0) {
                 statusBarManager.registerTask(LATEST_RESULTS_TASK_ID, LATEST_RESULTS_PRIORITY);
                 statusBarManager.updateTaskStatus(LATEST_RESULTS_TASK_ID, "Latest results applied", null, false);

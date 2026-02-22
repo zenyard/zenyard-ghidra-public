@@ -2,6 +2,7 @@ package com.zenyard.ghidra.copilot.tools;
 
 import java.util.List;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.app.util.demangler.DemangledObject;
 import ghidra.app.util.demangler.DemanglerUtil;
@@ -22,8 +23,9 @@ public class GetSymbolAddressByNameTool {
         this.context = context;
     }
     
-    @Tool("Get address of function or global variable given its name")
-    public String getSymbolAddressByName(String symbolName) {
+    @Tool("Resolve a symbol name to its address. Supports direct symbol names and demangled-name fallback lookup.")
+    public String getSymbolAddressByName(
+            @P("Symbol name to resolve (function/global/label name, mangled or demangled).") String symbolName) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("symbol_name", symbolName);
         return ToolUtils.executeTool(context, "get_symbol_address_by_name", args, () -> {

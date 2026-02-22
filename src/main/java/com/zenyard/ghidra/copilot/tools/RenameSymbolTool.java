@@ -1,5 +1,6 @@
 package com.zenyard.ghidra.copilot.tools;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Program;
@@ -17,8 +18,10 @@ public class RenameSymbolTool {
         this.context = context;
     }
     
-    @Tool("Renames a symbol such as a function or a global variable")
-    public void renameSymbol(String symbolAddress, String newName) {
+    @Tool("Rename a symbol (function/global/label) at a concrete address. Inputs: `symbol_address` and `new_name`.")
+    public void renameSymbol(
+            @P("Address where the target symbol is defined (hex like `0x401000`).") String symbolAddress,
+            @P("New symbol name to assign.") String newName) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("symbol_address", symbolAddress);
         args.put("new_name", newName);

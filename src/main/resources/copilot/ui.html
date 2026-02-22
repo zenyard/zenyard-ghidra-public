@@ -63,6 +63,26 @@
       </section>
     </main>
 
+    <section id="todoSection" class="todo-section hidden">
+      <div class="todo-header">
+        <span class="todo-title">Task Progress</span>
+        <button id="todoToggle" class="todo-toggle" type="button" title="Toggle task progress">
+          <span class="todo-toggle-label">Hide</span>
+        </button>
+      </div>
+      <div id="toolInfo" class="tool-info hidden">
+        <div id="toolHistory" class="tool-history"></div>
+      </div>
+      <ul id="todoList" class="todo-list"></ul>
+      <div id="subAgentBox" class="subagent-box hidden">
+        <div class="subagent-header">
+          <span class="subagent-label">Subagent stream</span>
+          <span id="subAgentTypeName" class="subagent-type"></span>
+        </div>
+        <pre id="subAgentStream" class="subagent-stream"></pre>
+      </div>
+    </section>
+
     <div id="typingIndicator" class="typing hidden">
       <span class="dot"></span>
       <span class="dot"></span>
@@ -73,19 +93,21 @@
     <footer class="input-bar">
       <div id="input" class="input" contenteditable="true" role="textbox" aria-multiline="true"
         data-placeholder="Ask the Copilot..."></div>
-      <button id="stopBtn" class="btn btn-secondary btn-icon hidden" title="Stop">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="2"/>
-          <rect x="5" y="5" width="6" height="6" fill="currentColor"/>
-        </svg>
-      </button>
-      <button id="sendBtn" class="btn btn-primary send-button" title="Send">
-        <span class="icon-wrap" aria-hidden="true">
-          <img class="icon icon-light" src="assets/send_light.svg" alt="" />
-          <img class="icon icon-dark" src="assets/send_dark.svg" alt="" />
-        </span>
-        <span>Send</span>
-      </button>
+      <div class="action-switch">
+        <button id="stopBtn" class="btn btn-secondary btn-icon action-btn is-hidden" title="Stop" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="2"/>
+            <rect x="5" y="5" width="6" height="6" fill="currentColor"/>
+          </svg>
+        </button>
+        <button id="sendBtn" class="btn btn-primary send-button action-btn is-visible" title="Send" aria-hidden="false">
+          <span class="icon-wrap" aria-hidden="true">
+            <img class="icon icon-light" src="assets/send_light.svg" alt="" />
+            <img class="icon icon-dark" src="assets/send_dark.svg" alt="" />
+          </span>
+          <span>Send</span>
+        </button>
+      </div>
     </footer>
   </div>
   <div id="dom-bridge" data-state="" data-payload="" hidden></div>

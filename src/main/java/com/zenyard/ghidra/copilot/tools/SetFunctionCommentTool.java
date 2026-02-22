@@ -1,5 +1,6 @@
 package com.zenyard.ghidra.copilot.tools;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
@@ -15,8 +16,10 @@ public class SetFunctionCommentTool {
         this.context = context;
     }
     
-    @Tool("Sets the function documentation for the given function. Use 80 character lines and format this like a function documentation.")
-    public void setFunctionComment(String address, String comment) {
+    @Tool("Set documentation text for a function. Inputs: `address` (target function location) and `comment` (full documentation text).")
+    public void setFunctionComment(
+            @P("Function address in the current program (hex like `0x401000`).") String address,
+            @P("Documentation/comment text to store on the function. Pass an empty string to clear.") String comment) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("address", address);
         args.put("comment", comment);

@@ -42,7 +42,7 @@ public final class UsageState {
             LimitedUsage limited = (LimitedUsage) actual;
             BigDecimal percentage = limited.getUsagePercentage();
             Double value = percentage != null ? percentage.doubleValue() : null;
-            return new UsageState(Kind.LIMITED, value, limited.getExpiration());
+            return new UsageState(Kind.LIMITED, value, null);
         }
         if (actual instanceof ExpiredUsage) {
             return new UsageState(Kind.EXPIRED, null, null);

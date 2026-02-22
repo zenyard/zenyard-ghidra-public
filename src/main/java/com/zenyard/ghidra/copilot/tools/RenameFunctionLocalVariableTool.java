@@ -1,5 +1,6 @@
 package com.zenyard.ghidra.copilot.tools;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
@@ -28,8 +29,11 @@ public class RenameFunctionLocalVariableTool {
         this.context = context;
     }
     
-    @Tool("Rename a local variable in the given function")
-    public String renameFunctionLocalVariable(String address, String fromName, String toName) {
+    @Tool("Rename one local variable within a function. Inputs: `address` (function location), `from_name` (existing local variable), and `to_name` (new valid local name).")
+    public String renameFunctionLocalVariable(
+            @P("Function address (hex like `0x401000`) where the local variable exists.") String address,
+            @P("Current local variable name in that function.") String fromName,
+            @P("New local variable name to apply.") String toName) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("address", address);
         args.put("from_name", fromName);

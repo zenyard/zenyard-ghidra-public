@@ -3,6 +3,7 @@ package com.zenyard.ghidra.copilot.tools;
 import java.util.ArrayList;
 import java.util.List;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.program.model.data.DataType;
 import ghidra.program.model.listing.Parameter;
@@ -21,9 +22,9 @@ public class GetStackFrameTool {
         this.context = context;
     }
     
-    @Tool("Returns the stack frame information for the given function, including " +
-          "local variables, parameters, frame size, and stack offsets.")
-    public String getStackFrame(String address) {
+    @Tool("Return stack-frame details for one function, including locals, parameters, and frame offsets.")
+    public String getStackFrame(
+            @P("Function address (hex like `0x401000`).") String address) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("address", address);
         return ToolUtils.executeTool(context, "get_stack_frame", args, () -> {

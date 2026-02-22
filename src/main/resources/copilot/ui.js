@@ -10,6 +10,14 @@
   const bridgeEl = document.getElementById("dom-bridge");
   const emptyState = document.getElementById("emptyState");
   const statusPill = document.getElementById("statusPill");
+  const todoSection = document.getElementById("todoSection");
+  const todoList = document.getElementById("todoList");
+  const toolInfo = document.getElementById("toolInfo");
+  const toolHistoryEl = document.getElementById("toolHistory");
+  const todoToggle = document.getElementById("todoToggle");
+  const subAgentBox = document.getElementById("subAgentBox");
+  const subAgentTypeName = document.getElementById("subAgentTypeName");
+  const subAgentStream = document.getElementById("subAgentStream");
 
   const state = {
     messages: [],
@@ -18,10 +26,23 @@
     thinking: false,
     thinkingText: null,
     autocomplete: null,
+    usageBlocked: false,
+    usageBlockedMessage: null,
+    serverBlocked: false,
+    serverBlockedMessage: null,
+    todos: [],
+    activeTodo: null,
+    toolHistory: [],
+    completedTodos: [],
+    failedTodos: [],
+    todoMinimized: false,
+    subAgentType: null,
+    subAgentStreamText: null,
   };
 
   let lastStreamingIndex = null;
   let lastStreamingText = "";
+  let pendingSend = false;
 
   const AUTOCOMPLETE_DEBOUNCE_MS = 200;
   const AUTOCOMPLETE_RESULT_LIMIT = 20;
@@ -42,6 +63,74 @@
 
   // Track rendered positions per message for incremental rendering
   const renderedPositions = new Map();
+
+  function isPlainEnter(event) {
+    if (!event) {
+      return false;
+    }
+    const isEnterKey = event.key === "Enter"
+      || event.code === "Enter"
+      || event.code === "NumpadEnter"
+      || event.keyCode === 13;
+    return isEnterKey && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey;
+  }
+
+  function isInputFocused() {
+    if (!input) {
+      return false;
+    }
+    const active = document.activeElement;
+    return active === input || input.contains(active);
+  }
+
+  function isBusyState(nextState) {
+    const source = nextState || state;
+    return Boolean(source.loading || source.thinking || pendingSend);
+  }
+
+  function setActionButtonVisibility(button, visible) {
+    if (!button) {
+      return;
+    }
+    button.classList.toggle("is-visible", visible);
+    button.classList.toggle("is-hidden", !visible);
+    button.setAttribute("aria-hidden", String(!visible));
+  }
+
+  function syncActionButtons(nextState) {
+    const source = nextState || state;
+    const busy = isBusyState(source);
+    const sendDisabled = Boolean(source.usageBlocked || source.serverBlocked || busy);
+    if (sendBtn) {
+      setActionButtonVisibility(sendBtn, !busy);
+      sendBtn.disabled = sendDisabled;
+      sendBtn.classList.toggle("disabled", sendDisabled);
+    }
+    if (stopBtn) {
+      setActionButtonVisibility(stopBtn, busy);
+    }
+  }
+
+  function hasAssistantResponse(prevMessages, nextMessages) {
+    if (!Array.isArray(nextMessages) || nextMessages.length === 0) {
+      return false;
+    }
+    const nextLast = nextMessages[nextMessages.length - 1];
+    if (!nextLast || nextLast.fromUser) {
+      return false;
+    }
+    if (!Array.isArray(prevMessages) || prevMessages.length === 0) {
+      return true;
+    }
+    const prevLast = prevMessages[prevMessages.length - 1];
+    if (!prevLast || prevLast.fromUser) {
+      return true;
+    }
+    if (prevMessages.length !== nextMessages.length) {
+      return true;
+    }
+    return (prevLast.text || "") !== (nextLast.text || "");
+  }
 
   function dispatchBridgeEvent(type, payload) {
     if (!bridgeEl) {
@@ -807,6 +896,17 @@
       lineOffset = lineEnd + (isLastLine ? 0 : 1);
     }
 
+    // When streaming, the text may not end with a newline - we're still receiving the current line.
+    // Only consider a block complete when we've received the terminating newline.
+    // Otherwise we'd render each token as a separate block (e.g. "H", "He", "Hello" each on its own line).
+    const textEndsWithNewline = text.endsWith('\n');
+    if (!textEndsWithNewline && blocks.length > 0) {
+      const lastBlock = blocks[blocks.length - 1];
+      if (lastBlock.end >= text.length) {
+        blocks.pop();
+      }
+    }
+
     // Return the position up to which we have complete blocks
     const lastCompletePos = blocks.length > 0 ? blocks[blocks.length - 1].end : startPos;
     return { blocks, lastCompletePos, inCodeBlock, currentBlockStart, currentBlockType };
@@ -908,12 +1008,16 @@
   function updateStreaming(messageEl, text) {
     const bubble = messageEl.querySelector(".bubble");
     
-    // Initialize structure if needed
+    // Initialize structure if needed — preserve any thinking section
     let renderedContent = bubble.querySelector(".rendered-content");
     let streamingContent = bubble.querySelector(".streaming-content");
     
     if (!renderedContent) {
+      const thinkingSection = bubble.querySelector(".thinking-section");
       bubble.innerHTML = "";
+      if (thinkingSection) {
+        bubble.appendChild(thinkingSection);
+      }
       renderedContent = document.createElement("div");
       renderedContent.className = "rendered-content";
       bubble.appendChild(renderedContent);
@@ -961,9 +1065,18 @@
     // Clear rendered position tracking for this message
     renderedPositions.delete(messageIndex);
     
+    // Preserve any thinking section (collapsed) from the planning phase
+    const thinkingSection = bubble.querySelector(".thinking-section");
+
     // Render final markdown
     const html = marked.parse(linkifyGhidraUrls(text));
     bubble.innerHTML = sanitize(html);
+
+    if (thinkingSection) {
+      thinkingSection.classList.add("collapsed");
+      bubble.insertBefore(thinkingSection, bubble.firstChild);
+    }
+
     enhanceCodeBlocks(bubble);
     bubble.dataset.finalized = "true";
     messageEl.dataset.lastText = text;
@@ -971,21 +1084,87 @@
     lastStreamingIndex = null;
   }
 
+  function ensureThinkingSection(bubble) {
+    let section = bubble.querySelector(".thinking-section");
+    if (section) {
+      return section;
+    }
+
+    section = document.createElement("div");
+    section.className = "thinking-section";
+
+    const label = document.createElement("div");
+    label.className = "thinking-label";
+    const dot = document.createElement("span");
+    dot.className = "thinking-dot";
+    label.appendChild(dot);
+    const labelText = document.createElement("span");
+    labelText.textContent = "Reasoning";
+    label.appendChild(labelText);
+    section.appendChild(label);
+
+    const content = document.createElement("div");
+    content.className = "thinking-content";
+    section.appendChild(content);
+
+    bubble.insertBefore(section, bubble.firstChild);
+    return section;
+  }
+
+  function updateThinkingInBubble(nextState) {
+    const thinkingText = nextState.thinkingText || "";
+    const isThinking = nextState.thinking && thinkingText.length > 0
+      && thinkingText !== "Reasoning...";
+
+    // Find the last assistant message bubble
+    const messages = chat.querySelectorAll(".message.assistant");
+    const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
+    const bubble = lastMsg ? lastMsg.querySelector(".bubble") : null;
+
+    if (!isThinking) {
+      // Collapse thinking sections (keep them for context, hide content)
+      if (bubble) {
+        const section = bubble.querySelector(".thinking-section");
+        if (section && !section.classList.contains("collapsed")) {
+          section.classList.add("collapsed");
+        }
+      }
+      return;
+    }
+
+    if (!bubble) {
+      return;
+    }
+
+    const section = ensureThinkingSection(bubble);
+    section.classList.remove("collapsed");
+
+    const content = section.querySelector(".thinking-content");
+    if (content) {
+      content.textContent = thinkingText;
+    }
+  }
+
   function renderError(error) {
-    const existing = chat.querySelector(".error-banner");
-    if (!error && existing) {
-      existing.remove();
-      return;
-    }
+    const existing = document.getElementById("floatingError");
     if (!error) {
+      if (existing) {
+        existing.classList.remove("is-visible");
+      }
       return;
     }
+
+    // Render error as a floating toast inside the dialog instead of a banner
+    // that consumes layout space at the top of the chat feed.
     const banner = existing || document.createElement("div");
-    banner.className = "error-banner";
+    banner.id = "floatingError";
+    banner.className = "error-banner is-visible";
     banner.textContent = error;
     if (!existing) {
-      chat.prepend(banner);
+      const container = app || document.body;
+      container.appendChild(banner);
     }
+    banner.classList.add("is-visible");
   }
 
   function renderMessages(nextState) {
@@ -1001,7 +1180,14 @@
       renderedPositions.clear();
     }
 
-    renderError(nextState.error);
+    const displayError = nextState.serverBlocked
+      ? (nextState.serverBlockedMessage || "Can't reach server")
+      : (nextState.usageBlocked
+        ? (nextState.usageBlockedMessage || "Usage limit expired. Upgrade or contact us to continue.")
+        : nextState.error);
+    renderError(displayError);
+
+    syncActionButtons(nextState);
 
     if (emptyState) {
       emptyState.classList.toggle("hidden", nextState.messages.length > 0);
@@ -1034,33 +1220,145 @@
       }
     });
 
+    // Render thinking tokens inside the last assistant bubble
+    updateThinkingInBubble(nextState);
+
     const showThinking = Boolean(nextState.loading || nextState.thinking);
     typingIndicator.classList.toggle("hidden", !showThinking);
     if (showThinking) {
       const label = typingIndicator.querySelector(".typing-label");
       if (label) {
-        label.textContent = nextState.thinkingText || "Thinking...";
+        label.textContent = nextState.thinking ? "Reasoning..." : "Thinking...";
       }
     }
     if (statusPill) {
-      const label = nextState.thinkingText || (showThinking ? "Thinking..." : "Ready");
-      statusPill.textContent = label;
+      const statusLabel = nextState.thinking
+        ? "Reasoning..."
+        : (showThinking ? "Thinking..." : "Ready");
+      statusPill.textContent = statusLabel;
       statusPill.classList.toggle("busy", showThinking);
-    }
-    if (stopBtn) {
-      stopBtn.classList.toggle("hidden", !(nextState.loading || nextState.thinking));
     }
     chat.scrollTop = chat.scrollHeight;
   }
 
+  function renderTodos(nextState) {
+    if (!todoSection || !todoList) {
+      return;
+    }
+    const todos = Array.isArray(nextState.todos) ? nextState.todos : [];
+    const hasSubAgentStream = Boolean(
+      (nextState.subAgentType && String(nextState.subAgentType).trim())
+      || (nextState.subAgentStreamText && String(nextState.subAgentStreamText).trim())
+    );
+    const completed = Array.isArray(nextState.completedTodos) ? new Set(nextState.completedTodos) : new Set();
+    const failed = Array.isArray(nextState.failedTodos) ? new Set(nextState.failedTodos) : new Set();
+    todoList.innerHTML = "";
+    if (todos.length === 0 && !hasSubAgentStream) {
+      todoSection.classList.add("hidden");
+      return;
+    }
+    todoSection.classList.remove("hidden");
+    const minimized = Boolean(nextState.todoMinimized);
+    todoSection.classList.toggle("minimized", minimized);
+    if (todoToggle) {
+      const label = todoToggle.querySelector(".todo-toggle-label");
+      if (label) {
+        label.textContent = minimized ? "Show" : "Hide";
+      }
+    }
+    todoList.classList.toggle("hidden", todos.length === 0);
+    const activeTodo = nextState.activeTodo || null;
+    todos.forEach((todo) => {
+      const item = document.createElement("li");
+      item.className = "todo-item";
+      const text = document.createElement("span");
+      text.className = "todo-text";
+      text.textContent = todo;
+      item.appendChild(text);
+      if (failed.has(todo)) {
+        item.classList.add("failed");
+      } else if (completed.has(todo)) {
+        item.classList.add("completed");
+      }
+      if (activeTodo && todo === activeTodo) {
+        item.classList.add("active");
+        const badge = document.createElement("span");
+        badge.className = "todo-badge";
+        badge.textContent = "Running";
+        item.appendChild(badge);
+      }
+      todoList.appendChild(item);
+    });
+  }
+
+  function renderTools(nextState) {
+    if (!toolInfo || !toolHistoryEl) {
+      return;
+    }
+    const history = Array.isArray(nextState.toolHistory) ? nextState.toolHistory : [];
+
+    if (history.length === 0) {
+      toolInfo.classList.add("hidden");
+      toolHistoryEl.innerHTML = "";
+      return;
+    }
+
+    toolInfo.classList.remove("hidden");
+    toolHistoryEl.innerHTML = "";
+    history.forEach((name) => {
+      const chip = document.createElement("span");
+      chip.className = "tool-chip";
+      chip.textContent = name;
+      toolHistoryEl.appendChild(chip);
+    });
+  }
+
+  function renderSubAgent(nextState) {
+    if (!subAgentBox || !subAgentTypeName || !subAgentStream) {
+      return;
+    }
+    const agentType = nextState.subAgentType || "";
+    const streamText = nextState.subAgentStreamText || "";
+
+    if (!agentType && !streamText) {
+      subAgentBox.classList.add("hidden");
+      subAgentTypeName.textContent = "";
+      subAgentStream.textContent = "";
+      return;
+    }
+
+    subAgentBox.classList.remove("hidden");
+    subAgentTypeName.textContent = agentType || "general-purpose";
+    subAgentStream.textContent = streamText;
+    subAgentStream.scrollTop = subAgentStream.scrollHeight;
+  }
+
   function setState(nextState) {
     logToHost("CopilotUI.setState invoked");
+    const prevMessages = Array.isArray(state.messages) ? state.messages : [];
+    const backendBusy = Boolean(nextState.loading || nextState.thinking);
+    const assistantResponseAvailable = hasAssistantResponse(prevMessages, nextState.messages);
+    if (backendBusy || nextState.error || assistantResponseAvailable) {
+      pendingSend = false;
+    }
     state.messages = nextState.messages || [];
     state.loading = Boolean(nextState.loading);
     state.error = nextState.error || null;
     state.thinking = Boolean(nextState.thinking);
     state.thinkingText = nextState.thinkingText || null;
     state.autocomplete = nextState.autocomplete || null;
+    state.usageBlocked = Boolean(nextState.usageBlocked);
+    state.usageBlockedMessage = nextState.usageBlockedMessage || null;
+    state.serverBlocked = Boolean(nextState.serverBlocked);
+    state.serverBlockedMessage = nextState.serverBlockedMessage || null;
+    state.todos = Array.isArray(nextState.todos) ? nextState.todos : [];
+    state.activeTodo = nextState.activeTodo || null;
+    state.toolHistory = Array.isArray(nextState.toolHistory) ? nextState.toolHistory : [];
+    state.completedTodos = Array.isArray(nextState.completedTodos) ? nextState.completedTodos : [];
+    state.failedTodos = Array.isArray(nextState.failedTodos) ? nextState.failedTodos : [];
+    state.todoMinimized = Boolean(nextState.todoMinimized);
+    state.subAgentType = nextState.subAgentType || null;
+    state.subAgentStreamText = nextState.subAgentStreamText || null;
     logToHost("CopilotUI.darkTheme type=" + typeof nextState.darkTheme +
       " value=" + String(nextState.darkTheme));
     if (nextState.darkTheme === true || nextState.darkTheme === false) {
@@ -1072,6 +1370,9 @@
       }
     }
     renderMessages(nextState);
+    renderTodos(nextState);
+    renderTools(nextState);
+    renderSubAgent(nextState);
     applyAutocompleteState(state.autocomplete);
   }
 
@@ -1102,29 +1403,84 @@
     }
   }
 
+  function applyStreamingChunk(chunk) {
+    if (!chunk) {
+      return;
+    }
+    if (!Array.isArray(state.messages) || state.messages.length === 0) {
+      return;
+    }
+    const index = state.messages.length - 1;
+    const target = state.messages[index];
+    if (!target || target.fromUser) {
+      return;
+    }
+    target.text = (target.text || "") + chunk;
+    let messageEl = chat.querySelector(`.message[data-index="${index}"]`);
+    if (!messageEl) {
+      renderMessages(state);
+      messageEl = chat.querySelector(`.message[data-index="${index}"]`);
+      if (!messageEl) {
+        return;
+      }
+    }
+    updateStreaming(messageEl, target.text || "");
+    const showThinking = Boolean(state.loading || state.thinking);
+    typingIndicator.classList.toggle("hidden", !showThinking);
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function applyStreamFromBridge() {
+    if (!bridgeEl) {
+      return;
+    }
+    const raw = bridgeEl.dataset.stream;
+    if (!raw) {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.chunk === "string") {
+        applyStreamingChunk(parsed.chunk);
+      }
+    } catch (e) {
+      logToHost("CopilotUI failed to parse bridge stream: " + e.message);
+    }
+  }
+
   if (bridgeEl) {
     const observer = new MutationObserver((mutations) => {
       mutations.forEach((mutation) => {
-        if (mutation.type === "attributes" && mutation.attributeName === "data-state") {
-          applyStateFromBridge();
+        if (mutation.type === "attributes") {
+          if (mutation.attributeName === "data-state") {
+            applyStateFromBridge();
+          } else if (mutation.attributeName === "data-stream") {
+            applyStreamFromBridge();
+          }
         }
       });
     });
-    observer.observe(bridgeEl, { attributes: true, attributeFilter: ["data-state"] });
+    observer.observe(bridgeEl, { attributes: true, attributeFilter: ["data-state", "data-stream"] });
     applyStateFromBridge();
   }
 
   function sendMessage() {
+    if (state.usageBlocked || state.serverBlocked || isBusyState(state)) {
+      return;
+    }
     const text = serializeInputToMarkdown().trim();
     if (!text) {
       return;
     }
+    pendingSend = true;
+    syncActionButtons(state);
     dispatchBridgeEvent("copilot-send", { message: text });
     input.innerHTML = "";
     closeAutocomplete();
   }
 
   dispatchBridgeEvent("copilot-loaded", {});
+  syncActionButtons(state);
   sendBtn.addEventListener("click", sendMessage);
   stopBtn.addEventListener("click", () => {
     dispatchBridgeEvent("copilot-stop", {});
@@ -1137,6 +1493,14 @@
   if (clearBtn) {
     clearBtn.addEventListener("click", () => {
       dispatchBridgeEvent("copilot-clear", {});
+    });
+  }
+  if (todoToggle) {
+    todoToggle.addEventListener("click", () => {
+      const nextMinimized = !Boolean(state.todoMinimized);
+      state.todoMinimized = nextMinimized;
+      renderTodos(state);
+      dispatchBridgeEvent("copilot-toggle-todos", { minimized: nextMinimized });
     });
   }
   if (chat) {
@@ -1158,6 +1522,9 @@
   }
 
   input.addEventListener("keydown", (event) => {
+    if (event.defaultPrevented) {
+      return;
+    }
     if (autocompleteState.open) {
       if (event.key === "ArrowDown") {
         event.preventDefault();
@@ -1180,7 +1547,7 @@
         return;
       }
     }
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (isPlainEnter(event)) {
       event.preventDefault();
       sendMessage();
     }
@@ -1231,28 +1598,35 @@
   });
 
   document.addEventListener("keydown", (event) => {
-    if (!autocompleteState.open || event.defaultPrevented) {
+    if (event.defaultPrevented) {
       return;
     }
-    if (event.key === "Enter" || event.key === "Tab") {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      selectAutocomplete(autocompleteState.activeIndex);
-      return;
+    if (autocompleteState.open) {
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        selectAutocomplete(autocompleteState.activeIndex);
+        return;
+      }
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        moveAutocompleteSelection(1);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        moveAutocompleteSelection(-1);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeAutocomplete();
+        return;
+      }
     }
-    if (event.key === "ArrowDown") {
+    if (isInputFocused() && isPlainEnter(event)) {
       event.preventDefault();
-      moveAutocompleteSelection(1);
-      return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      moveAutocompleteSelection(-1);
-      return;
-    }
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closeAutocomplete();
+      sendMessage();
     }
   }, true);
 

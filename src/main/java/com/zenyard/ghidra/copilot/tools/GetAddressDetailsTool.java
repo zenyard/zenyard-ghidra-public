@@ -1,5 +1,6 @@
 package com.zenyard.ghidra.copilot.tools;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.data.DataType;
@@ -25,9 +26,9 @@ public class GetAddressDetailsTool {
         this.context = context;
     }
     
-    @Tool("Returns comprehensive information about the given address, including " +
-          "whether it's in a function, data, code, symbol name, data type, comments, etc.")
-    public AddressDetails getAddressDetails(String address) {
+    @Tool("Inspect one address and return metadata such as address type (function/code/data), symbol label, data type, containing function, comments, and value when available.")
+    public AddressDetails getAddressDetails(
+            @P("Address to inspect in the current program (hex like `0x401000`).") String address) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("address", address);
         return ToolUtils.executeTool(context, "get_address_details", args, () -> {

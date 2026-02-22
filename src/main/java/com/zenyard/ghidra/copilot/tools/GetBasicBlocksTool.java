@@ -3,6 +3,7 @@ package com.zenyard.ghidra.copilot.tools;
 import java.util.ArrayList;
 import java.util.List;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
@@ -25,9 +26,9 @@ public class GetBasicBlocksTool {
         this.context = context;
     }
     
-    @Tool("Returns the basic blocks (control flow graph) of the given function. " +
-          "Each basic block contains its start/end addresses, successors, predecessors, and instruction count.")
-    public List<BasicBlock> getBasicBlocks(String address) {
+    @Tool("Return basic blocks (CFG) for one function, including start/end addresses, successors, predecessors, and approximate instruction counts.")
+    public List<BasicBlock> getBasicBlocks(
+            @P("Function address in the current program (hex like `0x401000`).") String address) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("address", address);
         return ToolUtils.executeTool(context, "get_basic_blocks", args, () -> {

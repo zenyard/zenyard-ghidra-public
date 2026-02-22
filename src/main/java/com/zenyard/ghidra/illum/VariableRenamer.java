@@ -4,24 +4,33 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.Collections;
 
 import com.zenyard.ghidra.api.generated.model.VariablesMapping;
 import com.zenyard.ghidra.storage.InferenceStorage;
+import com.zenyard.ghidra.storage.InferenceStorage.VariableStorageIdentity;
 import com.zenyard.ghidra.util.ZenyardConstants;
 
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressFactory;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.LocalVariable;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.pcode.HighFunctionDBUtil;
 import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.model.pcode.HighSymbol;
 import ghidra.program.model.pcode.HighVariable;
 import ghidra.program.model.pcode.LocalSymbolMap;
+import ghidra.program.model.data.DataType;
+import ghidra.program.model.symbol.Symbol;
+import ghidra.program.model.symbol.SymbolTable;
+import ghidra.program.model.symbol.SourceType;
 import ghidra.util.Msg;
 import ghidra.util.exception.DuplicateNameException;
 import ghidra.util.exception.InvalidInputException;
@@ -32,6 +41,7 @@ import ghidra.util.task.TaskMonitor;
  */
 public class VariableRenamer {
     private final InferenceStorage inferenceStorage;
+    private final List<PendingVerification> pendingVerifications = new ArrayList<>();
 
     public VariableRenamer(InferenceStorage inferenceStorage) {
         this.inferenceStorage = inferenceStorage;
@@ -55,8 +65,9 @@ public class VariableRenamer {
         );
 
         if (!results.decompileCompleted()) {
-            throw new RuntimeException("Failed to decompile function: "
-                + (results.getErrorMessage() != null ? results.getErrorMessage() : "Unknown error"));
+            String errMsg = results.getErrorMessage() != null ? results.getErrorMessage() : "Unknown error";
+            Msg.warn(this, "Skipping variables_mapping at " + address + ": decompilation failed - " + errMsg);
+            return;
         }
 
         HighFunction highFunction = results.getHighFunction();
@@ -71,101 +82,226 @@ public class VariableRenamer {
         localSymbolsIter.forEachRemaining(localSymbols::add);
 
         Map<String, HighSymbol> variableNameToSymbol = new HashMap<>();
+        Map<String, List<HighSymbol>> variableNameToSymbols = new HashMap<>();
+        Map<HighSymbol, VariableStorageIdentity> symbolToIdentity = new HashMap<>();
+        Map<String, List<HighSymbol>> identityKeyToSymbols = new HashMap<>();
         for (HighSymbol symbol : localSymbols) {
             HighVariable var = symbol.getHighVariable();
             if (var != null) {
                 String varName = var.getName();
                 if (varName != null && !varName.isEmpty()) {
-                    variableNameToSymbol.put(varName, symbol);
+                    String scopedVarName = scopedLookupKey(address, varName);
+                    variableNameToSymbol.putIfAbsent(scopedVarName, symbol);
+                    addUniqueSymbol(variableNameToSymbols, scopedVarName, symbol);
+                    String normalizedVarName = InferenceNameUtils.normalizeVariableLookupName(varName);
+                    if (normalizedVarName != null && !normalizedVarName.isEmpty()) {
+                        String scopedNormalizedVarName = scopedLookupKey(address, normalizedVarName);
+                        variableNameToSymbol.putIfAbsent(scopedNormalizedVarName, symbol);
+                        addUniqueSymbol(variableNameToSymbols, scopedNormalizedVarName, symbol);
+                    }
+                }
+                ghidra.program.model.pcode.Varnode representative = var.getRepresentative();
+                VariableStorageIdentity identity = InferenceNameUtils.toStorageIdentity(representative);
+                if (identity != null) {
+                    symbolToIdentity.put(symbol, identity);
+                    identityKeyToSymbols.computeIfAbsent(identity.asKey(), ignored -> new ArrayList<>()).add(symbol);
                 }
             }
         }
+        Map<String, VariableStorageIdentity> persistedIdentities = inferenceStorage.getVariableIdentities(address);
 
         VariablesMapping lastMapping = inferenceStorage.getLastVariablesMapping(address);
-        Set<String> lastInferredNames = new HashSet<>();
+        Set<String> lastInferredOriginalNames = new HashSet<>();
         if (lastMapping != null) {
-            lastInferredNames.addAll(lastMapping.getVariablesMapping().values());
+            lastInferredOriginalNames.addAll(lastMapping.getVariablesMapping().keySet());
         }
 
-        Map<String, String> renames = new HashMap<>();
+        List<RenameRequest> renameRequests = new ArrayList<>();
+        List<RenameRequest> appliedRenameRequests = new ArrayList<>();
+        Map<String, String> appliedRenameTargetsByOriginal = new HashMap<>();
+        List<DeferredStackRename> deferredStackRenames = new ArrayList<>();
+        List<GlobalRenameRequest> globalRenames = new ArrayList<>();
         Map<String, String> variablesMapping = mapping.getVariablesMapping();
+        Msg.info(this, "VariablesMapping received at " + address + " entries="
+            + variablesMapping.size() + " keys=" + variablesMapping.keySet());
         for (Map.Entry<String, String> entry : variablesMapping.entrySet()) {
             String originalName = entry.getKey();
             String newName = entry.getValue();
+            String normalizedOriginalName = InferenceNameUtils.normalizeVariableLookupName(originalName);
 
-            HighSymbol symbol = variableNameToSymbol.get(originalName);
+            SymbolResolution resolution = resolveSymbol(
+                address,
+                originalName,
+                normalizedOriginalName,
+                variableNameToSymbol,
+                variableNameToSymbols,
+                persistedIdentities,
+                identityKeyToSymbols
+            );
+            HighSymbol symbol = resolution.getSymbol();
+            Msg.info(this, "VariablesMapping entry at " + address + ": original=" + originalName
+                + ", target=" + newName + ", resolution=" + resolution.getMode());
             if (symbol == null) {
+                // Defer stack-offset fallback: stack arrays (e.g. auStack_58 / acStack_58)
+                // may not appear in the HighFunction's LocalSymbolMap until after
+                // commitLocalNamesToDatabase. Collect them for resolution after the commit.
+                Long stackOffset = InferenceNameUtils.extractStackOffset(originalName);
+                if (stackOffset != null) {
+                    deferredStackRenames.add(new DeferredStackRename(stackOffset, originalName, newName));
+                } else if (isGlobalDataLabel(originalName)) {
+                    // Global data labels (DAT_*, _DAT_*, PTR_*) are not in the
+                    // LocalSymbolMap. Collect them for separate global renaming.
+                    globalRenames.add(new GlobalRenameRequest(originalName, newName));
+                } else {
+                    Msg.info(this, "VariablesMapping unresolved at " + address
+                        + ": original=" + originalName + ", target=" + newName);
+                }
                 continue;
             }
 
             HighVariable var = symbol.getHighVariable();
             if (var == null) {
+                Msg.info(this, "Skipping rename for " + originalName + " at " + address
+                    + ": HighVariable is null for resolved symbol (resolution="
+                    + resolution.getMode() + ")");
                 continue;
             }
 
-                String currentType = var.getDataType() != null ? var.getDataType().getName() : "unknown";
-                Msg.debug(this, "Variable mapping: " + originalName + " -> " + newName
-                    + " (currentType=" + currentType + ")");
+            String currentType = var.getDataType() != null ? var.getDataType().getName() : "unknown";
+            Msg.debug(this, "Variable mapping: " + originalName + " -> " + newName
+                + " (currentType=" + currentType + ")");
 
-            boolean isDummy = var.getName().startsWith("uVar")
-                || var.getName().startsWith("local_")
-                || var.getName().matches("^[a-z]\\d+$")
+            boolean isDummy = InferenceNameUtils.isAutoGeneratedVariableName(var.getName())
                 || InferenceNameUtils.isPlaceholderName(var.getName());
+            boolean wasPreviouslyInferred = lastInferredOriginalNames.contains(originalName)
+                || (normalizedOriginalName != null && lastInferredOriginalNames.contains(normalizedOriginalName));
 
-            if (isDummy || lastInferredNames.contains(originalName)) {
-                renames.put(originalName, newName);
+            if (isDummy || wasPreviouslyInferred) {
+                renameRequests.add(new RenameRequest(originalName, newName, symbol));
+            } else {
+                Msg.info(this, "Skipping rename for " + originalName + " at " + address
+                    + ": variable name '" + var.getName()
+                    + "' is not auto-generated and not previously inferred");
+            }
+
+            VariableStorageIdentity resolvedIdentity = symbolToIdentity.get(symbol);
+            if (resolvedIdentity != null) {
+                inferenceStorage.storeVariableIdentity(address, originalName, resolvedIdentity);
+                if (normalizedOriginalName != null && !normalizedOriginalName.equals(originalName)) {
+                    inferenceStorage.storeVariableIdentity(address, normalizedOriginalName, resolvedIdentity);
+                }
             }
         }
 
+        // Commit decompiler locals to the database before renaming.
+        // Without this, register-based variables (e.g. return values from calls)
+        // have no backing LocalVariable and fall through to the volatile
+        // renameSymbolInDatabase path whose names don't survive re-decompilation
+        // triggered by later type inference changes.
         boolean localsCommitted = false;
-        for (Map.Entry<String, String> rename : renames.entrySet()) {
-            String fromName = rename.getKey();
-            String toName = rename.getValue();
+        try {
+            HighFunctionDBUtil.commitLocalNamesToDatabase(highFunction, SourceType.ANALYSIS);
+            localsCommitted = true;
+        } catch (Exception e) {
+            Msg.info(this, "commitLocalNamesToDatabase at " + address + ": " + e.getMessage());
+        }
 
-            HighSymbol symbol = variableNameToSymbol.get(fromName);
-            if (symbol == null) {
-                continue;
-            }
+        for (RenameRequest rename : renameRequests) {
+            String fromName = rename.getOriginalName();
+            String toName = rename.getTargetName();
+            HighSymbol symbol = rename.getSymbol();
 
             try {
                 if (InferenceNameUtils.isPlaceholderName(toName)) {
-                    Msg.debug(this, "Skipping rename for " + fromName + " at " + address
+                    Msg.info(this, "Skipping rename for " + fromName + " at " + address
                         + ": placeholder name " + toName);
                     continue;
                 }
                 String nameToApply = InferenceNameUtils.isValidName(toName) ? toName : "_" + toName;
                 HighVariable highVar = symbol.getHighVariable();
-                if (highVar != null) {
-                    ghidra.program.model.pcode.Varnode storage = highVar.getRepresentative();
-                    if (storage == null) {
-                        Msg.debug(this, "Skipping rename for " + fromName + " at " + address
-                            + ": no representative storage");
-                        continue;
-                    }
-
-                    Address storageAddress = storage.getAddress();
-                    if (storageAddress.isUniqueAddress()) {
-                        Msg.debug(this, "Skipping rename for " + fromName + " at " + address
-                            + ": temporary unique storage");
-                        continue;
-                    }
-
-                    if (!storageAddress.isStackAddress() && !storageAddress.isRegisterAddress()) {
-                        Msg.debug(this, "Skipping rename for " + fromName + " at " + address
-                            + ": non-local storage " + storageAddress);
-                        continue;
-                    }
-
-                    LocalVariable localVar = InferenceNameUtils.findLocalVariableByStorage(function, storage);
-                    if (localVar == null) {
-                        Msg.debug(this, "Skipping rename for " + fromName + " at " + address
-                            + ": cannot resolve local variable");
-                        continue;
-                    }
-
-                    localVar.setName(nameToApply, ghidra.program.model.symbol.SourceType.USER_DEFINED);
-                    localsCommitted = true;
+                if (highVar == null) {
+                    Msg.info(this, "Skipping rename for " + fromName + " at " + address
+                        + ": no HighVariable for symbol");
+                    continue;
                 }
+                ghidra.program.model.pcode.Varnode storage = highVar.getRepresentative();
+                if (storage == null) {
+                    Msg.info(this, "Skipping rename for " + fromName + " at " + address
+                        + ": no representative storage");
+                    continue;
+                }
+
+                Address storageAddress = storage.getAddress();
+                if (storageAddress.isUniqueAddress()) {
+                    // Unique-space vars do not have a stable LocalVariable entry, so
+                    // rename through the HighSymbol and rely on verification/refresh
+                    // to re-apply after later decompilations.
+                    boolean renamedUnique = renameSymbolInDatabase(symbol, nameToApply);
+                    if (!renamedUnique) {
+                        Msg.info(this, "Skipping rename for " + fromName + " at " + address
+                            + ": temporary unique storage and symbol fallback failed");
+                        continue;
+                    }
+                    appliedRenameRequests.add(rename);
+                    appliedRenameTargetsByOriginal.put(fromName, nameToApply);
+                    Msg.info(this, "Applied unique-storage rename for " + fromName + " at " + address
+                        + " -> " + nameToApply);
+                    continue;
+                }
+
+                if (!storageAddress.isStackAddress() && !storageAddress.isRegisterAddress()) {
+                    Msg.info(this, "Skipping rename for " + fromName + " at " + address
+                        + ": non-local storage " + storageAddress);
+                    continue;
+                }
+
+                LocalVariable localVar = InferenceNameUtils.findLocalVariableByStorage(function, storage);
+                if (localVar == null && !localsCommitted) {
+                    // Retry commit if the earlier attempt failed; some variables
+                    // may only become visible after partial renames.
+                    try {
+                        HighFunctionDBUtil.commitLocalNamesToDatabase(highFunction, SourceType.ANALYSIS);
+                        localsCommitted = true;
+                        localVar = InferenceNameUtils.findLocalVariableByStorage(function, storage);
+                    } catch (Exception e) {
+                        Msg.debug(this, "Retry commitLocalNamesToDatabase at " + address
+                            + ": " + e.getMessage());
+                    }
+                }
+                if (localVar == null) {
+                    // Last resort: use HighFunctionDBUtil.updateDBVariable which
+                    // creates a database entry if one doesn't exist yet.
+                    boolean renamedBySymbol = renameSymbolInDatabase(symbol, nameToApply);
+                    if (!renamedBySymbol) {
+                        Msg.info(this, "Skipping rename for " + fromName + " at " + address
+                            + ": cannot resolve local variable by storage and symbol fallback failed");
+                        continue;
+                    }
+                    appliedRenameRequests.add(rename);
+                    appliedRenameTargetsByOriginal.put(fromName, nameToApply);
+                    Msg.info(this, "Applied symbol-level rename for " + fromName + " at " + address
+                        + " -> " + nameToApply);
+                    continue;
+                }
+
+                localVar.setName(nameToApply, SourceType.USER_DEFINED);
+                // Belt-and-suspenders: also update via HighFunctionDBUtil to ensure
+                // the database variable matches the HighSymbol's exact storage.
+                // This provides a second persistence path for register-based variables
+                // whose storage may not match across decompilation sessions.
+                try {
+                    HighFunctionDBUtil.updateDBVariable(
+                        symbol, nameToApply, highVar.getDataType(), SourceType.USER_DEFINED);
+                } catch (DuplicateNameException ignored) {
+                    // Already renamed via localVar.setName above
+                } catch (Exception e2) {
+                    Msg.debug(this, "Secondary updateDBVariable for " + fromName
+                        + ": " + e2.getMessage());
+                }
+                appliedRenameRequests.add(rename);
+                appliedRenameTargetsByOriginal.put(fromName, nameToApply);
+                Msg.info(this, "Applied persistent rename for " + fromName + " at " + address
+                    + " -> " + nameToApply);
             } catch (DuplicateNameException | InvalidInputException e) {
                 Msg.debug(this, "Rename conflict for " + fromName + " -> " + toName + ": " + e.getMessage());
             } catch (Exception e) {
@@ -173,8 +309,1038 @@ public class VariableRenamer {
             }
         }
 
-        if (!localsCommitted) {
-            Msg.debug(this, "No local variable renames applied for " + address);
+        // Resolve deferred stack-offset fallback renames now that locals are committed
+        // to the database. Stack arrays (e.g. char[64] at stack offset -0x58) become
+        // discoverable via function.getLocalVariables() only after the commit above.
+        Map<LocalVariable, String> stackFallbackRenames = new HashMap<>();
+        for (DeferredStackRename deferred : deferredStackRenames) {
+            LocalVariable stackLocal = InferenceNameUtils.findLocalVariableByStackOffset(
+                function, deferred.getStackOffset());
+            if (stackLocal != null) {
+                Msg.info(this, "VariablesMapping stack-offset fallback at " + address
+                    + ": original=" + deferred.getOriginalName() + ", target=" + deferred.getNewName()
+                    + ", matched LocalVariable=" + stackLocal.getName());
+                stackFallbackRenames.put(stackLocal, deferred.getNewName());
+            } else {
+                Msg.info(this, "VariablesMapping unresolved at " + address
+                    + ": original=" + deferred.getOriginalName() + ", target=" + deferred.getNewName());
+            }
         }
+
+        // Apply stack-offset fallback renames for variables not in the
+        // HighFunction's LocalSymbolMap (e.g. stack char arrays).
+        for (Map.Entry<LocalVariable, String> fallback : stackFallbackRenames.entrySet()) {
+            LocalVariable stackLocal = fallback.getKey();
+            String newName = fallback.getValue();
+            try {
+                if (InferenceNameUtils.isPlaceholderName(newName)) {
+                    continue;
+                }
+                String nameToApply = InferenceNameUtils.isValidName(newName) ? newName : "_" + newName;
+                stackLocal.setName(nameToApply, SourceType.USER_DEFINED);
+                Msg.info(this, "Applied stack-offset rename for " + stackLocal.getName()
+                    + " at " + address + " -> " + nameToApply);
+            } catch (DuplicateNameException | InvalidInputException e) {
+                Msg.debug(this, "Stack-offset rename conflict for " + stackLocal.getName()
+                    + " -> " + newName + ": " + e.getMessage());
+            } catch (Exception e) {
+                Msg.warn(this, "Failed stack-offset rename for " + stackLocal.getName()
+                    + ": " + e.getMessage(), e);
+            }
+        }
+
+        // Apply global variable renames (DAT_*, PTR_*, etc.)
+        applyGlobalRenames(program, address, globalRenames);
+
+        if (renameRequests.isEmpty() && deferredStackRenames.isEmpty() && globalRenames.isEmpty()) {
+            Msg.info(this, "No local variable renames applied for " + address
+                + " after evaluating " + variablesMapping.size() + " entries");
+        }
+
+        // Defer verification to post-batch: re-decompilation and re-application of
+        // register-based renames must happen AFTER all inferences in the batch are applied.
+        // Other inferences (parameter_type, return_type for called functions) can change
+        // the entry function's decompilation layout, causing firstUseOffset mismatches
+        // that only manifest after the full batch is committed.
+        if (!appliedRenameRequests.isEmpty()) {
+            pendingVerifications.add(new PendingVerification(
+                address, function, new ArrayList<>(appliedRenameRequests)));
+        }
+
+        // Persist latest mapping so type-change/caller refresh can re-apply renames
+        // after later re-decompilations in subsequent inference batches.
+        if (!variablesMapping.isEmpty()) {
+            inferenceStorage.storeLastVariablesMapping(address, mapping);
+        }
+        if (!appliedRenameTargetsByOriginal.isEmpty()) {
+            inferenceStorage.storeAppliedVariableRenames(address, appliedRenameTargetsByOriginal);
+        }
+    }
+
+    /**
+     * Run all pending post-batch verifications. Must be called AFTER all inferences
+     * in the batch are applied so that the decompiler sees the final state of all
+     * function signatures, struct definitions, and type changes.
+     */
+    public void runPendingVerifications(Program program) {
+        if (pendingVerifications.isEmpty()) {
+            return;
+        }
+        List<PendingVerification> batch = new ArrayList<>(pendingVerifications);
+        pendingVerifications.clear();
+
+        DecompilerManager decompilerManager = new DecompilerManager();
+        for (PendingVerification pv : batch) {
+            try {
+                verifyAndReapplyRenames(
+                    program, pv.getFunction(), pv.getAddress(),
+                    pv.getRenameRequests(), decompilerManager);
+            } catch (Exception e) {
+                Msg.warn(this, "Post-batch verification failed at " + pv.getAddress()
+                    + ": " + e.getMessage(), e);
+            }
+        }
+    }
+
+    /**
+     * Re-decompile the function and verify that applied renames are visible.
+     * For any register-based renames that didn't survive (auto-generated name reappears),
+     * re-apply using updateDBVariable on the fresh HighSymbol whose firstUseOffset
+     * matches the decompiler's current layout.
+     */
+    private void verifyAndReapplyRenames(
+            Program program,
+            Function function,
+            Address address,
+            List<RenameRequest> renameRequests,
+            DecompilerManager decompilerManager) {
+        DecompileResults verifyResults = decompilerManager.decompileFunction(
+            program, function,
+            ZenyardConstants.DECOMPILER_TIMEOUT_SECONDS,
+            TaskMonitor.DUMMY
+        );
+        if (!verifyResults.decompileCompleted()) {
+            Msg.debug(this, "Verification decompilation failed at " + address);
+            return;
+        }
+        HighFunction verifyHF = verifyResults.getHighFunction();
+        if (verifyHF == null) {
+            return;
+        }
+
+        // Build name->symbol and storage->symbol maps from the fresh decompilation
+        Map<String, HighSymbol> freshNameToSymbol = new HashMap<>();
+        Set<String> freshNames = new HashSet<>();
+        Map<String, List<HighSymbol>> freshStorageToSymbols = new HashMap<>();
+        LocalSymbolMap freshSymbolMap = verifyHF.getLocalSymbolMap();
+        Iterator<HighSymbol> freshIter = freshSymbolMap.getSymbols();
+        while (freshIter.hasNext()) {
+            HighSymbol sym = freshIter.next();
+            HighVariable var = sym.getHighVariable();
+            if (var != null && var.getName() != null) {
+                freshNames.add(var.getName());
+                freshNameToSymbol.put(var.getName(), sym);
+                ghidra.program.model.pcode.Varnode rep = var.getRepresentative();
+                if (rep != null) {
+                    String storageKey = rep.getAddress().toString() + ":" + rep.getSize();
+                    freshStorageToSymbols.computeIfAbsent(storageKey, k -> new ArrayList<>()).add(sym);
+                }
+            }
+        }
+
+        // Check each rename - if the target name is NOT visible, find the corresponding
+        // variable in the fresh decompilation and re-apply. Uses two strategies:
+        // 1) Match by auto-variable index (e.g. pvVar1 index 1 -> pRVar1 index 1)
+        // 2) Fallback: match by storage address from the original HighSymbol
+        int reapplied = 0;
+        for (RenameRequest rename : renameRequests) {
+            String targetName = rename.getTargetName();
+            if (InferenceNameUtils.isPlaceholderName(targetName)) {
+                continue;
+            }
+            String nameToApply = InferenceNameUtils.isValidName(targetName) ? targetName : "_" + targetName;
+
+            if (freshNames.contains(nameToApply)) {
+                continue; // Rename survived, nothing to do
+            }
+
+            String originalName = rename.getOriginalName();
+
+            // Strategy 1: Match by auto-variable index
+            HighSymbol freshMatch = null;
+            Integer targetIndex = InferenceNameUtils.extractAutoVarIndex(originalName);
+            if (targetIndex != null) {
+                String originalFamily = extractAutoVarFamily(originalName);
+                for (Map.Entry<String, HighSymbol> entry : freshNameToSymbol.entrySet()) {
+                    String candidateName = entry.getKey();
+                    if (!InferenceNameUtils.isAutoGeneratedVariableName(candidateName)) {
+                        continue;
+                    }
+                    Integer candidateIndex = InferenceNameUtils.extractAutoVarIndex(candidateName);
+                    if (candidateIndex != null && targetIndex.equals(candidateIndex)) {
+                        if (!isCompatibleAutoVarFamily(
+                                originalFamily, extractAutoVarFamily(candidateName))) {
+                            continue;
+                        }
+                        if (!isRenamableSymbol(entry.getValue())) {
+                            continue;
+                        }
+                        freshMatch = entry.getValue();
+                        break;
+                    }
+                }
+            }
+
+            // Strategy 2: Fallback - match by storage address from the original symbol
+            if (freshMatch == null) {
+                HighSymbol originalSymbol = rename.getSymbol();
+                if (originalSymbol != null) {
+                    HighVariable originalVar = originalSymbol.getHighVariable();
+                    if (originalVar != null) {
+                        ghidra.program.model.pcode.Varnode originalRep = originalVar.getRepresentative();
+                        if (originalRep != null) {
+                            String storageKey = originalRep.getAddress().toString()
+                                + ":" + originalRep.getSize();
+                            List<HighSymbol> candidates = freshStorageToSymbols.get(storageKey);
+                            if (candidates != null) {
+                                for (HighSymbol candidate : candidates) {
+                                    HighVariable candidateVar = candidate.getHighVariable();
+                                    if (candidateVar != null
+                                            && InferenceNameUtils.isAutoGeneratedVariableName(
+                                                candidateVar.getName())
+                                            && isRenamableSymbol(candidate)) {
+                                        freshMatch = candidate;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (freshMatch == null) {
+                Msg.info(this, "Verification: no matching variable for '" + originalName
+                    + "' -> '" + nameToApply + "' at " + address);
+                continue;
+            }
+
+            try {
+                HighVariable freshVar = freshMatch.getHighVariable();
+                if (freshVar == null) {
+                    continue;
+                }
+                HighFunctionDBUtil.updateDBVariable(
+                    freshMatch, nameToApply, freshVar.getDataType(), SourceType.USER_DEFINED);
+                reapplied++;
+                Msg.info(this, "Verification re-applied rename at " + address
+                    + ": " + freshMatch.getName() + " -> " + nameToApply
+                    + " (original=" + originalName + ")");
+            } catch (DuplicateNameException e) {
+                Msg.debug(this, "Verification rename conflict at " + address
+                    + ": " + nameToApply + " - " + e.getMessage());
+            } catch (Exception e) {
+                Msg.debug(this, "Verification rename failed at " + address
+                    + ": " + nameToApply + " - " + e.getMessage());
+            }
+        }
+        if (reapplied > 0) {
+            Msg.info(this, "Verification pass at " + address + ": re-applied " + reapplied + " renames");
+        }
+    }
+
+    private SymbolResolution resolveSymbol(
+        Address functionAddress,
+        String originalName,
+        String normalizedOriginalName,
+        Map<String, HighSymbol> variableNameToSymbol,
+        Map<String, List<HighSymbol>> variableNameToSymbols,
+        Map<String, VariableStorageIdentity> persistedIdentities,
+        Map<String, List<HighSymbol>> identityKeyToSymbols
+    ) {
+        VariableStorageIdentity persistedIdentity = persistedIdentities.get(originalName);
+        if (persistedIdentity == null && normalizedOriginalName != null
+            && !normalizedOriginalName.equals(originalName)) {
+            persistedIdentity = persistedIdentities.get(normalizedOriginalName);
+        }
+
+        String scopedOriginalName = scopedLookupKey(functionAddress, originalName);
+        List<HighSymbol> exactMatches = variableNameToSymbols.getOrDefault(
+            scopedOriginalName, Collections.emptyList());
+        if (exactMatches.size() == 1) {
+            return new SymbolResolution(exactMatches.get(0), "exact_name");
+        }
+        if (exactMatches.size() > 1) {
+            HighSymbol byIdentity = resolveCandidateByPersistedIdentity(exactMatches, persistedIdentity);
+            if (byIdentity != null) {
+                return new SymbolResolution(byIdentity, "exact_name_persisted_identity");
+            }
+            HighSymbol singleRenamable = resolveSingleRenamableCandidate(exactMatches);
+            if (singleRenamable != null) {
+                return new SymbolResolution(singleRenamable, "exact_name_single_renamable");
+            }
+            return new SymbolResolution(null, "ambiguous_exact_name");
+        }
+
+        HighSymbol byName = variableNameToSymbol.get(scopedOriginalName);
+        if (byName != null) {
+            return new SymbolResolution(byName, "exact_name");
+        }
+        if (normalizedOriginalName != null && !normalizedOriginalName.equals(originalName)) {
+            String scopedNormalizedName = scopedLookupKey(functionAddress, normalizedOriginalName);
+            List<HighSymbol> normalizedMatches = variableNameToSymbols.getOrDefault(
+                scopedNormalizedName, Collections.emptyList());
+            if (normalizedMatches.size() == 1) {
+                return new SymbolResolution(normalizedMatches.get(0), "normalized_name");
+            }
+            if (normalizedMatches.size() > 1) {
+                HighSymbol byIdentity = resolveCandidateByPersistedIdentity(
+                    normalizedMatches, persistedIdentity);
+                if (byIdentity != null) {
+                    return new SymbolResolution(byIdentity, "normalized_name_persisted_identity");
+                }
+                HighSymbol singleRenamable = resolveSingleRenamableCandidate(normalizedMatches);
+                if (singleRenamable != null) {
+                    return new SymbolResolution(singleRenamable, "normalized_name_single_renamable");
+                }
+                return new SymbolResolution(null, "ambiguous_normalized_name");
+            }
+
+            byName = variableNameToSymbol.get(scopedNormalizedName);
+            if (byName != null) {
+                return new SymbolResolution(byName, "normalized_name");
+            }
+        }
+
+        if (persistedIdentity != null) {
+            List<HighSymbol> identityMatches = identityKeyToSymbols.getOrDefault(
+                persistedIdentity.asKey(),
+                Collections.emptyList()
+            );
+            if (identityMatches.size() == 1) {
+                return new SymbolResolution(identityMatches.get(0), "persisted_identity");
+            }
+        }
+        HighSymbol byAutoPattern = resolveAutoGeneratedSymbol(
+            variableNameToSymbol,
+            normalizedOriginalName != null ? normalizedOriginalName : originalName,
+            persistedIdentity != null ? persistedIdentity.getKind() : null
+        );
+        if (byAutoPattern != null) {
+            return new SymbolResolution(byAutoPattern, "auto_generated_fallback");
+        }
+
+        return new SymbolResolution(null, "unresolved");
+    }
+
+    private HighSymbol resolveAutoGeneratedSymbol(
+        Map<String, HighSymbol> variableNameToSymbol,
+        String originalName,
+        String preferredStorageKind
+    ) {
+        Integer targetIndex = InferenceNameUtils.extractAutoVarIndex(originalName);
+        if (targetIndex == null) {
+            return null;
+        }
+        Set<HighSymbol> candidates = new LinkedHashSet<>();
+        String originalFamily = extractAutoVarFamily(originalName);
+        for (Map.Entry<String, HighSymbol> entry : variableNameToSymbol.entrySet()) {
+            String candidateName = unscopedLookupName(entry.getKey());
+            Integer candidateIndex = InferenceNameUtils.extractAutoVarIndex(candidateName);
+            if (candidateIndex != null
+                && targetIndex.equals(candidateIndex)
+                && InferenceNameUtils.isAutoGeneratedVariableName(candidateName)) {
+                if (!isCompatibleAutoVarFamily(originalFamily, extractAutoVarFamily(candidateName))) {
+                    continue;
+                }
+                if (preferredStorageKind != null) {
+                    HighVariable candidateVar = entry.getValue().getHighVariable();
+                    if (candidateVar == null) {
+                        continue;
+                    }
+                    VariableStorageIdentity candidateIdentity =
+                        InferenceNameUtils.toStorageIdentity(candidateVar.getRepresentative());
+                    if (candidateIdentity == null || !preferredStorageKind.equals(candidateIdentity.getKind())) {
+                        continue;
+                    }
+                }
+                if (!isRenamableSymbol(entry.getValue())) {
+                    continue;
+                }
+                candidates.add(entry.getValue());
+            }
+        }
+        return candidates.size() == 1 ? candidates.iterator().next() : null;
+    }
+
+    private static String scopedLookupKey(Address functionAddress, String localVariableName) {
+        if (functionAddress == null || localVariableName == null || localVariableName.isEmpty()) {
+            return localVariableName;
+        }
+        return functionAddress + "_" + localVariableName;
+    }
+
+    private static String unscopedLookupName(String scopedLookupKey) {
+        if (scopedLookupKey == null) {
+            return null;
+        }
+        int separator = scopedLookupKey.indexOf('_');
+        if (separator < 0 || separator + 1 >= scopedLookupKey.length()) {
+            return scopedLookupKey;
+        }
+        return scopedLookupKey.substring(separator + 1);
+    }
+
+    private static void addUniqueSymbol(Map<String, List<HighSymbol>> symbolMap, String key,
+            HighSymbol symbol) {
+        List<HighSymbol> symbols = symbolMap.computeIfAbsent(key, ignored -> new ArrayList<>());
+        if (!symbols.contains(symbol)) {
+            symbols.add(symbol);
+        }
+    }
+
+    private static HighSymbol resolveSingleRenamableCandidate(List<HighSymbol> candidates) {
+        if (candidates == null || candidates.isEmpty()) {
+            return null;
+        }
+        HighSymbol match = null;
+        for (HighSymbol candidate : candidates) {
+            if (!isRenamableSymbol(candidate)) {
+                continue;
+            }
+            if (match != null) {
+                return null;
+            }
+            match = candidate;
+        }
+        return match;
+    }
+
+    private static boolean isRenamableSymbol(HighSymbol symbol) {
+        if (symbol == null) {
+            return false;
+        }
+        HighVariable variable = symbol.getHighVariable();
+        if (variable == null) {
+            return false;
+        }
+        ghidra.program.model.pcode.Varnode representative = variable.getRepresentative();
+        if (representative == null || representative.getAddress() == null) {
+            return false;
+        }
+        Address storageAddress = representative.getAddress();
+        return storageAddress.isUniqueAddress()
+            || storageAddress.isStackAddress()
+            || storageAddress.isRegisterAddress();
+    }
+
+    private static String extractAutoVarFamily(String name) {
+        if (name == null) {
+            return null;
+        }
+        String normalized = name;
+        while (normalized.startsWith("_")) {
+            normalized = normalized.substring(1);
+        }
+        String lower = normalized.toLowerCase();
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+            .compile("^([a-z]+)var\\d+$")
+            .matcher(lower);
+        if (!matcher.matches()) {
+            return null;
+        }
+        return matcher.group(1);
+    }
+
+    private static boolean isCompatibleAutoVarFamily(String expectedFamily, String candidateFamily) {
+        if (expectedFamily == null || candidateFamily == null) {
+            return true;
+        }
+        if (expectedFamily.equals(candidateFamily)) {
+            return true;
+        }
+        boolean expectedPointerLike = expectedFamily.startsWith("p");
+        boolean candidatePointerLike = candidateFamily.startsWith("p");
+        if (expectedPointerLike != candidatePointerLike) {
+            return false;
+        }
+        // Allow family drift inside the same broad storage/type class after re-decompilation.
+        return true;
+    }
+
+    private HighSymbol resolveCandidateByPersistedIdentity(
+        List<HighSymbol> candidates,
+        VariableStorageIdentity persistedIdentity
+    ) {
+        if (persistedIdentity == null || candidates == null || candidates.isEmpty()) {
+            return null;
+        }
+        HighSymbol match = null;
+        for (HighSymbol candidate : candidates) {
+            if (candidate == null) {
+                continue;
+            }
+            HighVariable candidateVar = candidate.getHighVariable();
+            if (candidateVar == null) {
+                continue;
+            }
+            VariableStorageIdentity candidateIdentity =
+                InferenceNameUtils.toStorageIdentity(candidateVar.getRepresentative());
+            if (candidateIdentity == null) {
+                continue;
+            }
+            if (!persistedIdentity.asKey().equals(candidateIdentity.asKey())) {
+                continue;
+            }
+            if (match != null) {
+                return null;
+            }
+            match = candidate;
+        }
+        return match;
+    }
+
+    private boolean renameSymbolInDatabase(HighSymbol symbol, String nameToApply) {
+        try {
+            HighVariable highVar = symbol.getHighVariable();
+            DataType currentType = highVar != null ? highVar.getDataType() : null;
+            if (currentType == null) {
+                return false;
+            }
+            HighFunctionDBUtil.updateDBVariable(
+                symbol,
+                nameToApply,
+                currentType,
+                SourceType.USER_DEFINED
+            );
+            return true;
+        } catch (Exception e) {
+            Msg.debug(this, "Symbol fallback rename failed for " + symbol.getName() + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    private static class DeferredStackRename {
+        private final long stackOffset;
+        private final String originalName;
+        private final String newName;
+
+        DeferredStackRename(long stackOffset, String originalName, String newName) {
+            this.stackOffset = stackOffset;
+            this.originalName = originalName;
+            this.newName = newName;
+        }
+
+        long getStackOffset() {
+            return stackOffset;
+        }
+
+        String getOriginalName() {
+            return originalName;
+        }
+
+        String getNewName() {
+            return newName;
+        }
+    }
+
+    private static class RenameRequest {
+        private final String originalName;
+        private final String targetName;
+        private final HighSymbol symbol;
+
+        private RenameRequest(String originalName, String targetName, HighSymbol symbol) {
+            this.originalName = originalName;
+            this.targetName = targetName;
+            this.symbol = symbol;
+        }
+
+        private String getOriginalName() {
+            return originalName;
+        }
+
+        private String getTargetName() {
+            return targetName;
+        }
+
+        private HighSymbol getSymbol() {
+            return symbol;
+        }
+    }
+
+    private static class SymbolResolution {
+        private final HighSymbol symbol;
+        private final String mode;
+
+        private SymbolResolution(HighSymbol symbol, String mode) {
+            this.symbol = symbol;
+            this.mode = mode;
+        }
+
+        private HighSymbol getSymbol() {
+            return symbol;
+        }
+
+        private String getMode() {
+            return mode;
+        }
+    }
+
+    private static class PendingVerification {
+        private final Address address;
+        private final Function function;
+        private final List<RenameRequest> renameRequests;
+
+        PendingVerification(Address address, Function function, List<RenameRequest> renameRequests) {
+            this.address = address;
+            this.function = function;
+            this.renameRequests = renameRequests;
+        }
+
+        Address getAddress() {
+            return address;
+        }
+
+        Function getFunction() {
+            return function;
+        }
+
+        List<RenameRequest> getRenameRequests() {
+            return renameRequests;
+        }
+    }
+
+    private static class GlobalRenameRequest {
+        private final String originalName;
+        private final String newName;
+
+        GlobalRenameRequest(String originalName, String newName) {
+            this.originalName = originalName;
+            this.newName = newName;
+        }
+
+        String getOriginalName() {
+            return originalName;
+        }
+
+        String getNewName() {
+            return newName;
+        }
+    }
+
+    /**
+     * Check if a variable name is a global data label auto-generated by Ghidra.
+     * Matches patterns like DAT_XXXXXXXX, _DAT_XXXXXXXX, PTR_XXXXXXXX, s_XXXXXXXX.
+     */
+    private static boolean isGlobalDataLabel(String name) {
+        if (name == null || name.isEmpty()) {
+            return false;
+        }
+        String normalized = name;
+        while (normalized.startsWith("_")) {
+            normalized = normalized.substring(1);
+        }
+        return normalized.matches("^DAT_[0-9a-fA-F]+$")
+            || normalized.matches("^PTR_[0-9a-fA-F]+$")
+            || normalized.matches("^s_[0-9a-fA-F]+$");
+    }
+
+    /**
+     * Extract a Ghidra address from a global data label name like "DAT_10000812c".
+     * Returns null if the name doesn't match the expected pattern.
+     */
+    private static Address parseGlobalLabelAddress(Program program, String name) {
+        if (name == null) {
+            return null;
+        }
+        String normalized = name;
+        while (normalized.startsWith("_")) {
+            normalized = normalized.substring(1);
+        }
+        int underscoreIdx = normalized.indexOf('_');
+        if (underscoreIdx < 0 || underscoreIdx + 1 >= normalized.length()) {
+            return null;
+        }
+        String hexPart = normalized.substring(underscoreIdx + 1);
+        try {
+            AddressFactory factory = program.getAddressFactory();
+            return factory.getDefaultAddressSpace().getAddress(Long.parseUnsignedLong(hexPart, 16));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Apply renames for global data labels (DAT_*, PTR_*, etc.) via the SymbolTable.
+     */
+    private void applyGlobalRenames(Program program, Address functionAddress,
+            List<GlobalRenameRequest> globalRenames) {
+        if (globalRenames.isEmpty()) {
+            return;
+        }
+        SymbolTable symbolTable = program.getSymbolTable();
+        for (GlobalRenameRequest request : globalRenames) {
+            String originalName = request.getOriginalName();
+            String newName = request.getNewName();
+            try {
+                if (InferenceNameUtils.isPlaceholderName(newName)) {
+                    continue;
+                }
+                String nameToApply = InferenceNameUtils.isValidName(newName) ? newName : "_" + newName;
+                Address globalAddr = parseGlobalLabelAddress(program, originalName);
+                if (globalAddr == null) {
+                    Msg.info(this, "Cannot parse global address from '" + originalName
+                        + "' at function " + functionAddress);
+                    continue;
+                }
+                Symbol sym = symbolTable.getPrimarySymbol(globalAddr);
+                if (sym == null) {
+                    // Try finding by name in the global namespace
+                    List<Symbol> symbols = symbolTable.getSymbols(originalName, null);
+                    if (symbols != null && !symbols.isEmpty()) {
+                        sym = symbols.get(0);
+                    }
+                }
+                if (sym == null) {
+                    Msg.info(this, "No symbol found for global '" + originalName
+                        + "' at " + globalAddr + " (function " + functionAddress + ")");
+                    continue;
+                }
+                if (sym.getSource() == SourceType.USER_DEFINED
+                        && !InferenceNameUtils.isAutoGeneratedVariableName(sym.getName())) {
+                    Msg.info(this, "Skipping global rename for '" + originalName
+                        + "': symbol already has user-defined name '" + sym.getName() + "'");
+                    continue;
+                }
+                sym.setName(nameToApply, SourceType.USER_DEFINED);
+                Msg.info(this, "Applied global rename at " + globalAddr
+                    + ": " + originalName + " -> " + nameToApply);
+            } catch (DuplicateNameException e) {
+                Msg.debug(this, "Global rename conflict for " + originalName
+                    + " -> " + newName + ": " + e.getMessage());
+            } catch (InvalidInputException e) {
+                Msg.debug(this, "Global rename invalid input for " + originalName
+                    + " -> " + newName + ": " + e.getMessage());
+            } catch (Exception e) {
+                Msg.warn(this, "Failed global rename for " + originalName
+                    + " -> " + newName + ": " + e.getMessage(), e);
+            }
+        }
+    }
+
+    /**
+     * Caller-targeted rename refresh. For each type-changed address, finds the calling
+     * functions that have a stored variables mapping and re-applies their stored renames.
+     * This handles the case where a callee's signature change (return_type, parameter_type)
+     * causes Ghidra to re-decompile the caller, which can shift firstUseOffset values and
+     * revert register-based variable renames from a previous inference batch.
+     *
+     * Complexity is O(typeChangedAddresses * avg_callers_per_function), bounded by the
+     * call graph density rather than total function count.
+     */
+    public void refreshCallerRenames(Program program, Set<Address> typeChangedAddresses) {
+        refreshCallerRenames(program, typeChangedAddresses, TaskMonitor.DUMMY, () -> false);
+    }
+
+    public void refreshCallerRenames(
+        Program program,
+        Set<Address> typeChangedAddresses,
+        TaskMonitor monitor,
+        java.util.function.BooleanSupplier shouldStop
+    ) {
+        if (typeChangedAddresses.isEmpty()) {
+            return;
+        }
+        if (program == null || program.isClosed()) {
+            return;
+        }
+        FunctionManager funcManager = program.getFunctionManager();
+        Set<Address> addressesToRefresh = new HashSet<>();
+
+        for (Address changedAddr : typeChangedAddresses) {
+            if (shouldStop != null && shouldStop.getAsBoolean()) {
+                break;
+            }
+            if (monitor != null && monitor.isCancelled()) {
+                break;
+            }
+            if (program.isClosed()) {
+                break;
+            }
+            // The function at the changed address itself needs refresh: changing its
+            // own return_type or parameter_type triggers re-decompilation, which can
+            // revert register-based local variable renames from a previous batch.
+            if (inferenceStorage.hasStoredVariablesMapping(changedAddr)
+                    || inferenceStorage.hasAppliedVariableRenames(changedAddr)) {
+                addressesToRefresh.add(changedAddr);
+            }
+
+            Function changedFunc = funcManager.getFunctionAt(changedAddr);
+            if (changedFunc == null) {
+                continue;
+            }
+            // Callers of the changed function also need refresh: the callee's new
+            // signature can alter the caller's decompilation layout.
+            Set<Function> callers = changedFunc.getCallingFunctions(monitor != null ? monitor : TaskMonitor.DUMMY);
+            for (Function caller : callers) {
+                Address callerAddr = caller.getEntryPoint();
+                if (inferenceStorage.hasStoredVariablesMapping(callerAddr)
+                        || inferenceStorage.hasAppliedVariableRenames(callerAddr)) {
+                    addressesToRefresh.add(callerAddr);
+                }
+            }
+        }
+
+        if (addressesToRefresh.isEmpty()) {
+            return;
+        }
+
+        Msg.info(this, "Type-change rename refresh: " + addressesToRefresh.size()
+            + " functions affected by " + typeChangedAddresses.size() + " type changes");
+
+        DecompilerManager decompilerManager = new DecompilerManager();
+        int totalRefreshed = 0;
+        for (Address addr : addressesToRefresh) {
+            if (shouldStop != null && shouldStop.getAsBoolean()) {
+                break;
+            }
+            if (monitor != null && monitor.isCancelled()) {
+                break;
+            }
+            if (program.isClosed()) {
+                break;
+            }
+            totalRefreshed += refreshStoredRenames(program, addr, decompilerManager, monitor);
+        }
+
+        if (totalRefreshed > 0) {
+            Msg.info(this, "Type-change rename refresh complete: re-applied "
+                + totalRefreshed + " renames across " + addressesToRefresh.size() + " functions");
+        }
+    }
+
+    /**
+     * Refresh variable renames for a single function using its stored mapping.
+     * Decompiles fresh and re-applies any renames from storage that reverted to
+     * auto-generated names (e.g. due to callee signature changes).
+     *
+     * @return the number of renames re-applied
+     */
+    private int refreshStoredRenames(Program program, Address address,
+            DecompilerManager decompilerManager, TaskMonitor monitor) {
+        Map<String, String> storedAppliedRenames = inferenceStorage.getAppliedVariableRenames(address);
+        VariablesMapping mapping = inferenceStorage.getLastVariablesMapping(address);
+        Map<String, String> legacyStoredMapping =
+            (mapping != null) ? mapping.getVariablesMapping() : null;
+        boolean hasAppliedRenameHistory = storedAppliedRenames != null && !storedAppliedRenames.isEmpty();
+        boolean hasLegacyMapping = legacyStoredMapping != null && !legacyStoredMapping.isEmpty();
+        if (!hasAppliedRenameHistory && !hasLegacyMapping) {
+            return 0;
+        }
+
+        Function targetFunction = program.getFunctionManager().getFunctionAt(address);
+        if (targetFunction == null) {
+            return 0;
+        }
+
+        if (program == null || program.isClosed() || (monitor != null && monitor.isCancelled())) {
+            return 0;
+        }
+
+        DecompileResults results;
+        try {
+            results = decompilerManager.decompileFunction(
+                program,
+                targetFunction,
+                ZenyardConstants.DECOMPILER_TIMEOUT_SECONDS,
+                monitor != null ? monitor : TaskMonitor.DUMMY
+            );
+        } catch (Exception e) {
+            // Program closing can produce ClosedException/DomainObjectException from the decompiler.
+            // Treat as an abort and do not propagate (we don't want to take down the batch tx).
+            Msg.debug(this, "Skipping rename refresh decompile for " + address + ": " + e.getMessage());
+            return 0;
+        }
+        if (!results.decompileCompleted() || results.getHighFunction() == null) {
+            return 0;
+        }
+
+        HighFunction hf = results.getHighFunction();
+        LocalSymbolMap symMap = hf.getLocalSymbolMap();
+
+        // Build maps from the fresh decompilation
+        Map<String, HighSymbol> freshNameToSymbol = new HashMap<>();
+        Set<String> freshNames = new HashSet<>();
+        Map<String, List<HighSymbol>> freshIdentityToSymbols = new HashMap<>();
+        Iterator<HighSymbol> iter = symMap.getSymbols();
+        while (iter.hasNext()) {
+            HighSymbol sym = iter.next();
+            HighVariable var = sym.getHighVariable();
+            if (var != null && var.getName() != null) {
+                freshNames.add(var.getName());
+                freshNameToSymbol.put(var.getName(), sym);
+                VariableStorageIdentity identity =
+                    InferenceNameUtils.toStorageIdentity(var.getRepresentative());
+                if (identity != null) {
+                    freshIdentityToSymbols.computeIfAbsent(
+                        identity.asKey(), k -> new ArrayList<>()).add(sym);
+                }
+            }
+        }
+
+        // Load persisted storage identities for this function
+        Map<String, VariableStorageIdentity> persistedIdentities =
+            inferenceStorage.getVariableIdentities(address);
+
+        Map<String, String> storedMapping = new HashMap<>();
+        if (hasLegacyMapping) {
+            storedMapping.putAll(legacyStoredMapping);
+        }
+        if (hasAppliedRenameHistory) {
+            // Applied history is authoritative; keep as final override.
+            storedMapping.putAll(storedAppliedRenames);
+        }
+        int refreshed = 0;
+
+        for (Map.Entry<String, String> entry : storedMapping.entrySet()) {
+            String originalName = entry.getKey();
+            String targetName = entry.getValue();
+
+            if (InferenceNameUtils.isPlaceholderName(targetName)) {
+                continue;
+            }
+            String nameToApply = InferenceNameUtils.isValidName(targetName)
+                ? targetName : "_" + targetName;
+
+            // Skip if the target name already exists in the fresh decompilation
+            if (freshNames.contains(nameToApply)) {
+                continue;
+            }
+
+            // Find a matching auto-generated variable in the fresh decompilation
+            HighSymbol match = findAutoGenMatchForRefresh(
+                originalName, freshNameToSymbol, freshIdentityToSymbols,
+                persistedIdentities);
+            if (match == null) {
+                continue;
+            }
+
+            try {
+                HighVariable var = match.getHighVariable();
+                if (var == null) {
+                    continue;
+                }
+                HighFunctionDBUtil.updateDBVariable(
+                    match, nameToApply, var.getDataType(), SourceType.USER_DEFINED);
+                refreshed++;
+                Msg.info(this, "Caller refresh re-applied at " + address
+                    + ": " + match.getName() + " -> " + nameToApply
+                    + " (stored original=" + originalName + ")");
+            } catch (DuplicateNameException ignored) {
+            } catch (Exception e) {
+                Msg.debug(this, "Caller refresh rename failed at " + address
+                    + ": " + nameToApply + " - " + e.getMessage());
+            }
+        }
+        if (refreshed > 0) {
+            Msg.info(this, "Caller refresh pass at " + address + ": re-applied " + refreshed + " renames");
+        }
+        return refreshed;
+    }
+
+    /**
+     * Find a matching auto-generated HighSymbol for a stored mapping entry by:
+     * 1) Exact original name still present as auto-generated
+     * 2) Auto-variable index match (e.g. iVar1 index 1 -> pRVar1 index 1)
+     * 3) Storage identity match from persisted identities
+     */
+    private HighSymbol findAutoGenMatchForRefresh(
+            String originalName,
+            Map<String, HighSymbol> freshNameToSymbol,
+            Map<String, List<HighSymbol>> freshIdentityToSymbols,
+            Map<String, VariableStorageIdentity> persistedIdentities) {
+
+        // Strategy 1: exact original name reappeared as auto-generated
+        HighSymbol byName = freshNameToSymbol.get(originalName);
+        if (byName != null) {
+            HighVariable var = byName.getHighVariable();
+            if (var != null
+                    && InferenceNameUtils.isAutoGeneratedVariableName(var.getName())
+                    && isRenamableSymbol(byName)) {
+                return byName;
+            }
+        }
+
+        // Strategy 2: match by auto-variable index
+        Integer targetIndex = InferenceNameUtils.extractAutoVarIndex(originalName);
+        if (targetIndex != null) {
+            String preferredKind = null;
+            String originalFamily = extractAutoVarFamily(originalName);
+            String normalizedOriginal = InferenceNameUtils.normalizeVariableLookupName(originalName);
+            VariableStorageIdentity identity = persistedIdentities.get(originalName);
+            if (identity == null && normalizedOriginal != null) {
+                identity = persistedIdentities.get(normalizedOriginal);
+            }
+            if (identity != null) {
+                preferredKind = identity.getKind();
+            }
+
+            Set<HighSymbol> candidates = new LinkedHashSet<>();
+            for (Map.Entry<String, HighSymbol> e : freshNameToSymbol.entrySet()) {
+                String candidateName = e.getKey();
+                if (!InferenceNameUtils.isAutoGeneratedVariableName(candidateName)) {
+                    continue;
+                }
+                Integer candidateIndex = InferenceNameUtils.extractAutoVarIndex(candidateName);
+                if (candidateIndex != null && targetIndex.equals(candidateIndex)) {
+                    if (!isCompatibleAutoVarFamily(
+                            originalFamily, extractAutoVarFamily(candidateName))) {
+                        continue;
+                    }
+                    if (preferredKind != null) {
+                        HighVariable candidateVar = e.getValue().getHighVariable();
+                        if (candidateVar == null) {
+                            continue;
+                        }
+                        VariableStorageIdentity candidateIdentity =
+                            InferenceNameUtils.toStorageIdentity(candidateVar.getRepresentative());
+                        if (candidateIdentity == null
+                                || !preferredKind.equals(candidateIdentity.getKind())) {
+                            continue;
+                        }
+                    }
+                    if (!isRenamableSymbol(e.getValue())) {
+                        continue;
+                    }
+                    candidates.add(e.getValue());
+                }
+            }
+            if (candidates.size() == 1) {
+                return candidates.iterator().next();
+            }
+        }
+
+        // Strategy 3: match by persisted storage identity
+        VariableStorageIdentity identity = persistedIdentities.get(originalName);
+        if (identity == null) {
+            String normalized = InferenceNameUtils.normalizeVariableLookupName(originalName);
+            if (normalized != null) {
+                identity = persistedIdentities.get(normalized);
+            }
+        }
+        if (identity != null) {
+            List<HighSymbol> candidates = freshIdentityToSymbols.getOrDefault(
+                identity.asKey(), Collections.emptyList());
+            for (HighSymbol sym : candidates) {
+                HighVariable var = sym.getHighVariable();
+                if (var != null
+                        && InferenceNameUtils.isAutoGeneratedVariableName(var.getName())
+                        && isRenamableSymbol(sym)) {
+                    return sym;
+                }
+            }
+        }
+
+        return null;
     }
 }

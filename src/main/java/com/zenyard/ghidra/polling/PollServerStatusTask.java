@@ -39,6 +39,7 @@ public class PollServerStatusTask extends EventAwareTask {
     private static final double REVISION_EPS = 1e-6; // floating point tolerance for revision comparisons
     private static final int CONNECTIVITY_CHECK_TIMEOUT_MS = 5000;
     private static final int STATUS_REQUEST_TIMEOUT_MS = 10000;
+    private static final int BINARY_ID_WAIT_CONNECTIVITY_INTERVAL_MS = 5000;
     
     private final PluginTool tool;
     private final BinariesApi binariesApi;
@@ -112,9 +113,20 @@ public class PollServerStatusTask extends EventAwareTask {
     @Override
     protected void doRun(TaskMonitor monitor) {
         try {
+            // Connectivity warnings should show even before a binary is registered (or when
+            // registration is blocked by the binary-size gate). Do a quick check immediately.
+            verifyConnectivityOnce();
+            long lastConnectivityCheckMs = System.currentTimeMillis();
+
             // Wait for BINARY_ID_AVAILABLE event
             synchronized (waitLock) {
                 while (!binaryIdAvailable && !shouldStop && !monitor.isCancelled()) {
+                    long now = System.currentTimeMillis();
+                    if (now - lastConnectivityCheckMs >= BINARY_ID_WAIT_CONNECTIVITY_INTERVAL_MS) {
+                        verifyConnectivityOnce();
+                        lastConnectivityCheckMs = now;
+                    }
+
                     // Check if binary ID is already available
                     ZenyardProgramProperties props = new ZenyardProgramProperties(program);
                     String binaryIdStr = props.getString("binary_id");
@@ -200,6 +212,7 @@ public class PollServerStatusTask extends EventAwareTask {
                         // This means analysis completed while program was closed
                         Msg.info(this, "PollServerStatusTask: Analysis completed while program was closed");
                         clearRemoteAnalysisStats(); // This also clears analysis_in_progress flag
+                        setRemoteAnalysisCompletedOnce();
                         // Publish null status to clear the status bar immediately
                         publishAnalysisStatus(null, fractionalServerRevision);
                     }
@@ -242,6 +255,7 @@ public class PollServerStatusTask extends EventAwareTask {
                         publishAnalysisStatus(analysisStatus, fractionalServerRevision);
                     } else if (clientInSync && hadAnalysisStats) {
                         Msg.debug(this, "PollServerStatusTask: Client in sync, signaling completion");
+                        setRemoteAnalysisCompletedOnce();
                         publishAnalysisStatus(null, fractionalServerRevision);
                     } else {
                         Msg.debug(this, "PollServerStatusTask: No analysis status to publish");
@@ -388,11 +402,15 @@ public class PollServerStatusTask extends EventAwareTask {
             }
             
             // Calculate progress: maxRevision - sum of missing progress for all analyses
+            // Clamp each per-revision progress to [0,1] to guard against server-side
+            // floating-point overshoot (e.g. 1.0000001) that would make missingProgress
+            // negative and push the result past maxServerRevision.
             double missingProgress = status.getRevisionAnalyses().stream()
-                .mapToDouble(ras -> 1.0 - ras.getProgress().doubleValue())
+                .mapToDouble(ras -> 1.0 - Math.max(0.0, Math.min(1.0, ras.getProgress().doubleValue())))
                 .sum();
             
-            return maxServerRevision - missingProgress;
+            double result = maxServerRevision - missingProgress;
+            return Math.max(0.0, Math.min(maxServerRevision, result));
         } else {
             // Server is idle - use local revision
             maxServerRevision = null;
@@ -486,6 +504,15 @@ public class PollServerStatusTask extends EventAwareTask {
             props.setString("analysis_in_progress", "");
         }
     }
+
+    /**
+     * Persist that the binary has completed remote analysis at least once.
+     * Used by change tracking to suppress CHANGES_DETECTED before first analysis.
+     */
+    private void setRemoteAnalysisCompletedOnce() {
+        ZenyardProgramProperties props = new ZenyardProgramProperties(program);
+        props.setString("remote_analysis_completed_once", "true");
+    }
     
     /**
      * Calculate analysis status (progress and ETA).
@@ -516,6 +543,7 @@ public class PollServerStatusTask extends EventAwareTask {
         
         // Calculate progress: (server_revision - last_done_revision) / (revision - last_done_revision)
         double progress = (serverRevision - lastDoneRevision) / (revision - lastDoneRevision);
+        progress = Math.max(0.0, Math.min(1.0, progress));
         
         // Calculate ETA
         Double eta = calculateEta(revision, serverRevision);
@@ -580,6 +608,8 @@ public class PollServerStatusTask extends EventAwareTask {
             return null;
         }
         
+        progressSinceStats = Math.min(1.0, progressSinceStats);
+        
         // Calculate distance remaining and speed
         double distance = 1.0 - progressSinceStats;
         double speed = progressSinceStats / timeSinceStatsSeconds;
@@ -626,6 +656,7 @@ public class PollServerStatusTask extends EventAwareTask {
             // Analysis completed while program was closed - clear the state
             Msg.info(this, "PollServerStatusTask: Analysis completed while program was closed, clearing state");
             clearRemoteAnalysisStats(); // This also clears analysis_in_progress flag
+            setRemoteAnalysisCompletedOnce();
             // Publish null status to unregister the status bar task
             publishAnalysisStatus(null, fractionalServerRevision);
             return;

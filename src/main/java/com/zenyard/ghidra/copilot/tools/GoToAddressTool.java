@@ -1,5 +1,6 @@
 package com.zenyard.ghidra.copilot.tools;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
@@ -23,9 +24,9 @@ public class GoToAddressTool {
         this.tool = tool;
     }
     
-    @Tool("Navigates the Ghidra UI to the given address. " +
-          "This will change the current location in the code viewer.")
-    public String goToAddress(String address) {
+    @Tool("Move the Ghidra UI cursor to a specific address. Input requires `address` in the current program.")
+    public String goToAddress(
+            @P("Address to navigate to (hex like `0x401000`).") String address) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("address", address);
         return ToolUtils.executeTool(context, "go_to_address", args, () -> {

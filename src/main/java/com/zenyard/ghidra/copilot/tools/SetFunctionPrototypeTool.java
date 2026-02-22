@@ -1,28 +1,57 @@
 package com.zenyard.ghidra.copilot.tools;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.app.cmd.function.ApplyFunctionSignatureCmd;
+import ghidra.app.services.DataTypeQueryService;
+import ghidra.app.util.parser.FunctionSignatureParser;
+import ghidra.program.model.data.ArchiveType;
+import ghidra.program.model.data.CategoryPath;
+import ghidra.program.model.data.DataType;
+import ghidra.program.model.data.DataTypeManager;
+import ghidra.program.model.data.DataTypePath;
+import ghidra.program.model.data.FunctionDefinitionDataType;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.SourceType;
+import ghidra.util.task.TaskMonitor;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Set;
 
 /**
  * Tool to set a function's prototype/signature.
  */
 public class SetFunctionPrototypeTool {
-    
+
     private final CopilotToolContext context;
-    
+
+    private static final Set<String> C_KEYWORDS = Set.of(
+        "void", "char", "short", "int", "long", "float", "double",
+        "unsigned", "signed", "const", "volatile", "struct", "union",
+        "enum", "typedef", "static", "extern", "register", "auto",
+        "bool", "size_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+        "int8_t", "int16_t", "int32_t", "int64_t", "uchar", "uint",
+        "ulong", "ushort", "byte", "word", "dword", "qword",
+        "undefined", "undefined1", "undefined2", "undefined4", "undefined8",
+        "pointer", "addr", "longlong", "ulonglong"
+    );
+
     public SetFunctionPrototypeTool(CopilotToolContext context) {
         this.context = context;
     }
-    
-    @Tool("Sets a function's prototype. Provide a C-style function prototype (e.g., 'int foo(int x, char *y);')")
-    public void setFunctionPrototype(String address, String newPrototype) {
+
+    @Tool("Set a function signature using a C-style prototype. Inputs: `address` (target function location) and `new_prototype` (for example `int foo(int x, char *y);`). Custom types must already exist in the program data type manager.")
+    public String setFunctionPrototype(
+            @P("Function address in the current program (hex like `0x401000`).") String address,
+            @P("Full C-style function prototype to apply. Include parameter names where possible; trailing semicolon is optional.") String newPrototype) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("address", address);
         args.put("new_prototype", newPrototype);
-        ToolUtils.executeTool(context, "set_function_prototype", args, () -> {
+        return ToolUtils.executeTool(context, "set_function_prototype", args, () -> {
             try {
                 context.checkCancelled();
 
@@ -33,84 +62,260 @@ public class SetFunctionPrototypeTool {
 
                 Function function = ToolUtils.getFunction(program, address);
                 if (function == null) {
-                    throw new ToolExecutionException("Failed to retrieve function from address: " + address);
+                    throw new ToolExecutionException(
+                        "Failed to retrieve function from address: " + address);
                 }
 
-                // Ensure prototype ends with semicolon
-                String prototype = newPrototype;
-                if (!prototype.trim().endsWith(";")) {
-                    prototype = prototype.trim() + ";";
+                String prototype = newPrototype.trim();
+                if (!prototype.endsWith(";")) {
+                    prototype += ";";
                 }
 
-                // Use transaction for program modification
-                int transactionId = program.startTransaction("Zenyard: Set function prototype");
+                int transactionId = program.startTransaction(
+                    "Zenyard: Set function prototype");
                 try {
-                    // Get DataTypeQueryService from tool if available
-                    // In Ghidra 12.0, DataTypeQueryService may be in a different package
-                    Object queryService = null;
-                    if (context.getTool() != null) {
-                        try {
-                            // Try to get DataTypeQueryService from tool
-                            Class<?> queryServiceClass = Class.forName("ghidra.app.services.DataTypeQueryService");
-                            queryService = context.getTool().getService(queryServiceClass);
-                        } catch (ClassNotFoundException e) {
-                            // DataTypeQueryService may not exist or be in a different package
+                    DataTypeManager dtm = program.getDataTypeManager();
+                    FunctionSignatureParser parser = new FunctionSignatureParser(
+                        dtm, new HeadlessDataTypeQueryService(dtm));
+
+                    FunctionDefinitionDataType signature;
+                    try {
+                        signature = parser.parse(
+                            function.getSignature(), prototype);
+                    } catch (Exception parseError) {
+                        String parseMsg = parseError.getMessage();
+                        if (parseMsg == null) {
+                            parseMsg = parseError.getClass().getSimpleName();
                         }
+                        String typeHints = suggestTypes(dtm, prototype);
+                        throw new ToolExecutionException(
+                            "Failed to parse prototype '" + prototype + "': "
+                            + parseMsg
+                            + ". All custom/struct types must exist in the "
+                            + "program's data type manager."
+                            + typeHints
+                            + " Call getLocalTypes to see all available types.");
                     }
 
-                    // Parse the string prototype to FunctionSignature using FunctionSignatureParser
-                    // FunctionSignatureParser requires DataTypeManager and DataTypeQueryService
-                    ghidra.app.util.parser.FunctionSignatureParser parser;
-                    if (queryService != null) {
-                        // Use reflection to create parser with queryService
-                        java.lang.reflect.Constructor<?> constructor =
-                            ghidra.app.util.parser.FunctionSignatureParser.class.getConstructor(
-                                ghidra.program.model.data.DataTypeManager.class,
-                                queryService.getClass()
-                            );
-                        parser = (ghidra.app.util.parser.FunctionSignatureParser) constructor.newInstance(
-                            program.getDataTypeManager(),
-                            queryService
-                        );
-                    } else {
-                        // Fallback: try to create parser with just DataTypeManager
-                        // This may work if DataTypeQueryService is optional or has a default
-                        try {
-                            // Try constructor with just DataTypeManager
-                            java.lang.reflect.Constructor<?> constructor =
-                                ghidra.app.util.parser.FunctionSignatureParser.class.getConstructor(
-                                    ghidra.program.model.data.DataTypeManager.class
-                                );
-                            parser = (ghidra.app.util.parser.FunctionSignatureParser) constructor.newInstance(
-                                program.getDataTypeManager()
-                            );
-                        } catch (Exception e) {
-                            throw new ToolExecutionException("Cannot create FunctionSignatureParser: " + e.getMessage());
-                        }
-                    }
-
-                    // Parse the signature - FunctionSignatureParser.parse() takes existing signature and new prototype string
-                    // Function.getSignature() returns FunctionSignature from ghidra.program.model.listing package
-                    ghidra.program.model.listing.FunctionSignature signature =
-                        parser.parse(function.getSignature(), prototype);
-
-                    // Use ApplyFunctionSignatureCmd to apply the parsed signature
                     ApplyFunctionSignatureCmd cmd = new ApplyFunctionSignatureCmd(
                         function.getEntryPoint(),
                         signature,
                         SourceType.USER_DEFINED
                     );
-                    cmd.applyTo(program);
+                    boolean success = cmd.applyTo(program);
+                    if (!success) {
+                        String statusMsg = cmd.getStatusMsg();
+                        throw new ToolExecutionException(
+                            "Failed to apply signature: "
+                            + (statusMsg != null ? statusMsg : "unknown error"));
+                    }
                 } finally {
                     program.endTransaction(transactionId, true);
                 }
-                return null;
+                return "Successfully set prototype for function at " + address
+                    + " to: " + prototype;
             } catch (ToolExecutionException e) {
                 throw e;
             } catch (Exception e) {
-                throw new ToolExecutionException("Failed to set function prototype: " + e.getMessage(), e);
+                throw new ToolExecutionException(
+                    "Failed to set function prototype: " + e.getMessage(), e);
             }
         });
     }
-}
 
+    // ----------------------------------------------------------------
+    // Headless DataTypeQueryService — resolves types without GUI
+    // ----------------------------------------------------------------
+
+    /**
+     * Non-interactive implementation of {@link DataTypeQueryService} that
+     * resolves type names by searching the program's {@link DataTypeManager}
+     * across all categories.
+     *
+     * <p>The real tool-based service may show a type-chooser dialog on the
+     * Swing EDT when multiple matches exist, which deadlocks when called
+     * from a non-EDT thread (the LangGraph executor). This implementation
+     * never shows dialogs — it picks the best match automatically.
+     */
+    private static class HeadlessDataTypeQueryService implements DataTypeQueryService {
+
+        private final DataTypeManager dtm;
+
+        HeadlessDataTypeQueryService(DataTypeManager dtm) {
+            this.dtm = dtm;
+        }
+
+        @Override
+        public DataType getDataType(String filterText) {
+            return promptForDataType(filterText);
+        }
+
+        @Override
+        public DataType promptForDataType(String filterText) {
+            if (filterText == null || filterText.isBlank()) {
+                return null;
+            }
+
+            // Fast path: check root category
+            DataType rootMatch = dtm.getDataType(CategoryPath.ROOT, filterText);
+            if (rootMatch != null) {
+                return rootMatch;
+            }
+
+            // Search across all categories by name
+            List<DataType> matches = new ArrayList<>();
+            dtm.findDataTypes(filterText, matches);
+
+            if (matches.isEmpty()) {
+                return null;
+            }
+            if (matches.size() == 1) {
+                return matches.get(0);
+            }
+
+            // Multiple matches: prefer program-local type over built-in
+            for (DataType dt : matches) {
+                if (dt.getSourceArchive() != null
+                        && dt.getSourceArchive().getArchiveType()
+                            == ArchiveType.PROGRAM) {
+                    return dt;
+                }
+            }
+            return matches.get(0);
+        }
+
+        @Override
+        public List<DataType> getSortedDataTypeList() {
+            List<DataType> all = new ArrayList<>();
+            Iterator<DataType> iter = dtm.getAllDataTypes();
+            while (iter.hasNext()) {
+                all.add(iter.next());
+            }
+            all.sort((a, b) -> a.getName().compareToIgnoreCase(b.getName()));
+            return all;
+        }
+
+        @Override
+        public List<CategoryPath> getSortedCategoryPathList() {
+            return Collections.emptyList();
+        }
+
+        @Override
+        public List<DataType> findDataTypes(String name, TaskMonitor monitor) {
+            List<DataType> results = new ArrayList<>();
+            dtm.findDataTypes(name, results);
+            return results;
+        }
+
+        @Override
+        public List<DataType> getDataTypesByPath(DataTypePath path) {
+            if (path == null) {
+                return Collections.emptyList();
+            }
+            DataType dt = dtm.getDataType(path);
+            return dt != null ? List.of(dt) : Collections.emptyList();
+        }
+
+        @Override
+        public DataType getProgramDataTypeByPath(DataTypePath path) {
+            if (path == null) {
+                return null;
+            }
+            return dtm.getDataType(path);
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Error diagnostics helpers
+    // ----------------------------------------------------------------
+
+    /**
+     * Identifies non-primitive type names in the prototype, checks whether
+     * they exist in the DTM, and produces a hint string for the agent.
+     */
+    private String suggestTypes(DataTypeManager dtm, String prototype) {
+        List<String> unknownTypes = new ArrayList<>();
+        List<String> suggestions = new ArrayList<>();
+
+        String returnAndName = prototype.contains("(")
+            ? prototype.substring(0, prototype.indexOf('('))
+            : prototype;
+        String params = prototype.contains("(") && prototype.contains(")")
+            ? prototype.substring(
+                prototype.indexOf('(') + 1, prototype.lastIndexOf(')'))
+            : "";
+
+        checkTypeTokens(dtm, returnAndName.trim(), unknownTypes, suggestions);
+
+        if (!params.isBlank()) {
+            for (String param : params.split(",")) {
+                checkTypeTokens(dtm, param.trim(), unknownTypes, suggestions);
+            }
+        }
+
+        if (unknownTypes.isEmpty()) {
+            return "";
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(" Unknown type(s): ")
+          .append(String.join(", ", unknownTypes)).append(".");
+        if (!suggestions.isEmpty()) {
+            sb.append(" Similar types found: ")
+              .append(String.join(", ", suggestions)).append(".");
+        }
+        return sb.toString();
+    }
+
+    private void checkTypeTokens(DataTypeManager dtm, String fragment,
+            List<String> unknownTypes, List<String> suggestions) {
+        String cleaned = fragment.replaceAll("[*&\\[\\];]", " ")
+            .replaceAll(
+                "\\b(const|volatile|struct|union|enum|unsigned|signed)\\b",
+                "")
+            .trim();
+        String[] tokens = cleaned.split("\\s+");
+        if (tokens.length == 0) {
+            return;
+        }
+
+        for (int i = 0; i < tokens.length - 1; i++) {
+            String token = tokens[i].trim();
+            if (token.isEmpty()
+                    || C_KEYWORDS.contains(token.toLowerCase())) {
+                continue;
+            }
+            List<DataType> found = new ArrayList<>();
+            dtm.findDataTypes(token, found);
+            if (found.isEmpty() && !unknownTypes.contains(token)) {
+                unknownTypes.add(token);
+                List<String> similar = findSimilarTypeNames(dtm, token);
+                suggestions.addAll(similar);
+            }
+        }
+    }
+
+    private List<String> findSimilarTypeNames(
+            DataTypeManager dtm, String name) {
+        List<String> similar = new ArrayList<>();
+        String lowerName = name.toLowerCase();
+        Iterator<DataType> iter = dtm.getAllDataTypes();
+        while (iter.hasNext()) {
+            DataType dt = iter.next();
+            String dtName = dt.getName();
+            if (dtName != null) {
+                String lowerDtName = dtName.toLowerCase();
+                if (lowerDtName.contains(lowerName)
+                        || lowerName.contains(lowerDtName)) {
+                    if (!similar.contains(dtName)) {
+                        similar.add(dtName);
+                    }
+                    if (similar.size() >= 5) {
+                        break;
+                    }
+                }
+            }
+        }
+        return similar;
+    }
+}

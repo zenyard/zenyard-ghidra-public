@@ -11,7 +11,7 @@ import com.zenyard.ghidra.api.generated.ApiClient;
 import com.zenyard.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.ghidra.api.generated.model.AddObjectsToCurrentRevisionParams;
 import com.zenyard.ghidra.api.generated.model.CreateRevisionParams;
-import com.zenyard.ghidra.api.generated.model.FinishAndAnalyzeCurrentRevisionParams;
+import com.zenyard.ghidra.api.generated.model.FinishAndAnalyzeCurrentRevisionBody;
 import com.zenyard.ghidra.api.generated.model.GetInferencesResponse;
 import com.zenyard.ghidra.api.generated.model.MaybeUnknownInference;
 import com.zenyard.ghidra.api.generated.model.ModelObject;
@@ -169,7 +169,7 @@ public class RevisionWorkflowManager {
     }
 
     public void finishAndAnalyzeRevision(UUID binaryId, boolean analyzeDependents) {
-        FinishAndAnalyzeCurrentRevisionParams finishParams = new FinishAndAnalyzeCurrentRevisionParams();
+        FinishAndAnalyzeCurrentRevisionBody finishParams = new FinishAndAnalyzeCurrentRevisionBody();
         finishParams.setAnalyzeDependents(analyzeDependents);
         executeApiRequest(() -> binariesApi.finishAndAnalyzeCurrentRevision(binaryId, finishParams));
     }

@@ -5,6 +5,7 @@ import java.awt.KeyboardFocusManager;
 import java.awt.event.KeyEvent;
 import java.lang.reflect.Field;
 
+import javax.swing.JLabel;
 import javax.swing.JPanel;
 
 import docking.ComponentProvider;
@@ -51,15 +52,39 @@ public class CopilotProvider extends ComponentProvider {
         }
     }
 
+    /**
+     * Refresh the Copilot UI state (e.g. when usage state changes).
+     */
+    public void refreshState() {
+        if (webViewPanel != null) {
+            webViewPanel.refreshState();
+        }
+    }
+
     private void buildComponent() {
         JPanel mainPanel = new JPanel(new BorderLayout());
 
-        webViewPanel = new CopilotWebViewPanel();
-        webViewPanel.setController(controller);
-        if (viewModel != null) {
-            webViewPanel.setViewModel(viewModel);
+        try {
+            webViewPanel = new CopilotWebViewPanel();
+            webViewPanel.setController(controller);
+            if (viewModel != null) {
+                webViewPanel.setViewModel(viewModel);
+            }
+            mainPanel.add(webViewPanel, BorderLayout.CENTER);
+        } catch (Throwable t) {
+            // If JavaFX fails to initialize (missing/incorrect natives, missing GTK libs, etc),
+            // keep the extension functional and show a clear message instead of crashing plugin activation.
+            Msg.error(this, "Copilot UI failed to initialize (JavaFX WebView unavailable): " + t.getMessage(), t);
+            JPanel fallback = new JPanel(new BorderLayout());
+            String message = "<html><center><b>Copilot UI unavailable</b></center><br>"
+                    + "JavaFX WebView could not be initialized on this system.<br><br>"
+                    + "If you are on Linux x64, ensure the extension ZIP was built with<br>"
+                    + "<code>-PjavafxPlatform=linux</code> and that GTK dependencies are installed.<br><br>"
+                    + (t.getMessage() != null ? "<small>" + t.getMessage() + "</small>" : "")
+                    + "</html>";
+            fallback.add(new JLabel(message), BorderLayout.CENTER);
+            mainPanel.add(fallback, BorderLayout.CENTER);
         }
-        mainPanel.add(webViewPanel, BorderLayout.CENTER);
         
         // In Ghidra 12.0, ComponentProvider may require getComponent() method
         // Store component and provide getComponent() implementation

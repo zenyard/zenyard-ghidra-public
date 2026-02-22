@@ -1,5 +1,6 @@
 package com.zenyard.ghidra.copilot.tools;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
@@ -28,9 +29,11 @@ public class SetLocalVariableTypeTool {
         this.context = context;
     }
     
-    @Tool("Sets the data type of a local variable in the given function. " +
-          "The type name should be a valid Ghidra data type (e.g., 'int', 'char *', 'MyStruct').")
-    public String setLocalVariableType(String functionAddress, String variableName, String newType) {
+    @Tool("Set a local variable type within one function. Inputs: `function_address` (function location), `variable_name` (existing local variable), and `new_type` (valid Ghidra/C type, e.g. `int`, `char *`, `MyStruct`).")
+    public String setLocalVariableType(
+            @P("Function address (hex like `0x401000`) that contains the local variable.") String functionAddress,
+            @P("Current local variable name exactly as shown in the decompiler for that function.") String variableName,
+            @P("New type expression to apply (for example `int`, `char *`, `MyStruct`).") String newType) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("function_address", functionAddress);
         args.put("variable_name", variableName);

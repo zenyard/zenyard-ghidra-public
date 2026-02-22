@@ -91,6 +91,32 @@ public class BinarySerializer {
         
         return new SerializedBinary(name, compressedData, fileTypeStr);
     }
+
+    /**
+     * Resolve input file size in bytes.
+     *
+     * Prefers original binary file, falls back to Ghidra project file.
+     *
+     * @param program The program whose source file size should be measured
+     * @return Size in bytes
+     * @throws IOException if input file cannot be resolved
+     */
+    public static long getInputFileSizeBytes(Program program) throws IOException {
+        if (program == null) {
+            throw new IllegalArgumentException("Program cannot be null");
+        }
+
+        Path inputPath = getBinaryPath(program);
+        if (inputPath == null || !Files.exists(inputPath)) {
+            inputPath = getProjectPath(program);
+        }
+
+        if (inputPath == null || !Files.exists(inputPath)) {
+            throw new IOException("No input file found for program: " + program.getName());
+        }
+
+        return Files.size(inputPath);
+    }
     
     /**
      * Get the original binary file path.

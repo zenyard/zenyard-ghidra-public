@@ -20,7 +20,7 @@ import ghidra.util.Msg;
  * Key pattern: sync_status.<address>
  */
 public class SyncStatusStorage {
-    private static final String PROPERTY_PREFIX = "sync_status.";
+    private static final String PROPERTY_PREFIX = "sync_status";
     private static final String DIRTY_LIST_KEY = "dirty_addresses";
     private static final Gson gson = new GsonBuilder().create();
     
@@ -36,7 +36,7 @@ public class SyncStatusStorage {
      * Get sync status for an address.
      */
     public Optional<SyncStatus> getSyncStatus(Address address) {
-        String key = PROPERTY_PREFIX + address.toString();
+        String key = buildKey(address);
         String json = properties.getString(key);
         
         if (json == null || json.isEmpty()) {
@@ -45,7 +45,7 @@ public class SyncStatusStorage {
         
         try {
             SyncStatusData data = gson.fromJson(json, SyncStatusData.class);
-            Optional<String> hash = data.uploadedHash != null && !data.uploadedHash.isEmpty() 
+        Optional<String> hash = data.uploadedHash != null && !data.uploadedHash.isEmpty() 
                 ? Optional.of(data.uploadedHash) 
                 : Optional.empty();
             return Optional.of(new SyncStatus(hash, data.dirty));
@@ -59,7 +59,7 @@ public class SyncStatusStorage {
      * Set sync status for an address.
      */
     public void setSyncStatus(Address address, SyncStatus status) {
-        String key = PROPERTY_PREFIX + address.toString();
+        String key = buildKey(address);
         SyncStatusData data = new SyncStatusData();
         data.uploadedHash = status.getUploadedHash().orElse(null);
         data.dirty = status.isDirty();
@@ -153,6 +153,17 @@ public class SyncStatusStorage {
             dirtyAddresses.remove(addressString);
         }
         setDirtyAddressStrings(dirtyAddresses);
+    }
+
+    private String buildKey(Address address) {
+        String addressString = address.toString();
+        if (addressString.startsWith(".")) {
+            addressString = addressString.replaceFirst("^\\.+", "");
+        }
+        while (addressString.contains("..")) {
+            addressString = addressString.replace("..", ".");
+        }
+        return PROPERTY_PREFIX + "." + addressString;
     }
     
     /**

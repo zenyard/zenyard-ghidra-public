@@ -4,6 +4,8 @@ import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.task.TaskMonitor;
 
+import com.zenyard.ghidra.copilot.storage.CopilotArtifactStorage;
+
 /**
  * Context object passed to tools for accessing Ghidra program and monitor.
  * 
@@ -19,12 +21,14 @@ public class CopilotToolContext {
     private final TaskMonitor monitor;
     private final PluginTool tool;
     private final ToolExecutionListener toolExecutionListener;
+    private final CopilotArtifactStorage artifactStorage;
     
     public CopilotToolContext(Program program, TaskMonitor monitor) {
         this.program = program;
         this.monitor = monitor;
         this.tool = null;
         this.toolExecutionListener = null;
+        this.artifactStorage = null;
     }
     
     public CopilotToolContext(Program program, TaskMonitor monitor, PluginTool tool) {
@@ -32,17 +36,20 @@ public class CopilotToolContext {
         this.monitor = monitor;
         this.tool = tool;
         this.toolExecutionListener = null;
+        this.artifactStorage = null;
     }
 
     public CopilotToolContext(
             Program program,
             TaskMonitor monitor,
             PluginTool tool,
-            ToolExecutionListener toolExecutionListener) {
+            ToolExecutionListener toolExecutionListener,
+            CopilotArtifactStorage artifactStorage) {
         this.program = program;
         this.monitor = monitor;
         this.tool = tool;
         this.toolExecutionListener = toolExecutionListener;
+        this.artifactStorage = artifactStorage;
     }
     
     public Program getProgram() {
@@ -59,6 +66,10 @@ public class CopilotToolContext {
 
     public ToolExecutionListener getToolExecutionListener() {
         return toolExecutionListener;
+    }
+
+    public CopilotArtifactStorage getArtifactStorage() {
+        return artifactStorage;
     }
     
     /**

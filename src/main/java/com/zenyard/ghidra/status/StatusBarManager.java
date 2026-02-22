@@ -15,6 +15,8 @@ import com.zenyard.ghidra.events.EventDispatcher;
 import com.zenyard.ghidra.storage.ZenyardProgramProperties;
 import com.zenyard.ghidra.ZenyardService;
 import com.zenyard.ghidra.config.ZenyardOptions;
+import com.zenyard.ghidra.upload.QueueableObjectsDetector;
+import com.zenyard.ghidra.util.BinarySizeLimitGate;
 
 /**
  * Integrates with Ghidra's native StatusBar to display analysis progress, errors, and hints.
@@ -23,6 +25,7 @@ import com.zenyard.ghidra.config.ZenyardOptions;
  * NOTE: mirrors functionality in zenyard_ida/status_bar_widget.py and zenyard_ida/ui/ui_task.py
  */
 public class StatusBarManager {
+    private static final String SERVER_UNREACHABLE_LABEL = "Server unreachable";
     
     /**
      * Internal class to track task status information.
@@ -192,6 +195,8 @@ public class StatusBarManager {
         Optional<TaskStatus> activeTask = getActiveTask();
         StatusBarState state;
         StatusBarState current = viewModel.getStateSnapshot();
+        ZenyardService services = ZenyardService.getInstance();
+        boolean disconnected = services != null && !services.isServerConnected();
         if (isEulaRejected()) {
             state = StatusBarState.empty()
                 .withShowReviewTerms(true)
@@ -199,6 +204,7 @@ public class StatusBarManager {
                 .withShowWarningIcon(current.isShowWarningIcon())
                 .withUsageDisplay(current.getUsageText(), current.getUsageTooltip(),
                     current.isUsageVisible(), current.getUsageLevel());
+            state = applyServerUnreachableIfNeeded(state, disconnected);
             viewModel.updateState(state);
             return;
         }
@@ -210,6 +216,22 @@ public class StatusBarManager {
                 current.isShowWarningIcon(), showReviewTerms, current.getUsageText(),
                 current.getUsageTooltip(), current.isUsageVisible(), current.getUsageLevel());
         } else {
+            if (hasPersistedBinarySizeLimitExceeded()) {
+                String status = "Binary exceeds plan size limit";
+                Integer maxSizeMb = getPersistedBinarySizeLimitMb();
+                if (maxSizeMb != null && maxSizeMb > 0) {
+                    status = "Binary exceeds " + maxSizeMb + "MB plan size limit";
+                }
+                state = StatusBarState.empty()
+                    .withStatus(status)
+                    .withShowWarningIcon(true)
+                    .withShowReviewTerms(showReviewTerms)
+                    .withUsageDisplay(current.getUsageText(), current.getUsageTooltip(),
+                        current.isUsageVisible(), current.getUsageLevel());
+                state = applyServerUnreachableIfNeeded(state, disconnected);
+                viewModel.updateState(state);
+                return;
+            }
             boolean showInitialUpload = hasPersistedInitialQuestionsDeferred();
             if (showInitialUpload) {
                 state = StatusBarState.empty()
@@ -220,8 +242,10 @@ public class StatusBarManager {
                     .withUsageDisplay(current.getUsageText(), current.getUsageTooltip(),
                         current.isUsageVisible(), current.getUsageLevel());
             } else {
-                boolean showRerun = canShowRerun() &&
-                    (current.isShowRerun() || hasPersistedChangesDetected());
+                boolean showRerunRequested = current.isShowRerun() || hasPersistedChangesDetected();
+                boolean showRerun = showRerunRequested
+                    && canShowRerun()
+                    && hasQueueableObjects();
                 if (showRerun) {
                     state = StatusBarState.empty()
                         .withShowRerun(true)
@@ -239,11 +263,26 @@ public class StatusBarManager {
                 }
             }
         }
+        state = applyServerUnreachableIfNeeded(state, disconnected);
         viewModel.updateState(state);
     }
 
     public void refreshDisplayNow() {
         refreshDisplay();
+    }
+
+    private StatusBarState applyServerUnreachableIfNeeded(StatusBarState state, boolean disconnected) {
+        if (state == null || !disconnected) {
+            return state;
+        }
+        String status = state.getStatus();
+        if (status == null || status.isBlank() || "Ready".equals(status)) {
+            return state.withStatus(SERVER_UNREACHABLE_LABEL);
+        }
+        if (status.startsWith(SERVER_UNREACHABLE_LABEL)) {
+            return state;
+        }
+        return state.withStatus(SERVER_UNREACHABLE_LABEL + " — " + status);
     }
 
     private Program getCurrentProgramSafely() {
@@ -268,6 +307,10 @@ public class StatusBarManager {
             return false;
         }
         return services.getTrackChangesTaskManager().shouldProcessEvents();
+    }
+
+    private boolean hasQueueableObjects() {
+        return QueueableObjectsDetector.hasQueueableObjects(getCurrentProgramSafely());
     }
 
     private boolean isEulaRejected() {
@@ -300,6 +343,24 @@ public class StatusBarManager {
         String deferred = props.getString("initial_questions_deferred");
         String initialUploadComplete = props.getString("initial_upload_complete");
         return "true".equals(deferred) && !"true".equals(initialUploadComplete);
+    }
+
+    private boolean hasPersistedBinarySizeLimitExceeded() {
+        Program program = getCurrentProgramSafely();
+        if (program == null) {
+            return false;
+        }
+        ZenyardProgramProperties props = new ZenyardProgramProperties(program);
+        return "true".equals(props.getString(BinarySizeLimitGate.PROP_BINARY_SIZE_LIMIT_EXCEEDED));
+    }
+
+    private Integer getPersistedBinarySizeLimitMb() {
+        Program program = getCurrentProgramSafely();
+        if (program == null) {
+            return null;
+        }
+        ZenyardProgramProperties props = new ZenyardProgramProperties(program);
+        return props.getInt(BinarySizeLimitGate.PROP_BINARY_SIZE_LIMIT_MB);
     }
     
     /**

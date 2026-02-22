@@ -33,6 +33,9 @@ import com.zenyard.ghidra.upload.UploadRevisionsTask;
 import com.zenyard.ghidra.usage.UsageState;
 import com.zenyard.ghidra.util.LoggerUtil;
 import com.zenyard.ghidra.events.EventDispatcher;
+import com.zenyard.ghidra.events.EventConsumer;
+
+import javax.swing.SwingUtilities;
 
 import java.util.ArrayDeque;
 import java.util.Collections;
@@ -40,6 +43,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.HashSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -72,8 +76,32 @@ public class ZenyardService {
     private TrackChangesTaskManager trackChangesTaskManager;
     private EventDispatcher eventDispatcher;
     private AnalysisProgressMonitor analysisProgressMonitor;
-    private volatile boolean userConfigFetchStarted;
+    private volatile boolean userConfigFetchInFlight;
+    private volatile boolean userConfigFetched;
+    private volatile long lastUserConfigFetchAttemptMs;
+    private static final long USER_CONFIG_RETRY_MIN_INTERVAL_MS = 10_000L;
     private volatile UsageState usageState = UsageState.unknown();
+    private volatile boolean serverConnected = true;
+    private final EventConsumer serverConnectivityConsumer = new EventConsumer() {
+        @Override
+        public void handleEvent(ZenyardEvent event) {
+            if (event == null || event.getType() != ZenyardEvent.EventType.SERVER_CONNECTIVITY_CHANGED) {
+                return;
+            }
+            Boolean connected = event.getPayloadValue("connected", Boolean.class);
+            if (connected == null) {
+                return;
+            }
+            setServerConnected(connected.booleanValue());
+        }
+
+        @Override
+        public Set<ZenyardEvent.EventType> getSubscribedEventTypes() {
+            Set<ZenyardEvent.EventType> types = new HashSet<>();
+            types.add(ZenyardEvent.EventType.SERVER_CONNECTIVITY_CHANGED);
+            return types;
+        }
+    };
     
     // Foreground task queue infrastructure
     private final Deque<ForegroundTask> foregroundTaskQueue = new ArrayDeque<>();
@@ -110,6 +138,9 @@ public class ZenyardService {
         
         // Initialize analysis progress monitor
         this.analysisProgressMonitor = new AnalysisProgressMonitor(statusBarManager, eventDispatcher);
+        // Keep a service-level connectivity flag for UI consumers (e.g. Copilot send button).
+        // This is updated by PollServerStatusTask / DownloadInferencesTask via SERVER_CONNECTIVITY_CHANGED.
+        eventDispatcher.subscribe(serverConnectivityConsumer);
         
         // Initialize Copilot (controller exists even if API is not configured)
         this.copilotController = null;
@@ -127,7 +158,7 @@ public class ZenyardService {
         copilotProvider.setController(copilotController);
         Msg.info(this, "Copilot controller initialized in services constructor");
         if (apiClient != null && binariesApi != null && userApi != null) {
-            fetchUserConfigAsync();
+            fetchUserConfigAsync(false);
         }
         plugin.getTool().addComponentProvider(copilotProvider, false);
         plugin.getTool().getWindowManager().showComponentHeader(copilotProvider, false);
@@ -146,7 +177,7 @@ public class ZenyardService {
             apiClient = ZenyardApiClientFactory.createApiClient(options);
             binariesApi = new BinariesApi(apiClient);
             userApi = new UserApi(apiClient);
-            fetchUserConfigAsync();
+            fetchUserConfigAsync(false);
         }
         
         // Initialize Illuminator
@@ -171,11 +202,23 @@ public class ZenyardService {
         }
     }
 
-    private void fetchUserConfigAsync() {
-        if (userApi == null || copilotController == null || userConfigFetchStarted) {
+    private void fetchUserConfigAsync(boolean force) {
+        if (userApi == null || copilotController == null) {
             return;
         }
-        userConfigFetchStarted = true;
+        if (!force && userConfigFetched) {
+            return;
+        }
+        if (userConfigFetchInFlight) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (!force && lastUserConfigFetchAttemptMs > 0
+                && now - lastUserConfigFetchAttemptMs < USER_CONFIG_RETRY_MIN_INTERVAL_MS) {
+            return;
+        }
+        lastUserConfigFetchAttemptMs = now;
+        userConfigFetchInFlight = true;
         CompletableFuture.supplyAsync(() -> {
             try {
                 return userApi.getUserConfig();
@@ -183,14 +226,20 @@ public class ZenyardService {
                 throw new RuntimeException(e);
             }
         }).thenAccept(userConfig -> {
-            if (userConfig == null) {
-                return;
-            }
-            CopilotConfig config = CopilotConfigMapper.fromUserConfig(userConfig);
-            if (config != null && copilotController != null) {
-                copilotController.setCopilotConfig(sanitizeCopilotConfig(config));
+            try {
+                if (userConfig == null) {
+                    return;
+                }
+                userConfigFetched = true;
+                CopilotConfig config = CopilotConfigMapper.fromUserConfig(userConfig);
+                if (config != null && copilotController != null) {
+                    copilotController.setCopilotConfig(sanitizeCopilotConfig(config));
+                }
+            } finally {
+                userConfigFetchInFlight = false;
             }
         }).exceptionally(error -> {
+            userConfigFetchInFlight = false;
             Msg.warn(this, "Failed to fetch user config: " + error.getMessage());
             return null;
         });
@@ -298,6 +347,26 @@ public class ZenyardService {
 
     public void setUsageState(UsageState usageState) {
         this.usageState = usageState != null ? usageState : UsageState.unknown();
+        if (copilotProvider != null) {
+            SwingUtilities.invokeLater(() -> copilotProvider.refreshState());
+        }
+    }
+
+    public boolean isServerConnected() {
+        return serverConnected;
+    }
+
+    private void setServerConnected(boolean connected) {
+        boolean changed = this.serverConnected != connected;
+        this.serverConnected = connected;
+        if (changed && copilotProvider != null) {
+            SwingUtilities.invokeLater(() -> copilotProvider.refreshState());
+        }
+        if (changed && connected) {
+            // If Copilot started while the server was unreachable, the initial user-config fetch may
+            // have failed and been skipped thereafter. Retry on reconnection (throttled).
+            fetchUserConfigAsync(false);
+        }
     }
     
     public TrackChangesTaskManager getTrackChangesTaskManager() {
@@ -485,6 +554,15 @@ public class ZenyardService {
             while (isForegroundTaskQueueEmpty()) {
                 queueNotification.wait();
             }
+        }
+    }
+
+    /**
+     * Wake foreground queue waiters (used when shutting down waiting tasks).
+     */
+    public void notifyForegroundTaskWaiters() {
+        synchronized (queueNotification) {
+            queueNotification.notifyAll();
         }
     }
     

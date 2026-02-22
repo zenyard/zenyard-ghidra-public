@@ -35,6 +35,12 @@ public class ShowInitialQuestionsTask extends EventAwareTask {
     private final Object waitLock = new Object();
     private volatile boolean readyForQuestions = false;
     private volatile boolean shouldStop = false;
+
+    private enum QuestionGateState {
+        CONTINUE_WAITING,
+        READY,
+        SKIP_DIALOG
+    }
     
     public ShowInitialQuestionsTask(PluginTool tool, Program program, ZenyardService services) {
         super("Show Initial Questions", true, false, false,
@@ -70,9 +76,29 @@ public class ShowInitialQuestionsTask extends EventAwareTask {
     @Override
     protected void doRun(TaskMonitor monitor) {
         try {
+            ZenyardProgramProperties props = new ZenyardProgramProperties(program);
+
+            // Pre-check persisted state so we don't miss READY_FOR_QUESTIONS due to startup ordering.
+            QuestionGateState gateState = evaluateQuestionGateState(props);
+            if (gateState == QuestionGateState.SKIP_DIALOG) {
+                return;
+            }
+            if (gateState == QuestionGateState.READY) {
+                readyForQuestions = true;
+            }
+
             // Wait for READY_FOR_QUESTIONS event
             synchronized (waitLock) {
                 while (!readyForQuestions && !monitor.isCancelled() && !shouldStop) {
+                    // Re-check properties to recover if READY_FOR_QUESTIONS was published before subscription.
+                    gateState = evaluateQuestionGateState(props);
+                    if (gateState == QuestionGateState.SKIP_DIALOG) {
+                        return;
+                    }
+                    if (gateState == QuestionGateState.READY) {
+                        readyForQuestions = true;
+                        break;
+                    }
                     try {
                         waitLock.wait(1000); // Wait up to 1 second, then check again
                     } catch (InterruptedException e) {
@@ -87,7 +113,6 @@ public class ShowInitialQuestionsTask extends EventAwareTask {
             }
             
             // Check if already asked
-            ZenyardProgramProperties props = new ZenyardProgramProperties(program);
             String alreadyAsked = props.getString("asked_initial_questions");
             if ("true".equals(alreadyAsked)) {
                 return; // Already asked
@@ -149,6 +174,25 @@ public class ShowInitialQuestionsTask extends EventAwareTask {
             Msg.showError(this, tool.getActiveWindow(), "Show Initial Questions Error",
                 "Failed to show initial questions: " + e.getMessage(), e);
         }
+    }
+
+    private QuestionGateState evaluateQuestionGateState(ZenyardProgramProperties props) {
+        String alreadyAsked = props.getString("asked_initial_questions");
+        String alreadyUploaded = props.getString("initial_upload_complete");
+        if ("true".equals(alreadyAsked) || "true".equals(alreadyUploaded)) {
+            return QuestionGateState.SKIP_DIALOG;
+        }
+
+        String deferred = props.getString("initial_questions_deferred");
+        if ("true".equals(deferred) && !"true".equals(alreadyUploaded)) {
+            return QuestionGateState.SKIP_DIALOG;
+        }
+
+        if ("true".equals(props.getString("initial_analysis_complete"))) {
+            return QuestionGateState.READY;
+        }
+
+        return QuestionGateState.CONTINUE_WAITING;
     }
 }
 

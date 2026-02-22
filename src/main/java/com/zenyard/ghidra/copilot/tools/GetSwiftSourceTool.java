@@ -1,5 +1,6 @@
 package com.zenyard.ghidra.copilot.tools;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
@@ -21,9 +22,9 @@ public class GetSwiftSourceTool {
         this.program = context.getProgram();
     }
     
-    @Tool("Returns the decompiled Swift source code of the given function address. " 
-          + "Throws an error if no Swift source is available for the function.")
-    public String getSwiftSource(String address) {
+    @Tool("Return inferred/decompiled Swift source for a function when available.")
+    public String getSwiftSource(
+            @P("Function address (hex like `0x401000`). Use an address, not a function name.") String address) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("address", address);
         return ToolUtils.executeTool(context, "get_swift_source", args, () -> {

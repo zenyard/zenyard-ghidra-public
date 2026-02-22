@@ -26,6 +26,8 @@ public class StartForegroundTasksTask extends EventAwareTask {
     private final PluginTool tool;
     private final Program program;
     private final ZenyardService services;
+    private final Object waitLock = new Object();
+    private volatile boolean analysisComplete = false;
     private volatile boolean shouldStop = false;
     
     public StartForegroundTasksTask(PluginTool tool, Program program, ZenyardService services) {
@@ -39,18 +41,24 @@ public class StartForegroundTasksTask extends EventAwareTask {
     @Override
     public Set<ZenyardEvent.EventType> getSubscribedEventTypes() {
         Set<ZenyardEvent.EventType> types = new HashSet<>();
+        types.add(ZenyardEvent.EventType.ANALYSIS_COMPLETE);
         types.add(ZenyardEvent.EventType.PROGRAM_DEACTIVATED);
         return types;
     }
     
     @Override
     public void handleEvent(ZenyardEvent event) {
-        if (event.getType() == ZenyardEvent.EventType.PROGRAM_DEACTIVATED) {
-            shouldStop = true;
-            // Notify waiting thread if any
-            synchronized (services) {
-                services.notifyAll();
+        if (event.getType() == ZenyardEvent.EventType.ANALYSIS_COMPLETE) {
+            synchronized (waitLock) {
+                analysisComplete = true;
+                waitLock.notifyAll();
             }
+        } else if (event.getType() == ZenyardEvent.EventType.PROGRAM_DEACTIVATED) {
+            synchronized (waitLock) {
+                shouldStop = true;
+                waitLock.notifyAll();
+            }
+            services.notifyForegroundTaskWaiters();
         }
     }
     
@@ -104,8 +112,7 @@ public class StartForegroundTasksTask extends EventAwareTask {
     }
     
     /**
-     * Wait for initial analysis to complete using event notification (no polling).
-     * Blocks on services lock until notified by the event handler in ZenyardGhidraPlugin.
+     * Wait for initial analysis to complete.
      */
     private void waitForAnalysisComplete(ZenyardProgramProperties props, TaskMonitor monitor) {
         // Check if already complete
@@ -114,19 +121,15 @@ public class StartForegroundTasksTask extends EventAwareTask {
             return;
         }
         
-        // Wait for analysis completion using event notification (no polling loop)
-        // The event handler in ZenyardGhidraPlugin will call services.notifyAll() when analysis completes
-        while (!monitor.isCancelled() && !shouldStop) {
-            // Check property when notified (event-driven, not polling)
-            alreadyCompleted = props.getString("initial_analysis_complete");
-            if ("true".equals(alreadyCompleted)) {
-                return;
-            }
-            
-            // Wait for state change notification (blocks until notified)
-            synchronized (services) {
+        synchronized (waitLock) {
+            while (!analysisComplete && !monitor.isCancelled() && !shouldStop) {
+                alreadyCompleted = props.getString("initial_analysis_complete");
+                if ("true".equals(alreadyCompleted)) {
+                    analysisComplete = true;
+                    return;
+                }
                 try {
-                    services.wait(); // Wait indefinitely until notified
+                    waitLock.wait(1000);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     return;

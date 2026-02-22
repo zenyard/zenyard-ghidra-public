@@ -48,6 +48,7 @@ public class StatusBarComponent extends JPanel {
     private final JLabel warningIconLabel;
     private final JLabel usageLabel;
     private final Font usageBaseFont;
+    private boolean statusLabelClickable;
 
     public StatusBarComponent(PluginTool tool,
             StatusBarViewModel viewModel,
@@ -122,6 +123,14 @@ public class StatusBarComponent extends JPanel {
 
         unifiedStatusLabel = new GDLabel("");
         unifiedStatusLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
+        unifiedStatusLabel.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                if (statusLabelClickable && actions != null) {
+                    actions.onRerun();
+                }
+            }
+        });
         unifiedStatusPanel.add(unifiedStatusLabel);
         unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
 
@@ -138,9 +147,6 @@ public class StatusBarComponent extends JPanel {
         unifiedProgressLabel.setVisible(false);
         unifiedStatusPanel.add(unifiedProgressLabel);
 
-        unifiedStatusPanel.add(Box.createHorizontalGlue());
-        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
-
         usageLabel = new GDLabel("");
         usageLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
         usageLabel.setVisible(false);
@@ -153,6 +159,8 @@ public class StatusBarComponent extends JPanel {
                 }
             }
         });
+        unifiedStatusPanel.add(Box.createHorizontalGlue());
+        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
         unifiedStatusPanel.add(usageLabel);
         usageBaseFont = usageLabel.getFont();
 
@@ -194,7 +202,18 @@ public class StatusBarComponent extends JPanel {
 
             initialUploadButton.setVisible(state.isShowInitialUpload());
             rerunButton.setVisible(state.isShowRerun());
+            statusLabelClickable = state.isShowRerun();
+            unifiedStatusLabel.setCursor(statusLabelClickable
+                ? Cursor.getPredefinedCursor(Cursor.HAND_CURSOR) : Cursor.getDefaultCursor());
             warningIconLabel.setVisible(state.isShowWarningIcon());
+            if (state.isShowWarningIcon()) {
+                String statusText = state.getStatus() != null ? state.getStatus() : "";
+                if (statusText.startsWith("Binary exceeds")) {
+                    warningIconLabel.setToolTipText("Binary exceeds plan size limit");
+                } else {
+                    warningIconLabel.setToolTipText("Can't reach server");
+                }
+            }
             reviewTermsButton.setVisible(state.isShowReviewTerms());
             updateUsageDisplay(state);
             unifiedStatusPanel.revalidate();

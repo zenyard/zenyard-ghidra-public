@@ -9,6 +9,7 @@ import java.util.concurrent.CompletableFuture;
 
 import com.zenyard.ghidra.api.generated.ApiException;
 import com.zenyard.ghidra.api.generated.api.BinariesApi;
+import com.zenyard.ghidra.api.generated.api.UserApi;
 import com.zenyard.ghidra.api.generated.model.BinaryDetails;
 import com.zenyard.ghidra.api.generated.model.OriginalLanguages;
 import com.zenyard.ghidra.api.generated.model.PostBinaryBody;
@@ -16,9 +17,11 @@ import com.zenyard.ghidra.api.generated.model.PostBinaryResponse;
 import com.zenyard.ghidra.config.ZenyardOptions;
 import com.zenyard.ghidra.events.ZenyardEvent;
 import com.zenyard.ghidra.tasks.StatusBarAwareTask;
+import com.zenyard.ghidra.ui.BinarySizeLimitDialog;
 import com.zenyard.ghidra.storage.ZenyardProgramProperties;
 import com.zenyard.ghidra.status.StatusBarManager;
 import com.zenyard.ghidra.status.StatusBarPriorities;
+import com.zenyard.ghidra.util.BinarySizeLimitGate;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
@@ -169,6 +172,10 @@ public class RegisterBinaryTask extends StatusBarAwareTask {
                 return;
             }
 
+            if (isBinarySizeBlocked()) {
+                return;
+            }
+
             runWithStatusBar(() -> {
                 StatusBarManager statusBarManager = getStatusBarManager();
 
@@ -294,6 +301,26 @@ public class RegisterBinaryTask extends StatusBarAwareTask {
             return true;
         }
         return false;
+    }
+
+    private boolean isBinarySizeBlocked() {
+        ZenyardService services = ZenyardService.getInstance();
+        UserApi userApi = services != null ? services.getUserApi() : null;
+        BinarySizeLimitGate.CheckResult result = BinarySizeLimitGate.check(program, userApi);
+        BinarySizeLimitGate.persistResult(program, result);
+        if (result.isPassed()) {
+            return false;
+        }
+
+        StatusBarManager statusBarManager = getStatusBarManager();
+        if (statusBarManager != null) {
+            statusBarManager.refreshDisplayNow();
+        }
+        if (result.isBlocked() && result.getMaxBinarySizeMb() != null) {
+            BinarySizeLimitDialog.showDialogIfNeeded(tool, program, result.getMaxBinarySizeMb());
+        }
+        Msg.warn(this, "Binary size gate did not pass: " + result.getMessage());
+        return true;
     }
     
     /**

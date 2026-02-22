@@ -1,5 +1,6 @@
 package com.zenyard.ghidra.copilot.tools;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.program.model.listing.Function;
 
@@ -14,8 +15,9 @@ public class GetFunctionCommentTool {
         this.context = context;
     }
     
-    @Tool("Returns the function documentation for the given function")
-    public String getFunctionComment(String address) {
+    @Tool("Get documentation/comment text stored on a function.")
+    public String getFunctionComment(
+            @P("Function address (hex like `0x401000`).") String address) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("address", address);
         return ToolUtils.executeTool(context, "get_function_comment", args, () -> {

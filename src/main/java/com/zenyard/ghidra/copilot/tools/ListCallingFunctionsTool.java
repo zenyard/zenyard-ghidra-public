@@ -3,6 +3,7 @@ package com.zenyard.ghidra.copilot.tools;
 import java.util.ArrayList;
 import java.util.List;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.FunctionManager;
@@ -11,7 +12,7 @@ import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceManager;
 
 import com.zenyard.ghidra.copilot.tools.models.Function;
-import com.zenyard.ghidra.copilot.tools.models.PagedResults;
+import com.zenyard.ghidra.copilot.tools.models.ToolOutput;
 
 /**
  * Tool to list functions that call a given function.
@@ -24,14 +25,11 @@ public class ListCallingFunctionsTool {
         this.context = context;
     }
     
-    @Tool("Returns a list of functions that call the given function. " 
-          + "If next_cursor is not empty, there are more pages which can be fetched using the cursor parameter.")
-    public PagedResults<Function> listCallingFunctions(String address, String cursor) {
+    @Tool("List caller functions that reference a target function via call edges.")
+    public ToolOutput listCallingFunctions(
+            @P("Target function address (hex like `0x401000`).") String address) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("address", address);
-        if (cursor != null) {
-            args.put("cursor", cursor);
-        }
         return ToolUtils.executeTool(context, "list_calling_functions", args, () -> {
             try {
                 context.checkCancelled();
@@ -59,9 +57,6 @@ public class ListCallingFunctionsTool {
                 // Collect calling functions
                 FunctionManager functionManager = program.getFunctionManager();
                 List<ghidra.program.model.listing.Function> callingFunctions = new ArrayList<>();
-                Address cursorAddress = cursor != null ? ToolUtils.parseAddress(program, cursor) : null;
-                boolean pastCursor = (cursorAddress == null);
-
                 for (Reference ref : refs) {
                     // Only consider call references
                     // In Ghidra 12.0, use getReferenceType() and check if it's a call
@@ -75,15 +70,6 @@ public class ListCallingFunctionsTool {
                     ghidra.program.model.listing.Function callingFunction = functionManager.getFunctionContaining(fromAddress);
 
                     if (callingFunction != null) {
-                        // Check cursor
-                        if (!pastCursor) {
-                            if (callingFunction.getEntryPoint().compareTo(cursorAddress) > 0) {
-                                pastCursor = true;
-                            } else {
-                                continue;
-                            }
-                        }
-
                         // Check if already added (avoid duplicates)
                         if (!callingFunctions.contains(callingFunction)) {
                             callingFunctions.add(callingFunction);
@@ -94,21 +80,9 @@ public class ListCallingFunctionsTool {
                 // Sort by address
                 callingFunctions.sort((f1, f2) -> f1.getEntryPoint().compareTo(f2.getEntryPoint()));
 
-                // Paginate
-                int pageSize = 200;
-                List<ghidra.program.model.listing.Function> pageFunctions;
-                String nextCursor = null;
-
-                if (callingFunctions.size() > pageSize) {
-                    pageFunctions = callingFunctions.subList(0, pageSize);
-                    nextCursor = ToolUtils.formatAddress(pageFunctions.get(pageSize - 1).getEntryPoint());
-                } else {
-                    pageFunctions = callingFunctions;
-                }
-
                 // Map to tool Function objects
                 List<Function> results = new ArrayList<>();
-                for (ghidra.program.model.listing.Function func : pageFunctions) {
+                for (ghidra.program.model.listing.Function func : callingFunctions) {
                     boolean swiftSourceAvailable = false; // TODO: Implement Swift detection
                     results.add(new Function(
                         func.getName(),
@@ -116,8 +90,14 @@ public class ListCallingFunctionsTool {
                         swiftSourceAvailable
                     ));
                 }
-
-                return new PagedResults<>(results, nextCursor);
+                StringBuilder output = new StringBuilder();
+                for (Function func : results) {
+                    output.append(func.getName())
+                        .append(" ")
+                        .append(func.getAddress())
+                        .append("\n");
+                }
+                return ToolUtils.persistLargeOutput(context, "calling-functions", output.toString(), results.size());
             } catch (ToolExecutionException e) {
                 throw e;
             } catch (Exception e) {

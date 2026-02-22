@@ -24,20 +24,47 @@ public class ZenyardProgramProperties {
      * In Ghidra, property maps must be created within a transaction.
      */
     public void setString(String key, String value) {
-        // Use transaction to ensure property map is created and value is set
-        // Note: If we're already in a transaction, startTransaction will return the existing transaction ID
-        int transactionId = program.startTransaction("Set Zenyard property: " + key);
-        boolean committed = false;
-        
+        if (program == null || program.isClosed()) {
+            return;
+        }
+
+        int transactionId;
+        try {
+            transactionId = program.startTransaction("Set Zenyard property: " + key);
+        } catch (RuntimeException e) {
+            // Happens during program shutdown (terminated transaction manager / DB closed).
+            // Do not escalate; property writes are best-effort.
+            Msg.debug(this, "Skipping property write during shutdown: " + key + " (" + e.getMessage() + ")");
+            return;
+        }
+
+        boolean success = false;
+        RuntimeException primary = null;
         try {
             options.setString(key, value);
-            program.endTransaction(transactionId, true);
-            committed = true;
-        } catch (Exception e) {
-            if (!committed) {
-                program.endTransaction(transactionId, false);
+            success = true;
+        } catch (RuntimeException e) {
+            primary = e;
+        } finally {
+            try {
+                program.endTransaction(transactionId, success);
+            } catch (RuntimeException endEx) {
+                if (primary != null) {
+                    primary.addSuppressed(endEx);
+                } else {
+                    // Shutdown path; ignore.
+                    Msg.debug(this, "endTransaction failed for property write " + key + ": " + endEx.getMessage());
+                }
             }
-            Msg.error(this, "Failed to set string property: " + e.getMessage(), e);
+        }
+
+        if (primary != null) {
+            String msg = String.valueOf(primary.getMessage());
+            if (msg.contains("Database is closed") || msg.contains("Transaction has been terminated")) {
+                Msg.debug(this, "Skipping property write during shutdown: " + key + " (" + msg + ")");
+                return;
+            }
+            Msg.error(this, "Failed to set string property: " + primary.getMessage(), primary);
         }
     }
     
@@ -53,19 +80,44 @@ public class ZenyardProgramProperties {
      * In Ghidra, property maps must be created within a transaction.
      */
     public void setInt(String key, int value) {
-        // Use transaction to ensure property map is created and value is set
-        int transactionId = program.startTransaction("Set Zenyard property: " + key);
-        boolean committed = false;
-        
+        if (program == null || program.isClosed()) {
+            return;
+        }
+
+        int transactionId;
+        try {
+            transactionId = program.startTransaction("Set Zenyard property: " + key);
+        } catch (RuntimeException e) {
+            Msg.debug(this, "Skipping property write during shutdown: " + key + " (" + e.getMessage() + ")");
+            return;
+        }
+
+        boolean success = false;
+        RuntimeException primary = null;
         try {
             options.setString(key, String.valueOf(value));
-            program.endTransaction(transactionId, true);
-            committed = true;
-        } catch (Exception e) {
-            if (!committed) {
-                program.endTransaction(transactionId, false);
+            success = true;
+        } catch (RuntimeException e) {
+            primary = e;
+        } finally {
+            try {
+                program.endTransaction(transactionId, success);
+            } catch (RuntimeException endEx) {
+                if (primary != null) {
+                    primary.addSuppressed(endEx);
+                } else {
+                    Msg.debug(this, "endTransaction failed for property write " + key + ": " + endEx.getMessage());
+                }
             }
-            Msg.error(this, "Failed to set integer property: " + e.getMessage(), e);
+        }
+
+        if (primary != null) {
+            String msg = String.valueOf(primary.getMessage());
+            if (msg.contains("Database is closed") || msg.contains("Transaction has been terminated")) {
+                Msg.debug(this, "Skipping property write during shutdown: " + key + " (" + msg + ")");
+                return;
+            }
+            Msg.error(this, "Failed to set integer property: " + primary.getMessage(), primary);
         }
     }
     

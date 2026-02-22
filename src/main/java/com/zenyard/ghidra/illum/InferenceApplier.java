@@ -1,15 +1,26 @@
 package com.zenyard.ghidra.illum;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.function.UnaryOperator;
+import java.util.function.BooleanSupplier;
+import com.zenyard.ghidra.api.generated.model.FieldDefinition;
 import com.zenyard.ghidra.api.generated.model.FunctionOverview;
 import com.zenyard.ghidra.api.generated.model.Inference;
 import com.zenyard.ghidra.api.generated.model.Name;
+import com.zenyard.ghidra.api.generated.model.NotSwift;
+import com.zenyard.ghidra.api.generated.model.ParameterType;
 import com.zenyard.ghidra.api.generated.model.ParametersMapping;
+import com.zenyard.ghidra.api.generated.model.ReturnType;
+import com.zenyard.ghidra.api.generated.model.StructDefinition;
 import com.zenyard.ghidra.api.generated.model.SwiftFunction;
 import com.zenyard.ghidra.api.generated.model.VariablesMapping;
 import com.zenyard.ghidra.storage.InferenceStorage;
@@ -40,6 +51,8 @@ import ghidra.util.exception.DuplicateNameException;
 import ghidra.util.exception.InvalidInputException;
 import ghidra.program.model.symbol.Symbol;
 import ghidra.program.model.symbol.SymbolTable;
+import ghidra.program.model.symbol.SymbolType;
+import ghidra.program.model.symbol.SymbolUtilities;
 import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
 
@@ -55,18 +68,28 @@ public class InferenceApplier {
     private final FunctionOverviewAnnotator overviewAnnotator;
     private final InferenceStorage inferenceStorage;
     private final VariableRenamer variableRenamer;
-    private final ParameterRenamer parameterRenamer;
+    private final StructInferenceApplier structInferenceApplier;
+    private final FunctionTypeInferenceApplier functionTypeInferenceApplier;
     private final PluginTool tool;
-    
+    private static final int MAX_DEFERRED_RETRY_ATTEMPTS = 3;
+    private static final Pattern FUN_TOKEN_PATTERN = Pattern.compile("\\bFUN_([0-9a-fA-F]+)\\b");
+    // Batch-scoped: addresses where return_type or parameter_type was successfully applied.
+    // Cleared at the start of each applyInferences call.
+    private final Set<Address> typeChangedAddresses = new HashSet<>();
+    // Per-applier (session) guard: the return-type catch-up scan is expensive and
+    // should not run once per mini-batch.
+    private boolean hasRunReturnTypeLocalPropagationCatchUp = false;
+
     public InferenceApplier(FunctionOverviewAnnotator overviewAnnotator, InferenceStorage inferenceStorage) {
         this(overviewAnnotator, inferenceStorage, null);
     }
-    
+
     public InferenceApplier(FunctionOverviewAnnotator overviewAnnotator, InferenceStorage inferenceStorage, PluginTool tool) {
         this.overviewAnnotator = overviewAnnotator;
         this.inferenceStorage = inferenceStorage;
         this.variableRenamer = new VariableRenamer(inferenceStorage);
-        this.parameterRenamer = new ParameterRenamer();
+        this.structInferenceApplier = new StructInferenceApplier(inferenceStorage);
+        this.functionTypeInferenceApplier = new FunctionTypeInferenceApplier(inferenceStorage, structInferenceApplier);
         this.tool = tool;
     }
     
@@ -78,57 +101,253 @@ public class InferenceApplier {
      * @param inferences List of inferences to apply
      */
     public void applyInferences(Program program, List<Inference> inferences) {
+        applyInferences(program, inferences, TaskMonitor.DUMMY, () -> false);
+    }
+
+    /**
+     * Apply inferences with cancellation support.
+     */
+    public void applyInferences(Program program, List<Inference> inferences, TaskMonitor monitor) {
+        applyInferences(program, inferences, monitor, () -> false);
+    }
+
+    /**
+     * Apply inferences with cancellation + external stop flag support.
+     * <p>
+     * The stop flag is primarily used to abort work during PROGRAM_DEACTIVATED (close) events,
+     * where the task thread may still be mid-batch.
+     */
+    public void applyInferences(
+        Program program,
+        List<Inference> inferences,
+        TaskMonitor monitor,
+        BooleanSupplier shouldStop
+    ) {
         if (inferences == null || inferences.isEmpty()) {
             return;
         }
+        if (program == null || program.isClosed()) {
+            return;
+        }
+
+        typeChangedAddresses.clear();
+
+        applyStructDefinitions(program, inferences);
         
         // Group inferences by address
         Map<Address, List<Inference>> byAddress = new HashMap<>();
+        List<Inference> globalInferences = new ArrayList<>();
         for (Inference inference : inferences) {
+            if ("struct_definition".equals(getInferenceType(inference))) {
+                continue;
+            }
             // Get address from the actual instance
             String addressStr = getAddressFromInference(inference);
+            if (addressStr == null) {
+                globalInferences.add(inference);
+                continue;
+            }
             Address addr = parseAddress(addressStr, program);
             if (addr != null) {
                 byAddress.computeIfAbsent(addr, k -> new ArrayList<>()).add(inference);
             }
         }
-        
-        // Apply inferences for each address
-        for (Map.Entry<Address, List<Inference>> entry : byAddress.entrySet()) {
-            applyInferencesForAddress(program, entry.getKey(), entry.getValue());
+
+        if (!globalInferences.isEmpty()) {
+            globalInferences.sort(Comparator.comparingInt(this::getInferencePriority));
+            applyGlobalInferences(program, globalInferences, monitor, shouldStop);
         }
+        
+        // Apply inferences for each address (populates typeChangedAddresses)
+        for (Map.Entry<Address, List<Inference>> entry : byAddress.entrySet()) {
+            if (shouldStop != null && shouldStop.getAsBoolean()) {
+                return;
+            }
+            if (monitor != null && monitor.isCancelled()) {
+                return;
+            }
+            List<Inference> sorted = new ArrayList<>(entry.getValue());
+            sorted.sort(Comparator.comparingInt(this::getInferencePriority));
+            applyInferencesForAddress(program, entry.getKey(), sorted, monitor, shouldStop);
+        }
+
+        if (shouldStop != null && shouldStop.getAsBoolean()) {
+            return;
+        }
+        if (monitor != null && monitor.isCancelled()) {
+            return;
+        }
+        retryDeferredTypeInferences(program, monitor);
+
+        // Catch-up: propagate return types to returned local variables for functions
+        // whose return_type was applied in a previous session but local propagation
+        // was not completed (e.g. the method didn't exist yet or failed).
+        //
+        // This scan can be expensive. Run it once per applier instance (session) and
+        // avoid holding a long-lived transaction open while decompiling.
+        if (!hasRunReturnTypeLocalPropagationCatchUp) {
+            hasRunReturnTypeLocalPropagationCatchUp = true;
+            long started = System.currentTimeMillis();
+            Set<Address> propagated = functionTypeInferenceApplier.ensureReturnTypeLocalPropagation(
+                program,
+                monitor,
+                shouldStop != null ? shouldStop : () -> false
+            );
+            typeChangedAddresses.addAll(propagated);
+            long elapsedMs = System.currentTimeMillis() - started;
+            if (!propagated.isEmpty()) {
+                Msg.info(this, "Return type local propagation catch-up finished: propagated "
+                    + propagated.size() + " functions in " + elapsedMs + "ms");
+            }
+        }
+
+        if (shouldStop != null && shouldStop.getAsBoolean()) {
+            return;
+        }
+        if (monitor != null && monitor.isCancelled()) {
+            return;
+        }
+        if (program == null || program.isClosed()) {
+            return;
+        }
+
+        // Post-batch verification: re-decompile functions that had variable renames
+        // applied IN THIS BATCH and re-apply any renames that didn't survive.
+        TransactionUtils.runInTransaction(program, "Zenyard: Post-batch rename verification", () -> {
+            variableRenamer.runPendingVerifications(program);
+        });
+
+        // Type-change rename refresh: for functions whose return_type, parameter_type,
+        // or local type was changed in this batch, refresh their own stored renames
+        // (the function's re-decompilation can revert register-based local renames)
+        // AND refresh their callers' stored renames (callee signature changes alter
+        // the caller's decompilation layout).
+        if (!typeChangedAddresses.isEmpty()) {
+            if (shouldStop != null && shouldStop.getAsBoolean()) {
+                return;
+            }
+            if (monitor != null && monitor.isCancelled()) {
+                return;
+            }
+            if (program == null || program.isClosed()) {
+                return;
+            }
+            TransactionUtils.runInTransaction(program, "Zenyard: Type-change rename refresh", () -> {
+                variableRenamer.refreshCallerRenames(program, typeChangedAddresses, monitor, shouldStop);
+            });
+        }
+
+        refreshFunctionOverviewInferences(program, inferences);
+    }
+
+    private void applyGlobalInferences(
+        Program program,
+        List<Inference> inferences,
+        TaskMonitor monitor,
+        BooleanSupplier shouldStop
+    ) {
+        TransactionUtils.runInTransaction(program, "Zenyard: Apply global inferences", () -> {
+            for (Inference inference : inferences) {
+                if (shouldStop != null && shouldStop.getAsBoolean()) {
+                    return;
+                }
+                if (monitor != null && monitor.isCancelled()) {
+                    return;
+                }
+                try {
+                    applyInference(program, null, inference, monitor);
+                    Map<String, Object> inferenceData = serializeInferenceData(inference);
+                    String inferenceType = getInferenceType(inference);
+                    String inferenceId = getGlobalInferenceId(inference, inferenceType);
+                    inferenceStorage.storeInference(
+                        inferenceId,
+                        new InferenceStorage.InferenceData(
+                            inferenceId,
+                            inferenceType,
+                            inferenceData
+                        )
+                    );
+                } catch (Exception e) {
+                    Msg.warn(this, "Error applying global inference " + getInferenceType(inference) + ": " + e.getMessage(), e);
+                }
+            }
+        });
     }
     
     /**
      * Apply inferences for a specific address.
      */
-    private void applyInferencesForAddress(Program program, Address address, List<Inference> inferences) {
+    private void applyInferencesForAddress(
+        Program program,
+        Address address,
+        List<Inference> inferences,
+        TaskMonitor monitor,
+        BooleanSupplier shouldStop
+    ) {
+        List<Inference> localsFirst = new ArrayList<>();
+        List<Inference> prototypeLast = new ArrayList<>();
+        for (Inference inference : inferences) {
+            if (isFunctionPrototypeInference(inference)) {
+                prototypeLast.add(inference);
+            } else {
+                localsFirst.add(inference);
+            }
+        }
+        // Deterministic order inside each phase.
+        localsFirst.sort(Comparator.comparingInt(this::getInferencePriority));
+        prototypeLast.sort(Comparator.comparingInt(this::getInferencePriority));
+
         TransactionUtils.runInTransaction(program, "Zenyard: Apply inferences", () -> {
-            for (Inference inference : inferences) {
+            for (Inference inference : localsFirst) {
+                if (shouldStop != null && shouldStop.getAsBoolean()) {
+                    return;
+                }
+                if (monitor != null && monitor.isCancelled()) {
+                    return;
+                }
                 try {
-                    applyInference(program, address, inference);
-                    
-                    // Store inference data
-                    Map<String, Object> inferenceData = serializeInferenceData(inference);
-                    String inferenceType = getInferenceType(inference);
-                    String addressStr = getAddressFromInference(inference);
-                    if (addressStr == null) {
-                        addressStr = address.toString();
-                    }
-                    inferenceStorage.storeInference(
-                        addressStr + "." + inferenceType,
-                        new InferenceStorage.InferenceData(
-                            addressStr,
-                            inferenceType,
-                            inferenceData
-                        )
-                    );
+                    applyAndStoreInference(program, address, inference, monitor);
+                } catch (Exception e) {
+                    Msg.warn(this, "Error applying inference at " + address + ": " + e.getMessage(), e);
+                    // Continue with other inferences
+                }
+            }
+            // Function prototype changes can trigger re-decompilation and rewrite local names,
+            // so apply them only after all local variable/parameter naming inferences.
+            for (Inference inference : prototypeLast) {
+                if (shouldStop != null && shouldStop.getAsBoolean()) {
+                    return;
+                }
+                if (monitor != null && monitor.isCancelled()) {
+                    return;
+                }
+                try {
+                    applyAndStoreInference(program, address, inference, monitor);
                 } catch (Exception e) {
                     Msg.warn(this, "Error applying inference at " + address + ": " + e.getMessage(), e);
                     // Continue with other inferences
                 }
             }
         });
+    }
+
+    private void applyAndStoreInference(Program program, Address address, Inference inference, TaskMonitor monitor) {
+        applyInference(program, address, inference, monitor);
+
+        Map<String, Object> inferenceData = serializeInferenceData(inference);
+        String inferenceType = getInferenceType(inference);
+        String addressStr = getAddressFromInference(inference);
+        if (addressStr == null) {
+            addressStr = address.toString();
+        }
+        inferenceStorage.storeInference(
+            addressStr + "." + inferenceType,
+            new InferenceStorage.InferenceData(
+                addressStr,
+                inferenceType,
+                inferenceData
+            )
+        );
     }
     
     /**
@@ -145,8 +364,16 @@ public class InferenceApplier {
             return "variables";
         } else if (actual instanceof ParametersMapping) {
             return "params";
+        } else if (actual instanceof ParameterType) {
+            return "parameter_type";
+        } else if (actual instanceof ReturnType) {
+            return "return_type";
         } else if (actual instanceof SwiftFunction) {
             return "swift_function";
+        } else if (actual instanceof StructDefinition) {
+            return "struct_definition";
+        } else if (actual instanceof NotSwift) {
+            return "not_swift";
         } else if (actual instanceof java.util.Map) {
             Object type = ((java.util.Map<?, ?>) actual).get("type");
             return type != null ? String.valueOf(type) : "unknown";
@@ -167,8 +394,14 @@ public class InferenceApplier {
             return ((VariablesMapping) actual).getAddress();
         } else if (actual instanceof ParametersMapping) {
             return ((ParametersMapping) actual).getAddress();
+        } else if (actual instanceof ParameterType) {
+            return ((ParameterType) actual).getAddress();
+        } else if (actual instanceof ReturnType) {
+            return ((ReturnType) actual).getAddress();
         } else if (actual instanceof SwiftFunction) {
             return ((SwiftFunction) actual).getAddress();
+        } else if (actual instanceof NotSwift) {
+            return ((NotSwift) actual).getAddress();
         } else if (actual instanceof java.util.Map) {
             Object address = ((java.util.Map<?, ?>) actual).get("address");
             if (address instanceof String) {
@@ -187,7 +420,7 @@ public class InferenceApplier {
     /**
      * Apply a single inference.
      */
-    private void applyInference(Program program, Address address, Inference inference) {
+    private void applyInference(Program program, Address address, Inference inference, TaskMonitor monitor) {
         Object actual = inference.getActualInstance();
         
         if (actual instanceof FunctionOverview) {
@@ -196,9 +429,21 @@ public class InferenceApplier {
             Msg.debug(this, "Applying name inference at " + address);
             applyName(program, address, (Name) actual);
         } else if (actual instanceof VariablesMapping) {
+            VariablesMapping mapping = (VariablesMapping) actual;
+            Msg.info(this, "Applying variables_mapping at " + address + " entries="
+                + (mapping.getVariablesMapping() != null ? mapping.getVariablesMapping().size() : 0)
+                + " keys=" + (mapping.getVariablesMapping() != null ? mapping.getVariablesMapping().keySet() : java.util.Collections.emptySet()));
             applyVariablesMapping(program, address, (VariablesMapping) actual);
         } else if (actual instanceof ParametersMapping) {
             applyParametersMapping(program, address, (ParametersMapping) actual);
+        } else if (actual instanceof StructDefinition) {
+            applyStructDefinition(program, (StructDefinition) actual);
+        } else if (actual instanceof ParameterType) {
+            applyParameterType(program, address, (ParameterType) actual);
+        } else if (actual instanceof ReturnType) {
+            applyReturnType(program, address, (ReturnType) actual, monitor);
+        } else if (actual instanceof NotSwift) {
+            Msg.debug(this, "Received not_swift inference at " + ((NotSwift) actual).getAddress());
         } else if (actual instanceof SwiftFunction) {
             // SwiftFunction is read-only, nothing to apply
             // Just store it for later retrieval
@@ -210,21 +455,229 @@ public class InferenceApplier {
     }
 
     private void applyMapInference(Program program, Address address, java.util.Map<?, ?> actual) {
+        String addressLabel = address != null ? address.toString() : "<global>";
         Object type = actual.get("type");
         if (type == null) {
-            Msg.warn(this, "Unknown inference map with no type at " + address);
+            Msg.warn(this, "Unknown inference map with no type at " + addressLabel);
             return;
         }
         String typeValue = String.valueOf(type);
         if ("name".equals(typeValue)) {
             Object nameValue = actual.get("name");
-            if (nameValue != null) {
+            if (nameValue != null && address != null) {
                 Msg.debug(this, "Applying map-based name inference at " + address);
                 applyNameString(program, address, String.valueOf(nameValue));
             }
             return;
         }
-        Msg.warn(this, "Unhandled inference map type '" + typeValue + "' at " + address);
+        if ("variables".equals(typeValue) || "variables_mapping".equals(typeValue)) {
+            // CANDIDATE_REMOVAL: compatibility fallback for map-shaped variables payloads.
+            // Current runtime logs show typed VariablesMapping flow and no observed hits for
+            // "Applying map-based variables_mapping". Keep for safety until server payload
+            // contract is confirmed stable, then consider removing this branch.
+            if (address == null) {
+                Msg.warn(this, "Skipping map-based variables mapping at " + addressLabel + ": missing address");
+                return;
+            }
+            Object mappingValue = actual.get("variables_mapping");
+            if (!(mappingValue instanceof java.util.Map<?, ?>)) {
+                Msg.warn(this, "Skipping map-based variables mapping at " + addressLabel
+                    + ": missing variables_mapping payload");
+                return;
+            }
+            VariablesMapping mapped = new VariablesMapping();
+            mapped.setAddress(address.toString());
+            Map<String, String> converted = new HashMap<>();
+            for (Map.Entry<?, ?> entry : ((java.util.Map<?, ?>) mappingValue).entrySet()) {
+                if (entry.getKey() == null || entry.getValue() == null) {
+                    continue;
+                }
+                converted.put(String.valueOf(entry.getKey()), String.valueOf(entry.getValue()));
+            }
+            mapped.setVariablesMapping(converted);
+            Msg.info(this, "Applying map-based variables_mapping at " + address + " entries=" + converted.size()
+                + " keys=" + converted.keySet());
+            applyVariablesMapping(program, address, mapped);
+            return;
+        }
+        Msg.warn(this, "Unhandled inference map type '" + typeValue + "' at " + addressLabel);
+    }
+
+    private void applyStructDefinition(Program program, StructDefinition structDefinition) {
+        structInferenceApplier.applyStructDefinition(program, structDefinition);
+    }
+
+    private void applyParameterType(Program program, Address address, ParameterType parameterType) {
+        if (address == null) {
+            return;
+        }
+        Function function = getFunctionAtAddress(program, address);
+        if (function == null) {
+            return;
+        }
+        FunctionTypeInferenceApplier.ApplyResult result =
+            functionTypeInferenceApplier.applyParameterType(program, address, parameterType, function, 0);
+        if (result == FunctionTypeInferenceApplier.ApplyResult.APPLIED) {
+            typeChangedAddresses.add(address);
+        }
+    }
+
+    private void applyReturnType(Program program, Address address, ReturnType returnType, TaskMonitor monitor) {
+        if (address == null) {
+            return;
+        }
+        Function function = getFunctionAtAddress(program, address);
+        if (function == null) {
+            return;
+        }
+        FunctionTypeInferenceApplier.ApplyResult result =
+            functionTypeInferenceApplier.applyReturnType(program, address, returnType, function, 0, monitor);
+        if (result == FunctionTypeInferenceApplier.ApplyResult.APPLIED) {
+            typeChangedAddresses.add(address);
+        }
+    }
+
+    public void retryDeferredTypeInferences(Program program) {
+        retryDeferredTypeInferences(program, TaskMonitor.DUMMY);
+    }
+
+    public void retryDeferredTypeInferences(Program program, TaskMonitor monitor) {
+        List<InferenceStorage.DeferredTypeInferenceRecord> deferredRecords =
+            new ArrayList<>(inferenceStorage.getDeferredTypeInferences());
+        if (deferredRecords.isEmpty()) {
+            return;
+        }
+
+        for (InferenceStorage.DeferredTypeInferenceRecord record : deferredRecords) {
+            if (record == null || record.getId() == null) {
+                continue;
+            }
+            inferenceStorage.removeDeferredTypeInference(record.getId());
+            int currentAttempts = Math.max(0, record.getAttempts());
+
+            if ("parameter_type".equals(record.getKind()) && record.getParameterType() != null) {
+                applyDeferredParameterType(program, record.getParameterType(), currentAttempts);
+                continue;
+            }
+            if ("return_type".equals(record.getKind()) && record.getReturnType() != null) {
+                applyDeferredReturnType(program, record.getReturnType(), currentAttempts, monitor);
+            }
+        }
+    }
+
+    private void applyDeferredParameterType(Program program, ParameterType inference, int currentAttempts) {
+        Address address = parseAddress(inference.getAddress(), program);
+        if (address == null) {
+            requeueDeferredParameterType(inference, currentAttempts + 1);
+            return;
+        }
+        Function function = getFunctionAtAddress(program, address);
+        if (function == null) {
+            requeueDeferredParameterType(inference, currentAttempts + 1);
+            return;
+        }
+
+        FunctionTypeInferenceApplier.ApplyResult result = functionTypeInferenceApplier.applyParameterType(
+            program,
+            address,
+            inference,
+            function,
+            currentAttempts
+        );
+        if (result == FunctionTypeInferenceApplier.ApplyResult.APPLIED) {
+            typeChangedAddresses.add(address);
+        }
+        if (result == FunctionTypeInferenceApplier.ApplyResult.DEFERRED
+            && currentAttempts + 1 >= MAX_DEFERRED_RETRY_ATTEMPTS) {
+            inferenceStorage.removeDeferredTypeInference(inferenceStorage.buildDeferredParameterInferenceId(inference));
+            Msg.warn(this, "Dropping deferred parameter_type after max retries at " + inference.getAddress()
+                + " index " + inference.getParameterIndex());
+        }
+        if (result == FunctionTypeInferenceApplier.ApplyResult.SKIPPED) {
+            requeueDeferredParameterType(inference, currentAttempts + 1);
+        }
+    }
+
+    private void applyDeferredReturnType(
+        Program program,
+        ReturnType inference,
+        int currentAttempts,
+        TaskMonitor monitor
+    ) {
+        Address address = parseAddress(inference.getAddress(), program);
+        if (address == null) {
+            requeueDeferredReturnType(inference, currentAttempts + 1);
+            return;
+        }
+        Function function = getFunctionAtAddress(program, address);
+        if (function == null) {
+            requeueDeferredReturnType(inference, currentAttempts + 1);
+            return;
+        }
+
+        FunctionTypeInferenceApplier.ApplyResult result = functionTypeInferenceApplier.applyReturnType(
+            program,
+            address,
+            inference,
+            function,
+            currentAttempts,
+            monitor
+        );
+        if (result == FunctionTypeInferenceApplier.ApplyResult.APPLIED) {
+            typeChangedAddresses.add(address);
+        }
+        if (result == FunctionTypeInferenceApplier.ApplyResult.DEFERRED
+            && currentAttempts + 1 >= MAX_DEFERRED_RETRY_ATTEMPTS) {
+            inferenceStorage.removeDeferredTypeInference(inferenceStorage.buildDeferredReturnInferenceId(inference));
+            Msg.warn(this, "Dropping deferred return_type after max retries at " + inference.getAddress());
+        }
+        if (result == FunctionTypeInferenceApplier.ApplyResult.SKIPPED) {
+            requeueDeferredReturnType(inference, currentAttempts + 1);
+        }
+    }
+
+    private void requeueDeferredParameterType(ParameterType inference, int attempts) {
+        if (attempts >= MAX_DEFERRED_RETRY_ATTEMPTS) {
+            Msg.warn(this, "Dropping deferred parameter_type after max retries at " + inference.getAddress()
+                + " index " + inference.getParameterIndex());
+            return;
+        }
+        inferenceStorage.enqueueDeferredParameterType(inference, attempts);
+    }
+
+    private void requeueDeferredReturnType(ReturnType inference, int attempts) {
+        if (attempts >= MAX_DEFERRED_RETRY_ATTEMPTS) {
+            Msg.warn(this, "Dropping deferred return_type after max retries at " + inference.getAddress());
+            return;
+        }
+        inferenceStorage.enqueueDeferredReturnType(inference, attempts);
+    }
+
+    /**
+     * Apply struct definitions directly. Reconciliation (ordering, naming,
+     * cycle detection) is handled server-side; the client trusts the order
+     * the inferences arrive in.
+     */
+    private void applyStructDefinitions(Program program, List<Inference> inferences) {
+        List<StructDefinition> structDefinitions = new ArrayList<>();
+        for (Inference inference : inferences) {
+            Object actual = inference.getActualInstance();
+            if (actual instanceof StructDefinition) {
+                StructDefinition definition = (StructDefinition) actual;
+                if (definition.getId() != null) {
+                    structDefinitions.add(definition);
+                    inferenceStorage.storeStructDefinition(definition);
+                }
+            }
+        }
+        if (structDefinitions.isEmpty()) {
+            return;
+        }
+        TransactionUtils.runInTransaction(program, "Zenyard: Apply struct definitions", () -> {
+            for (StructDefinition definition : structDefinitions) {
+                structInferenceApplier.applyStructDefinition(program, definition);
+            }
+        });
     }
 
     private Function getFunctionAtAddress(Program program, Address address) {
@@ -249,9 +702,10 @@ public class InferenceApplier {
         if (hasUserDefinedComment(program, function)) {
             return; // Don't override user comments
         }
-        
-        // Apply overview as plate comment
-        overviewAnnotator.addOverview(program, function, overview.getFullDescription());
+
+        // Normalize stale FUN_<addr> references to the current symbol names before writing.
+        String normalizedOverview = normalizeOverviewFunctionNames(program, overview.getFullDescription());
+        overviewAnnotator.addOverview(program, function, normalizedOverview);
     }
     
     /**
@@ -312,6 +766,8 @@ public class InferenceApplier {
             nameToApply = "_" + nameToApply;
         }
 
+        nameToApply = resolveUniqueFunctionName(program, address, nameToApply);
+
         String currentName = symbol.getName();
         if (currentName != null && currentName.equals(nameToApply)) {
             Msg.debug(this, "Skipping name inference at " + address + ": no change (" + currentName + ")");
@@ -329,6 +785,56 @@ public class InferenceApplier {
         } catch (Exception e) {
             Msg.warn(this, "Failed to rename symbol at " + address + ": " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Resolve a unique function name. If another function already has the given name
+     * at a different address, rename conflicting functions and this function to Ghidra's
+     * standard address-appended format (name@addr) so all colliding functions are
+     * disambiguated consistently.
+     */
+    private String resolveUniqueFunctionName(Program program, Address ourAddress, String baseName) {
+        SymbolTable symbolTable = program.getSymbolTable();
+        Iterator<Symbol> existing = symbolTable.getSymbols(baseName);
+        List<Symbol> conflictingFunctions = new ArrayList<>();
+        while (existing.hasNext()) {
+            Symbol s = existing.next();
+            if (s.getSymbolType() != SymbolType.FUNCTION) {
+                continue;
+            }
+            Address symAddr = s.getAddress();
+            if (symAddr != null && !symAddr.equals(ourAddress)) {
+                conflictingFunctions.add(s);
+            }
+        }
+        if (conflictingFunctions.isEmpty()) {
+            return baseName;
+        }
+
+        for (Symbol conflict : conflictingFunctions) {
+            Address conflictAddress = conflict.getAddress();
+            if (conflictAddress == null) {
+                continue;
+            }
+            String disambiguatedConflictName = SymbolUtilities.getAddressAppendedName(baseName, conflictAddress);
+            String currentConflictName = conflict.getName();
+            if (disambiguatedConflictName.equals(currentConflictName)) {
+                continue;
+            }
+            try {
+                conflict.setName(disambiguatedConflictName, SourceType.ANALYSIS);
+                Msg.info(this, "Resolved duplicate name '" + baseName + "' for existing function at "
+                    + conflictAddress + " -> " + disambiguatedConflictName);
+            } catch (Exception e) {
+                Msg.warn(this, "Failed to disambiguate existing function name '" + baseName + "' at "
+                    + conflictAddress + ": " + e.getMessage());
+            }
+        }
+
+        String uniqueName = SymbolUtilities.getAddressAppendedName(baseName, ourAddress);
+        Msg.info(this, "Resolved duplicate name '" + baseName + "' to '" + uniqueName
+            + "' at " + ourAddress);
+        return uniqueName;
     }
     
     /**
@@ -359,8 +865,9 @@ public class InferenceApplier {
             );
             
             if (!results.decompileCompleted()) {
-                throw new RuntimeException("Failed to decompile function: " 
-                    + (results.getErrorMessage() != null ? results.getErrorMessage() : "Unknown error"));
+                String errMsg = results.getErrorMessage() != null ? results.getErrorMessage() : "Unknown error";
+                Msg.warn(this, "Skipping variables_mapping at " + address + ": decompilation failed - " + errMsg);
+                return;
             }
             
             HighFunction highFunction = results.getHighFunction();
@@ -509,12 +1016,10 @@ public class InferenceApplier {
     
     /**
      * Apply parameters mapping inference.
+     * Uses in-applier logic so all key formats are supported (param_1, arg1, original name, 0/1-based index).
+     * ParameterRenamer is not used here because it only accepts integer keys and would skip other formats.
      */
     private void applyParametersMapping(Program program, Address address, ParametersMapping mapping) {
-        if (parameterRenamer != null) {
-            parameterRenamer.applyParametersMapping(program, address, mapping);
-            return;
-        }
         Function function = getFunctionAtAddress(program, address);
         if (function == null) {
             return;
@@ -712,10 +1217,94 @@ public class InferenceApplier {
         }
         Object storedDesc = stored.getData().get("full_description");
         String storedFullDescription = storedDesc != null ? String.valueOf(storedDesc) : null;
-        if (storedFullDescription != null && storedFullDescription.equals(plateComment)) {
-            return false; // exact match -> inferred, we may overwrite
+        if (isStoredOverviewEquivalentForComment(
+            plateComment,
+            storedFullDescription,
+            text -> normalizeOverviewFunctionNames(program, text)
+        )) {
+            return false; // normalized stored text still matches -> inferred, we may overwrite
         }
         return true; // stored but different -> user edited or other source; treat as user-defined
+    }
+
+    private void refreshFunctionOverviewInferences(Program program, List<Inference> inferences) {
+        if (program == null || inferences == null || inferences.isEmpty()) {
+            return;
+        }
+        TransactionUtils.runInTransaction(program, "Zenyard: Refresh function overviews", () -> {
+            for (Inference inference : inferences) {
+                if (!(inference.getActualInstance() instanceof FunctionOverview)) {
+                    continue;
+                }
+                FunctionOverview overview = (FunctionOverview) inference.getActualInstance();
+                Address overviewAddress = parseAddress(overview.getAddress(), program);
+                if (overviewAddress == null) {
+                    continue;
+                }
+                applyFunctionOverview(program, overviewAddress, overview);
+            }
+        });
+    }
+
+    private String normalizeOverviewFunctionNames(Program program, String overviewText) {
+        if (overviewText == null || overviewText.isEmpty() || program == null) {
+            return overviewText;
+        }
+        return normalizeOverviewFunctionNames(overviewText, token -> resolveOverviewFunctionToken(program, token));
+    }
+
+    static String normalizeOverviewFunctionNames(String overviewText, UnaryOperator<String> tokenResolver) {
+        if (overviewText == null || overviewText.isEmpty() || tokenResolver == null) {
+            return overviewText;
+        }
+        Matcher matcher = FUN_TOKEN_PATTERN.matcher(overviewText);
+        StringBuffer normalized = new StringBuffer();
+        while (matcher.find()) {
+            String tokenAddress = matcher.group(1);
+            String resolvedName = tokenResolver.apply(tokenAddress);
+            if (resolvedName == null || resolvedName.isEmpty()) {
+                matcher.appendReplacement(normalized, Matcher.quoteReplacement(matcher.group(0)));
+            } else {
+                matcher.appendReplacement(normalized, Matcher.quoteReplacement(resolvedName));
+            }
+        }
+        matcher.appendTail(normalized);
+        return normalized.toString();
+    }
+
+    static boolean isStoredOverviewEquivalentForComment(
+        String plateComment,
+        String storedFullDescription,
+        UnaryOperator<String> normalizer
+    ) {
+        if (plateComment == null || plateComment.trim().isEmpty() || storedFullDescription == null) {
+            return false;
+        }
+        if (storedFullDescription.equals(plateComment)) {
+            return true;
+        }
+        if (normalizer == null) {
+            return false;
+        }
+        String normalizedStored = normalizer.apply(storedFullDescription);
+        return normalizedStored != null && normalizedStored.equals(plateComment);
+    }
+
+    private String resolveOverviewFunctionToken(Program program, String tokenAddress) {
+        Address parsedAddress = parseAddress(tokenAddress, program);
+        if (parsedAddress == null) {
+            return null;
+        }
+        Function referencedFunction = program.getFunctionManager().getFunctionAt(parsedAddress);
+        if (referencedFunction != null && referencedFunction.getName() != null
+            && !referencedFunction.getName().isEmpty()) {
+            return referencedFunction.getName();
+        }
+        Symbol symbol = program.getSymbolTable().getPrimarySymbol(parsedAddress);
+        if (symbol != null && symbol.getName() != null && !symbol.getName().isEmpty()) {
+            return symbol.getName();
+        }
+        return null;
     }
     
     /**
@@ -845,6 +1434,41 @@ public class InferenceApplier {
         } else if (actual instanceof ParametersMapping) {
             ParametersMapping mapping = (ParametersMapping) actual;
             data.put("parameters_mapping", mapping.getParametersMapping());
+        } else if (actual instanceof ParameterType) {
+            ParameterType parameterType = (ParameterType) actual;
+            data.put("parameter_index", parameterType.getParameterIndex());
+            data.put("type_annotation", parameterType.getTypeAnnotation());
+            java.util.UUID parameterStructId = parameterType.getStructId();
+            data.put("struct_id", parameterStructId != null ? parameterStructId.toString() : null);
+        } else if (actual instanceof ReturnType) {
+            ReturnType returnType = (ReturnType) actual;
+            data.put("type_annotation", returnType.getTypeAnnotation());
+            java.util.UUID returnStructId = returnType.getStructId();
+            data.put("struct_id", returnStructId != null ? returnStructId.toString() : null);
+        } else if (actual instanceof StructDefinition) {
+            StructDefinition structDefinition = (StructDefinition) actual;
+            data.put("id", structDefinition.getId() != null ? structDefinition.getId().toString() : null);
+            data.put("name", structDefinition.getName());
+            List<Map<String, Object>> serializedFields = new ArrayList<>();
+            if (structDefinition.getFieldDefinitions() != null) {
+                for (FieldDefinition field : structDefinition.getFieldDefinitions()) {
+                    if (field == null) {
+                        continue;
+                    }
+                    Map<String, Object> fieldData = new HashMap<>();
+                    fieldData.put("suggested_field_name", field.getSuggestedFieldName());
+                    fieldData.put("field_type", field.getFieldType());
+                    fieldData.put("field_offset", field.getFieldOffset());
+                    java.util.UUID fieldStructId = field.getStructId();
+                    fieldData.put("struct_id", fieldStructId != null ? fieldStructId.toString() : null);
+                    serializedFields.add(fieldData);
+                }
+            }
+            data.put("field_definitions", serializedFields);
+            data.put("merged_from", structDefinition.getMergedFrom());
+        } else if (actual instanceof NotSwift) {
+            NotSwift notSwift = (NotSwift) actual;
+            data.put("reason", notSwift.getReason() != null ? notSwift.getReason().toString() : null);
         } else if (actual instanceof SwiftFunction) {
             SwiftFunction swift = (SwiftFunction) actual;
             data.put("swift_function", gson.toJsonTree(swift).getAsJsonObject());
@@ -854,6 +1478,58 @@ public class InferenceApplier {
         }
         
         return data;
+    }
+
+    private int getInferencePriority(Inference inference) {
+        String type = getInferenceType(inference);
+        if ("struct_definition".equals(type)) {
+            return 0;
+        }
+        // Apply variable/parameter naming before type updates to avoid
+        // rename-key drift when type propagation changes decompiler temp names.
+        if ("variables".equals(type) || "variables_mapping".equals(type)
+                || "params".equals(type) || "parameters_mapping".equals(type)) {
+            return 1;
+        }
+        if ("name".equals(type)) {
+            return 2;
+        }
+        if ("parameter_type".equals(type) || "return_type".equals(type)) {
+            return 3;
+        }
+        if ("function_overview".equals(type)) {
+            return 4;
+        }
+        return 5;
+    }
+
+    private boolean isFunctionPrototypeInference(Inference inference) {
+        if (inference == null) {
+            return false;
+        }
+        Object actual = inference.getActualInstance();
+        if (actual instanceof ParameterType || actual instanceof ReturnType) {
+            return true;
+        }
+        if (actual instanceof java.util.Map<?, ?>) {
+            Object type = ((java.util.Map<?, ?>) actual).get("type");
+            if (type != null) {
+                String typeValue = String.valueOf(type);
+                return "parameter_type".equals(typeValue) || "return_type".equals(typeValue);
+            }
+        }
+        return false;
+    }
+
+    private String getGlobalInferenceId(Inference inference, String inferenceType) {
+        Object actual = inference.getActualInstance();
+        if (actual instanceof StructDefinition) {
+            StructDefinition structDefinition = (StructDefinition) actual;
+            if (structDefinition.getId() != null) {
+                return "global." + structDefinition.getId().toString() + "." + inferenceType;
+            }
+        }
+        return "global." + inferenceType;
     }
 }
 

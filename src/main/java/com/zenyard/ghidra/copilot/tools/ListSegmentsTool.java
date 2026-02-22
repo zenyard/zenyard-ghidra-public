@@ -8,8 +8,8 @@ import ghidra.program.model.listing.Program;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.mem.Memory;
 
-import com.zenyard.ghidra.copilot.tools.models.PagedResults;
 import com.zenyard.ghidra.copilot.tools.models.Segment;
+import com.zenyard.ghidra.copilot.tools.models.ToolOutput;
 
 /**
  * Tool to list memory segments/blocks.
@@ -22,13 +22,9 @@ public class ListSegmentsTool {
         this.context = context;
     }
     
-    @Tool("Returns a paginated list of memory segments (blocks) in the program. " +
-          "If next_cursor is not empty, there are more pages which can be fetched using the cursor parameter.")
-    public PagedResults<Segment> listSegments(String cursor) {
+    @Tool("Returns a list of memory segments (blocks) in the program.")
+    public ToolOutput listSegments() {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
-        if (cursor != null) {
-            args.put("cursor", cursor);
-        }
         return ToolUtils.executeTool(context, "list_segments", args, () -> {
             try {
                 context.checkCancelled();
@@ -43,23 +39,10 @@ public class ListSegmentsTool {
                 
                 List<Segment> allSegments = new ArrayList<>();
                 
-                // Parse cursor (use block name as cursor)
-                String cursorName = cursor;
-                boolean pastCursor = (cursorName == null);
-                
                 for (MemoryBlock block : blocks) {
                     context.checkCancelled();
                     
                     String blockName = block.getName();
-                    
-                    // Skip until past cursor
-                    if (!pastCursor) {
-                        if (blockName.compareTo(cursorName) > 0) {
-                            pastCursor = true;
-                        } else {
-                            continue;
-                        }
-                    }
                     
                     String permissions = "";
                     if (block.isRead()) permissions += "r";
@@ -77,19 +60,18 @@ public class ListSegmentsTool {
                     ));
                 }
                 
-                // Paginate
-                int pageSize = 200;
-                List<Segment> pageSegments;
-                String nextCursor = null;
-                
-                if (allSegments.size() > pageSize) {
-                    pageSegments = allSegments.subList(0, pageSize);
-                    nextCursor = pageSegments.get(pageSize - 1).getName();
-                } else {
-                    pageSegments = allSegments;
+                StringBuilder output = new StringBuilder();
+                for (Segment segment : allSegments) {
+                    output.append(segment.getName())
+                        .append(" ")
+                        .append(segment.getStartAddress())
+                        .append(" ")
+                        .append(segment.getEndAddress())
+                        .append(" ")
+                        .append(segment.getPermissions())
+                        .append("\n");
                 }
-                
-                return new PagedResults<>(pageSegments, nextCursor);
+                return ToolUtils.persistLargeOutput(context, "segments", output.toString(), allSegments.size());
             } catch (ToolExecutionException e) {
                 throw e;
             } catch (Exception e) {

@@ -1,5 +1,6 @@
 package com.zenyard.ghidra.copilot.tools;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
@@ -17,8 +18,9 @@ public class DecompileFunctionTool {
         this.context = context;
     }
     
-    @Tool("Returns the decompiled code of the given function")
-    public String decompileFunction(String address) {
+    @Tool("Decompile a function to C-like pseudocode. Input requires `address`: a function entry address or any address inside the target function (for example `0x401000`).")
+    public String decompileFunction(
+            @P("Function address in the current program. Use a concrete address (hex string like `0x401000`), not a function name. The address may be the entry point or any address within the function.") String address) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("address", address);
         return ToolUtils.executeTool(context, "decompile_function", args, () -> {

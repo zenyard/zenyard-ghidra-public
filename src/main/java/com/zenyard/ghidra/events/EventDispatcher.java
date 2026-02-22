@@ -98,7 +98,7 @@ public class EventDispatcher {
             return;
         }
         
-        Msg.info(this, "Publishing " + event.getType() + " from " + event.getSource() + " to " + consumers.size() + " consumer(s)");
+        Msg.debug(this, "Publishing " + event.getType() + " from " + event.getSource() + " to " + consumers.size() + " consumer(s)");
         
         // Distribute event to all subscribers synchronously
         for (EventConsumer consumer : consumers) {

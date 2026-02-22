@@ -337,7 +337,7 @@ public class QueueRevisionsTask extends EventAwareTask {
             }
             
             SyncStatusStorage syncStatusStorage = new SyncStatusStorage(program);
-            if (isInitialUpload && syncStatusStorage.getDirtyAddresses().isEmpty()) {
+            if (isInitialUpload) {
                 initializeSyncStatus(program);
             }
             
@@ -392,6 +392,11 @@ public class QueueRevisionsTask extends EventAwareTask {
             // Mark queuing as complete
             ZenyardProgramProperties props = new ZenyardProgramProperties(program);
             props.setString("queueing_complete", "true");
+            if (revisions.isEmpty()) {
+                // No changed objects were found after hash comparison.
+                props.setString("database_dirty", "false");
+                props.setString("changes_detected", "false");
+            }
             
             Msg.info(this, "Zenyard: Queued " + processed + " objects for upload (" + revisions.size() + " revision(s))");
             

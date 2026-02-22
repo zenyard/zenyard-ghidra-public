@@ -5,7 +5,10 @@ import java.util.Set;
 import com.zenyard.ghidra.ZenyardService;
 import com.zenyard.ghidra.events.ZenyardEvent;
 import com.zenyard.ghidra.events.EventConsumer;
+import com.zenyard.ghidra.upload.QueueableObjectsDetector;
 import com.zenyard.ghidra.usage.UsageState;
+
+import ghidra.program.model.listing.Program;
 
 /**
  * Updates the status bar state based on events.
@@ -35,6 +38,13 @@ public class StatusBarEventController implements EventConsumer {
             }
             StatusBarState current = viewModel.getStateSnapshot();
             viewModel.updateState(current.withShowWarningIcon(!connected));
+
+            // Ask the manager to recompute the visible status text so it can include
+            // a "Server unreachable" message when disconnected.
+            ZenyardService services = ZenyardService.getInstance();
+            if (services != null && services.getStatusBarManager() != null) {
+                services.getStatusBarManager().refreshDisplayNow();
+            }
             return;
         }
 
@@ -71,6 +81,11 @@ public class StatusBarEventController implements EventConsumer {
         if (services == null || services.getTrackChangesTaskManager() == null) {
             return false;
         }
-        return services.getTrackChangesTaskManager().shouldProcessEvents();
+        if (!services.getTrackChangesTaskManager().shouldProcessEvents()) {
+            return false;
+        }
+
+        Program program = services.getCurrentProgram();
+        return QueueableObjectsDetector.hasQueueableObjects(program);
     }
 }

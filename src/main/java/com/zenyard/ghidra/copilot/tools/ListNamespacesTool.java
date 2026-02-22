@@ -14,7 +14,7 @@ import ghidra.program.model.symbol.Symbol;
 import ghidra.program.model.symbol.SymbolIterator;
 import ghidra.program.model.symbol.SymbolTable;
 
-import com.zenyard.ghidra.copilot.tools.models.PagedResults;
+import com.zenyard.ghidra.copilot.tools.models.ToolOutput;
 
 /**
  * Tool to list namespaces (classes/modules) in the program.
@@ -27,13 +27,9 @@ public class ListNamespacesTool {
         this.context = context;
     }
     
-    @Tool("Returns a paginated list of namespaces (classes/modules) in the program. " +
-          "If next_cursor is not empty, there are more pages which can be fetched using the cursor parameter.")
-    public PagedResults<String> listNamespaces(String cursor) {
+    @Tool("Returns a list of namespaces (classes/modules) in the program.")
+    public ToolOutput listNamespaces() {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
-        if (cursor != null) {
-            args.put("cursor", cursor);
-        }
         return ToolUtils.executeTool(context, "list_namespaces", args, () -> {
             try {
                 context.checkCancelled();
@@ -62,36 +58,11 @@ public class ListNamespacesTool {
                 // Convert to sorted list
                 List<String> allNamespaces = new ArrayList<>(new TreeSet<>(namespaceSet));
                 
-                // Parse cursor
-                String cursorName = cursor;
-                boolean pastCursor = (cursorName == null);
-                
-                List<String> filteredNamespaces = new ArrayList<>();
+                StringBuilder output = new StringBuilder();
                 for (String nsName : allNamespaces) {
-                    // Skip until past cursor
-                    if (!pastCursor) {
-                        if (nsName.compareTo(cursorName) > 0) {
-                            pastCursor = true;
-                        } else {
-                            continue;
-                        }
-                    }
-                    filteredNamespaces.add(nsName);
+                    output.append(nsName).append("\n");
                 }
-                
-                // Paginate
-                int pageSize = 200;
-                List<String> pageNamespaces;
-                String nextCursor = null;
-                
-                if (filteredNamespaces.size() > pageSize) {
-                    pageNamespaces = filteredNamespaces.subList(0, pageSize);
-                    nextCursor = pageNamespaces.get(pageSize - 1);
-                } else {
-                    pageNamespaces = filteredNamespaces;
-                }
-                
-                return new PagedResults<>(pageNamespaces, nextCursor);
+                return ToolUtils.persistLargeOutput(context, "namespaces", output.toString(), allNamespaces.size());
             } catch (ToolExecutionException e) {
                 throw e;
             } catch (Exception e) {

@@ -13,10 +13,12 @@ import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
  * Mirrors the streaming behavior from IDA's copilot_task.py.
  */
 public class CopilotStreamHandler implements StreamingChatResponseHandler {
+    private static final int MAX_STREAM_BUFFER_CHARS = 256_000;
     
     private final CopilotViewModel viewModel;
     private final StringBuilder currentMessage;
     private volatile boolean cancelled;
+    private volatile boolean inPlanningPhase;
     
     public CopilotStreamHandler(CopilotViewModel viewModel) {
         this.viewModel = viewModel;
@@ -29,10 +31,13 @@ public class CopilotStreamHandler implements StreamingChatResponseHandler {
         if (cancelled) {
             return;
         }
-        
         // Aggregate tokens
         synchronized (currentMessage) {
             currentMessage.append(partialResponse);
+            if (currentMessage.length() > MAX_STREAM_BUFFER_CHARS) {
+                int trim = currentMessage.length() - MAX_STREAM_BUFFER_CHARS;
+                currentMessage.delete(0, trim);
+            }
         }
         
         // Update UI on EDT
@@ -66,6 +71,39 @@ public class CopilotStreamHandler implements StreamingChatResponseHandler {
         });
     }
     
+    /**
+     * Signal the start of the planning phase.
+     * Planning tokens will be shown in a "Reasoning..." thinking area in the UI.
+     */
+    public void beginPlanningPhase() {
+        inPlanningPhase = true;
+        SwingUtilities.invokeLater(() -> viewModel.setThinking(true, "Reasoning..."));
+    }
+
+    /**
+     * Stream a planning token during the model's reasoning phase.
+     * These tokens are displayed in the thinking/reasoning UI area.
+     */
+    public void onPlanningToken(String token) {
+        if (cancelled) {
+            return;
+        }
+        SwingUtilities.invokeLater(() -> {
+            if (!cancelled && inPlanningPhase) {
+                viewModel.appendThinkingText(token);
+            }
+        });
+    }
+
+    /**
+     * Signal the end of the planning phase.
+     * Clears the thinking area so the response area can take over.
+     */
+    public void endPlanningPhase() {
+        inPlanningPhase = false;
+        SwingUtilities.invokeLater(() -> viewModel.clearThinkingText());
+    }
+
     /**
      * Legacy method for compatibility - maps to onPartialResponse
      */
@@ -108,6 +146,8 @@ public class CopilotStreamHandler implements StreamingChatResponseHandler {
             currentMessage.setLength(0);
         }
         this.cancelled = false;
+        this.inPlanningPhase = false;
     }
+
 }
 

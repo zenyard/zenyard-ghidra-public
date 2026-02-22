@@ -5,6 +5,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.FunctionManager;
@@ -14,7 +15,7 @@ import ghidra.program.model.symbol.ReferenceIterator;
 import ghidra.program.model.symbol.ReferenceManager;
 
 import com.zenyard.ghidra.copilot.tools.models.Function;
-import com.zenyard.ghidra.copilot.tools.models.PagedResults;
+import com.zenyard.ghidra.copilot.tools.models.ToolOutput;
 
 /**
  * Tool to list functions called BY a function (callees).
@@ -28,15 +29,11 @@ public class ListCalledFunctionsTool {
         this.context = context;
     }
     
-    @Tool("Returns a paginated list of functions called BY the given function (callees). " +
-          "This is the complement to listCallingFunctions which gets callers. " +
-          "If next_cursor is not empty, there are more pages which can be fetched using the cursor parameter.")
-    public PagedResults<Function> listCalledFunctions(String address, String cursor) {
+    @Tool("List callee functions called by a given function. This is the inverse of `listCallingFunctions`.")
+    public ToolOutput listCalledFunctions(
+            @P("Source function address (hex like `0x401000`).") String address) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("address", address);
-        if (cursor != null) {
-            args.put("cursor", cursor);
-        }
         return ToolUtils.executeTool(context, "list_called_functions", args, () -> {
             try {
                 context.checkCancelled();
@@ -88,42 +85,19 @@ public class ListCalledFunctionsTool {
                 List<ghidra.program.model.listing.Function> sortedFunctions = new ArrayList<>(calledFunctions);
                 sortedFunctions.sort((f1, f2) -> f1.getEntryPoint().compareTo(f2.getEntryPoint()));
                 
-                // Parse cursor
-                Address cursorAddress = cursor != null ? ToolUtils.parseAddress(program, cursor) : null;
-                boolean pastCursor = (cursorAddress == null);
-                
-                List<ghidra.program.model.listing.Function> filteredFunctions = new ArrayList<>();
-                for (ghidra.program.model.listing.Function func : sortedFunctions) {
-                    // Skip until past cursor
-                    if (!pastCursor) {
-                        if (func.getEntryPoint().compareTo(cursorAddress) > 0) {
-                            pastCursor = true;
-                        } else {
-                            continue;
-                        }
-                    }
-                    filteredFunctions.add(func);
-                }
-                
-                // Paginate
-                int pageSize = 200;
-                List<ghidra.program.model.listing.Function> pageFunctions;
-                String nextCursor = null;
-                
-                if (filteredFunctions.size() > pageSize) {
-                    pageFunctions = filteredFunctions.subList(0, pageSize);
-                    nextCursor = ToolUtils.formatAddress(pageFunctions.get(pageSize - 1).getEntryPoint());
-                } else {
-                    pageFunctions = filteredFunctions;
-                }
-                
                 // Map to tool Function objects
                 List<Function> results = new ArrayList<>();
-                for (ghidra.program.model.listing.Function func : pageFunctions) {
+                for (ghidra.program.model.listing.Function func : sortedFunctions) {
                     results.add(Function.fromGhidraFunction(func, program));
                 }
-                
-                return new PagedResults<>(results, nextCursor);
+                StringBuilder output = new StringBuilder();
+                for (Function func : results) {
+                    output.append(func.getName())
+                        .append(" ")
+                        .append(func.getAddress())
+                        .append("\n");
+                }
+                return ToolUtils.persistLargeOutput(context, "called-functions", output.toString(), results.size());
             } catch (ToolExecutionException e) {
                 throw e;
             } catch (Exception e) {

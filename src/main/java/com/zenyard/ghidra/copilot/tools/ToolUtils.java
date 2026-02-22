@@ -7,6 +7,9 @@ import ghidra.program.model.listing.Program;
 import java.util.Map;
 import java.util.function.Supplier;
 
+import com.zenyard.ghidra.copilot.storage.CopilotArtifactStorage;
+import com.zenyard.ghidra.copilot.tools.models.ToolOutput;
+
 /**
  * Utility functions for tool implementations.
  */
@@ -104,6 +107,29 @@ public class ToolUtils {
             }
             throw new ToolExecutionException("Tool execution failed: " + e.getMessage(), e);
         }
+    }
+
+    public static ToolOutput persistLargeOutput(
+            CopilotToolContext context,
+            String artifactBaseName,
+            String content,
+            Integer itemCount) {
+        String inlineContent = null;
+        if (content != null && content.length() <= 4000) {
+            inlineContent = content;
+        }
+        CopilotArtifactStorage storage = context != null ? context.getArtifactStorage() : null;
+        if (storage == null) {
+            return new ToolOutput(
+                "Large output generated (no artifact storage available)",
+                null,
+                itemCount,
+                inlineContent);
+        }
+        String artifactPath = "tools/" + artifactBaseName + "-" + System.currentTimeMillis() + ".txt";
+        storage.writeArtifacts(Map.of(artifactPath, content != null ? content : ""));
+        String summary = "Stored output in artifact: " + artifactPath;
+        return new ToolOutput(summary, artifactPath, itemCount, inlineContent);
     }
 
     private static long elapsedMs(long startTimeNs) {

@@ -36,7 +36,16 @@ public class PluginConfiguration {
 
     @SerializedName("accepted_eula_version")
     private final Integer acceptedEulaVersion;
-    
+
+    @SerializedName("langsmith_api_key")
+    private final String langsmithApiKey;
+
+    @SerializedName("langsmith_endpoint")
+    private final String langsmithEndpoint;
+
+    @SerializedName("langsmith_project")
+    private final String langsmithProject;
+
     // Default values matching IDA plugin
     private static final String DEFAULT_SERVER_URL = "https://api.zenyard.ai";
     private static final String DEFAULT_LOG_LEVEL = "INFO";
@@ -57,6 +66,23 @@ public class PluginConfiguration {
             Boolean requireConfirmationPerDb,
             Boolean verifySsl,
             Integer acceptedEulaVersion) {
+        this(apiUrl, apiKey, logLevel, showInitialUploadMessage,
+                requestBinaryInstructions, requireConfirmationPerDb,
+                verifySsl, acceptedEulaVersion, null, null, null);
+    }
+
+    public PluginConfiguration(
+            String apiUrl,
+            String apiKey,
+            String logLevel,
+            Boolean showInitialUploadMessage,
+            Boolean requestBinaryInstructions,
+            Boolean requireConfirmationPerDb,
+            Boolean verifySsl,
+            Integer acceptedEulaVersion,
+            String langsmithApiKey,
+            String langsmithEndpoint,
+            String langsmithProject) {
         this.apiUrl = apiUrl != null ? apiUrl : DEFAULT_SERVER_URL;
         this.apiKey = apiKey != null ? apiKey : "";
         this.logLevel = logLevel != null ? logLevel : DEFAULT_LOG_LEVEL;
@@ -65,7 +91,10 @@ public class PluginConfiguration {
         this.requireConfirmationPerDb = requireConfirmationPerDb != null ? requireConfirmationPerDb : DEFAULT_REQUIRE_CONFIRMATION_PER_DB;
         this.verifySsl = verifySsl != null ? verifySsl : DEFAULT_VERIFY_SSL;
         this.acceptedEulaVersion = acceptedEulaVersion != null ? acceptedEulaVersion : DEFAULT_ACCEPTED_EULA_VERSION;
-        
+        this.langsmithApiKey = langsmithApiKey;
+        this.langsmithEndpoint = langsmithEndpoint;
+        this.langsmithProject = langsmithProject;
+
         validate();
     }
     
@@ -133,6 +162,13 @@ public class PluginConfiguration {
             }
         }
         
+        String newLangsmithApiKey = updates.containsKey("langsmith_api_key")
+            ? (String) updates.get("langsmith_api_key") : this.langsmithApiKey;
+        String newLangsmithEndpoint = updates.containsKey("langsmith_endpoint")
+            ? (String) updates.get("langsmith_endpoint") : this.langsmithEndpoint;
+        String newLangsmithProject = updates.containsKey("langsmith_project")
+            ? (String) updates.get("langsmith_project") : this.langsmithProject;
+
         return new PluginConfiguration(
             newApiUrl,
             newApiKey,
@@ -141,7 +177,10 @@ public class PluginConfiguration {
             newRequestBinaryInstructions,
             newRequireConfirmationPerDb,
             newVerifySsl,
-            newAcceptedEulaVersion
+            newAcceptedEulaVersion,
+            newLangsmithApiKey,
+            newLangsmithEndpoint,
+            newLangsmithProject
         );
     }
     
@@ -206,6 +245,18 @@ public class PluginConfiguration {
         return acceptedEulaVersion != null ? acceptedEulaVersion : DEFAULT_ACCEPTED_EULA_VERSION;
     }
     
+    public String getLangsmithApiKey() {
+        return langsmithApiKey;
+    }
+
+    public String getLangsmithEndpoint() {
+        return langsmithEndpoint;
+    }
+
+    public String getLangsmithProject() {
+        return langsmithProject;
+    }
+
     public boolean isConfigured() {
         return apiKey != null && !apiKey.trim().isEmpty();
     }

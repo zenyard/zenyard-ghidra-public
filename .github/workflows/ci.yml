@@ -9,6 +9,7 @@ on:
 env:
   GHIDRA_VERSION: "12.0"
   GHIDRA_RELEASE: "PUBLIC"
+  JAVAFX_PLATFORMS: "linux win mac mac-aarch64 linux-aarch64"
 
 jobs:
   set-short-sha:
@@ -164,25 +165,66 @@ jobs:
       - name: Generate OpenAPI client
         run: ./gradlew openApiGenerate
 
-      - name: Build extension
-        run: ./gradlew buildExtension
-
-      - name: Get extension ZIP file
-        id: get-zip
+      # Build one extension ZIP per target platform.
+      # Each iteration passes -PjavafxPlatform=<platform> so only the matching
+      # JavaFX classifier JARs end up in lib/. The produced ZIP is immediately
+      # renamed to include the platform suffix before the next build overwrites it.
+      - name: Build per-platform extension ZIPs
         run: |
-          ZIP_FILE=$(ls -t dist/ghidra_*_zenyard-ghidra.zip | head -1)
-          if [ -z "$ZIP_FILE" ]; then
-            echo "Error: No extension ZIP found in dist/"
-            exit 1
-          fi
-          echo "zip_file=$ZIP_FILE" >> $GITHUB_OUTPUT
-          echo "Found ZIP file: $ZIP_FILE"
+          set -euo pipefail
+          for platform in $JAVAFX_PLATFORMS; do
+            echo ""
+            echo "========== Building for platform: ${platform} =========="
+            ./gradlew -PjavafxPlatform="${platform}" buildExtension
 
-      - name: Upload build artifacts
+            SRC_ZIP=$(ls -t dist/ghidra_*_zenyard-ghidra.zip 2>/dev/null | head -1)
+            if [ -z "$SRC_ZIP" ]; then
+              echo "Error: No extension ZIP found in dist/ after building for ${platform}"
+              exit 1
+            fi
+
+            DEST_ZIP="${SRC_ZIP%.zip}-${platform}.zip"
+            mv "$SRC_ZIP" "$DEST_ZIP"
+            echo "Produced: ${DEST_ZIP}"
+          done
+
+          echo ""
+          echo "=== All platform ZIPs ==="
+          ls -lh dist/*_zenyard-ghidra-*.zip
+
+      - name: Upload artifact (linux)
         uses: actions/upload-artifact@v4
         with:
-          name: zenyard-ghidra-${{ env.SAFE_REF }}-${{ env.SHORT_SHA }}
-          path: ${{ steps.get-zip.outputs.zip_file }}
+          name: zenyard-ghidra-linux-${{ env.SAFE_REF }}-${{ env.SHORT_SHA }}
+          path: dist/*_zenyard-ghidra-linux.zip
+          retention-days: 30
+
+      - name: Upload artifact (win)
+        uses: actions/upload-artifact@v4
+        with:
+          name: zenyard-ghidra-win-${{ env.SAFE_REF }}-${{ env.SHORT_SHA }}
+          path: dist/*_zenyard-ghidra-win.zip
+          retention-days: 30
+
+      - name: Upload artifact (mac)
+        uses: actions/upload-artifact@v4
+        with:
+          name: zenyard-ghidra-mac-${{ env.SAFE_REF }}-${{ env.SHORT_SHA }}
+          path: dist/*_zenyard-ghidra-mac.zip
+          retention-days: 30
+
+      - name: Upload artifact (mac-aarch64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: zenyard-ghidra-mac-aarch64-${{ env.SAFE_REF }}-${{ env.SHORT_SHA }}
+          path: dist/*_zenyard-ghidra-mac-aarch64.zip
+          retention-days: 30
+
+      - name: Upload artifact (linux-aarch64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: zenyard-ghidra-linux-aarch64-${{ env.SAFE_REF }}-${{ env.SHORT_SHA }}
+          path: dist/*_zenyard-ghidra-linux-aarch64.zip
           retention-days: 30
 
   release:
@@ -195,6 +237,7 @@ jobs:
       SAFE_REF: ${{ needs.set-short-sha.outputs.safe_ref }}
 
     steps:
+<<<<<<< HEAD
       - name: Validate short SHA
         run: |
           if [ -z "${{ needs.set-short-sha.outputs.short_sha }}" ]; then
@@ -203,30 +246,37 @@ jobs:
           fi
 
       - name: Download build artifact
+=======
+      - name: Download all platform artifacts
+>>>>>>> 77ab12c (Platform builds)
         uses: actions/download-artifact@v4
         with:
-          name: zenyard-ghidra-${{ env.SAFE_REF }}-${{ env.SHORT_SHA }}
+          pattern: zenyard-ghidra-*-${{ env.SAFE_REF }}-${{ env.SHORT_SHA }}
           path: build-artifact
+          merge-multiple: true
 
-      - name: Locate extension ZIP
-        id: get-zip
+      - name: List extension ZIPs
         run: |
-          ZIP_FILE=$(find build-artifact -name "ghidra_*_zenyard-ghidra.zip" | head -1)
-          if [ -z "$ZIP_FILE" ]; then
-            echo "Error: No extension ZIP found in artifact"
-            exit 1
-          fi
-          echo "zip_file=$ZIP_FILE" >> $GITHUB_OUTPUT
-          echo "Found ZIP file: $ZIP_FILE"
+          echo "Extension ZIPs in artifact:"
+          ls -lhR build-artifact/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          files: ${{ steps.get-zip.outputs.zip_file }}
+          files: build-artifact/*_zenyard-ghidra-*.zip
           tag_name: ci-${{ env.SHORT_SHA }}
           name: Zenyard Ghidra ci-${{ env.SHORT_SHA }}
           body: |
             CI release for `main` @ `${{ github.sha }}`.
+
+            ## Platform ZIPs
+            Each ZIP contains JavaFX native libraries for exactly one platform.
+            Download the one matching your OS/architecture:
+            - **Linux x64**: `*-linux.zip`
+            - **Windows x64**: `*-win.zip`
+            - **macOS Intel**: `*-mac.zip`
+            - **macOS Apple Silicon**: `*-mac-aarch64.zip`
+            - **Linux ARM64**: `*-linux-aarch64.zip`
 
             ## Changes
             See the [commit log](https://github.com/${{ github.repository }}/compare/${{ github.event.before }}...${{ github.sha }}) for details.

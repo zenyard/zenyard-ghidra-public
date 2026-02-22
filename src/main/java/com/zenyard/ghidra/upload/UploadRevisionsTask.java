@@ -14,12 +14,11 @@ import com.zenyard.ghidra.api.generated.ApiException;
 import com.zenyard.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.ghidra.api.generated.model.AddObjectsToCurrentRevisionParams;
 import com.zenyard.ghidra.api.generated.model.CreateRevisionParams;
-import com.zenyard.ghidra.api.generated.model.FinishAndAnalyzeCurrentRevisionParams;
+import com.zenyard.ghidra.api.generated.model.FinishAndAnalyzeCurrentRevisionBody;
 import com.zenyard.ghidra.api.generated.model.Function;
 import com.zenyard.ghidra.api.generated.model.GlobalVariable;
 import com.zenyard.ghidra.api.generated.model.ModelObject;
 import com.zenyard.ghidra.api.generated.model.Range;
-import com.zenyard.ghidra.ZenyardService;
 import com.zenyard.ghidra.events.ZenyardEvent;
 import com.zenyard.ghidra.events.EventDispatcher;
 import com.zenyard.ghidra.tasks.StatusBarAwareTask;
@@ -28,7 +27,8 @@ import com.zenyard.ghidra.storage.SyncStatus;
 import com.zenyard.ghidra.storage.SyncStatusStorage;
 import com.zenyard.ghidra.status.StatusBarManager;
 import com.zenyard.ghidra.status.StatusBarPriorities;
-import com.zenyard.ghidra.usage.UsageState;
+import com.zenyard.ghidra.status.StatusBarState;
+import com.zenyard.ghidra.status.StatusBarViewModel;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
@@ -56,6 +56,7 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
     private final Object waitLock = new Object();
     private volatile boolean revisionsQueued = false;
     private volatile boolean shouldStop = false;
+    private volatile TaskMonitor runningMonitor;
     private List<QueueRevisionsTask.Revision> revisions = new ArrayList<>();
     private UUID binaryId = null;
     private boolean isInitialUpload = false;
@@ -119,9 +120,28 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
                     this.binaryIdAvailable = true;
                     waitLock.notify();
                 }
+            } else {
+                // Fallback: get from properties if event payload is null
+                ZenyardProgramProperties props = new ZenyardProgramProperties(program);
+                String binaryIdStr = props.getString("binary_id");
+                if (binaryIdStr != null && !binaryIdStr.isEmpty()) {
+                    try {
+                        synchronized (waitLock) {
+                            this.binaryId = UUID.fromString(binaryIdStr);
+                            this.binaryIdAvailable = true;
+                            waitLock.notify();
+                            Msg.info(this, "UploadRevisionsTask: Retrieved binaryId from properties in BINARY_ID_AVAILABLE handler: " + binaryId);
+                        }
+                    } catch (IllegalArgumentException e) {
+                        Msg.warn(this, "UploadRevisionsTask: Invalid binary_id format in properties: " + binaryIdStr);
+                    }
+                }
             }
         } else if (event.getType() == ZenyardEvent.EventType.PROGRAM_DEACTIVATED) {
             Msg.info(this, "UploadRevisionsTask: Received PROGRAM_DEACTIVATED event");
+            if (runningMonitor != null) {
+                runningMonitor.cancel();
+            }
             synchronized (waitLock) {
                 shouldStop = true;
                 waitLock.notify(); // Wake up any waiting threads
@@ -131,6 +151,7 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
     
     @Override
     protected void doRun(TaskMonitor monitor) {
+        runningMonitor = monitor;
         AtomicBoolean runningFlag = RUNNING_UPLOADS.computeIfAbsent(program, key -> new AtomicBoolean(false));
         if (!runningFlag.compareAndSet(false, true)) {
             Msg.warn(this, "UploadRevisionsTask: Another upload task is already running for this program. Skipping.");
@@ -138,9 +159,6 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
         }
         try {
             try {
-            if (isUsageBlocked()) {
-                return;
-            }
             // Get binary ID from properties
             ZenyardProgramProperties props = new ZenyardProgramProperties(program);
             String binaryIdStr = props.getString("binary_id");
@@ -201,15 +219,17 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
             
             if (revisions.isEmpty()) {
                 Msg.warn(this, "UploadRevisionsTask: Cannot upload - revisions list is empty");
+                // During shutdown PROGRAM_DEACTIVATED may fire after queue state is cleared.
+                // Clearing rerun UI state is best-effort; never try to start new transactions
+                // on a terminated/closed program database.
+                if (!monitor.isCancelled() && !shouldStop && program != null && !program.isClosed()) {
+                    clearRerunStateAfterSync();
+                }
                 return;
             }
             
             if (monitor.isCancelled() || shouldStop) {
                 Msg.info(this, "UploadRevisionsTask: Cancelled or stopped, aborting upload");
-                return;
-            }
-
-            if (isUsageBlocked()) {
                 return;
             }
             
@@ -318,7 +338,7 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
                 
                 // Finish revision
                 boolean analyzeDependents = revision.isInitialAnalysis();
-                FinishAndAnalyzeCurrentRevisionParams finishParams = new FinishAndAnalyzeCurrentRevisionParams();
+                FinishAndAnalyzeCurrentRevisionBody finishParams = new FinishAndAnalyzeCurrentRevisionBody();
                 finishParams.setAnalyzeDependents(analyzeDependents);
                 
                 finishAndAnalyzeWithRetry(binaryId, finishParams, currentRevision);
@@ -333,6 +353,7 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
             // Mark database as clean after successful upload
             ZenyardProgramProperties uploadProps = new ZenyardProgramProperties(program);
             uploadProps.setString("database_dirty", "false");
+            clearRerunStateAfterSync();
             
             // Mark initial upload as complete if this was the initial upload
             if (isInitialUpload) {
@@ -357,23 +378,11 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
         } finally {
             runningFlag.set(false);
             RUNNING_UPLOADS.remove(program, runningFlag);
+            runningMonitor = null;
         }
     }
 
-    private boolean isUsageBlocked() {
-        ZenyardService services = ZenyardService.getInstance();
-        if (services == null) {
-            return false;
-        }
-        UsageState usageState = services.getUsageState();
-        if (usageState != null && usageState.isBlocked()) {
-            UsageState.showBlockedDialog(tool.getActiveWindow(), usageState);
-            return true;
-        }
-        return false;
-    }
-
-    private void finishAndAnalyzeWithRetry(UUID binaryId, FinishAndAnalyzeCurrentRevisionParams finishParams,
+    private void finishAndAnalyzeWithRetry(UUID binaryId, FinishAndAnalyzeCurrentRevisionBody finishParams,
             int currentRevision) {
         int attempt = 0;
         int maxAttempts = 3;
@@ -425,6 +434,22 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
             SyncStatus newStatus = new SyncStatus(Optional.ofNullable(queued.getHash()), false);
             syncStatusStorage.setSyncStatus(queued.getAddress(), newStatus);
         }
+    }
+
+    private void clearRerunStateAfterSync() {
+        ZenyardProgramProperties props = new ZenyardProgramProperties(program);
+        props.setString("changes_detected", "false");
+
+        StatusBarManager statusBarManager = getStatusBarManager();
+        if (statusBarManager == null) {
+            return;
+        }
+        StatusBarViewModel viewModel = statusBarManager.getViewModel();
+        if (viewModel != null) {
+            StatusBarState current = viewModel.getStateSnapshot();
+            viewModel.updateState(current.withShowRerun(false));
+        }
+        statusBarManager.refreshDisplayNow();
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.zenyard.ghidra.copilot.tools;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.data.DataType;
@@ -20,10 +21,10 @@ public class ReadDataAtAddressTool {
         this.context = context;
     }
     
-    @Tool("Reads raw bytes/data at the given address. " +
-          "Returns the data type, value representation, and raw bytes (hex format). " +
-          "Optionally specify a length to read multiple bytes.")
-    public String readDataAtAddress(String address, Integer length) {
+    @Tool("Read data and raw bytes starting at an address. Returns detected data type/value (if defined) plus a hexdump.")
+    public String readDataAtAddress(
+            @P("Start address to read from (hex like `0x401000`).") String address,
+            @P(value = "Optional number of bytes to read. Defaults to 16 and is capped at 256.", required = false) Integer length) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("address", address);
         if (length != null) {

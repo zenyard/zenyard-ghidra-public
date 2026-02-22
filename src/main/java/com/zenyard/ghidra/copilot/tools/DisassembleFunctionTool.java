@@ -1,5 +1,6 @@
 package com.zenyard.ghidra.copilot.tools;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.CommentType;
@@ -19,9 +20,9 @@ public class DisassembleFunctionTool {
         this.context = context;
     }
     
-    @Tool("Returns the assembly code (disassembly) of the given function. " +
-          "The address can be the function entry point or any address within the function.")
-    public String disassembleFunction(String address) {
+    @Tool("Return instruction-level disassembly for one function. Input requires `address`: a function entry address or any address inside the function.")
+    public String disassembleFunction(
+            @P("Function address in the current program (hex like `0x401000`). This can be the function entry point or any instruction address within the function.") String address) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         args.put("address", address);
         return ToolUtils.executeTool(context, "disassemble_function", args, () -> {

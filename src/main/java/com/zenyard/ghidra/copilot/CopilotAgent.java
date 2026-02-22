@@ -35,19 +35,8 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public class CopilotAgent {
     
-    // System prompt matches IDA's AGENT_SYSTEM_PROMPT
-    private static final String SYSTEM_PROMPT = """
-        You are a reverse engineering ai assistant.
-        You accomplish a given task iteratively, breaking it down into clear steps and working through them methodically.
-
-        1. Analyze the user's task and set clear, achievable goals to accomplish it. Prioritize these goals in a logical order.
-        2. Work through these goals sequentially, utilizing available tools one at a time as necessary. Each goal should correspond to a distinct step in your problem-solving process. You will be informed on the work completed and what's remaining as you go.
-        3. The user may provide feedback, which you can use to make improvements and try again. But DO NOT continue in pointless back and forth conversations, i.e. don't end your responses with questions or offers for further assistance.
-        4. When using paginated tools, do NOT inform the user about pagination details.
-        5. When referencing a function or symbol, include a markdown link using ghidra://:
-           - [symbol_name](ghidra://symbol/symbol_name)
-           - [function_name](ghidra://function/0x401000)
-        """;
+    // Shared system prompt (simplified for Deep Agent planning)
+    private static final String SYSTEM_PROMPT = CopilotPrompts.SYSTEM_PROMPT;
     
     private interface CopilotAgentService {
         @dev.langchain4j.service.SystemMessage(SYSTEM_PROMPT)
@@ -179,6 +168,24 @@ public class CopilotAgent {
      * Applies rate limiting (15 requests per 60 seconds) to all providers.
      */
     public static ChatModel createChatModel(CopilotConfig config) {
+        return createChatModelInternal(config, getTimeoutParam(config, 30));
+    }
+
+    /**
+     * Create a ChatModel for sub-agent usage with a longer default timeout (120s).
+     * Sub-agents make synchronous LLM calls with potentially large contexts
+     * (system prompt + tools + inherited state), so they need more time.
+     * The subagent-specific config key takes precedence over the generic timeout.
+     */
+    public static ChatModel createSubAgentChatModel(CopilotConfig config) {
+        int timeoutSeconds = getIntParam(
+            config, 120,
+            "subagent_model_timeout", "subagent_timeout_seconds",
+            "deepagent_subagent_model_timeout");
+        return createChatModelInternal(config, Duration.ofSeconds(timeoutSeconds));
+    }
+
+    private static ChatModel createChatModelInternal(CopilotConfig config, Duration timeout) {
         String provider = config.getModelProvider();
         String modelName = config.getModelName();
         
@@ -186,29 +193,27 @@ public class CopilotAgent {
         
         switch (provider) {
             case "openai":
-                baseModel = buildOpenAiModel(config, modelName, false);
+                baseModel = buildOpenAiModel(config, modelName, false, null, timeout);
                 break;
             case "openai-compatible":
             case "openai_compatible":
-                baseModel = buildOpenAiCompatibleModel(config, modelName, false);
+                baseModel = buildOpenAiCompatibleModel(config, modelName, false, timeout);
                 break;
             
             case "anthropic":
-                // AnthropicChatModel implements ChatModel in langchain4j 1.10.0
                 String anthropicKey = requireApiKey(config);
                 AnthropicChatModel.AnthropicChatModelBuilder anthropicBuilder = AnthropicChatModel.builder()
                     .apiKey(anthropicKey)
                     .modelName(modelName)
                     .temperature(getDoubleParam(config, 0.7, "temperature"))
                     .maxTokens(getIntParam(config, 4096, "max_tokens", "maxTokens"))
-                    .timeout(getTimeoutParam(config, 30));
+                    .timeout(timeout);
                 applyAnthropicOptionalParams(anthropicBuilder, config);
                 baseModel = (ChatModel) anthropicBuilder.build();
                 break;
             
             case "google_vertex_ai":
             case "google_anthropic_vertex":
-                // Handle service account credentials (like IDA implementation)
                 GoogleCredentials credentials = createGoogleCredentials(config);
                 
                 dev.langchain4j.model.vertexai.gemini.VertexAiGeminiChatModel.VertexAiGeminiChatModelBuilder builder = 
@@ -227,7 +232,7 @@ public class CopilotAgent {
                 break;
             
             default:
-                baseModel = buildOpenAiCompatibleModel(config, modelName, true);
+                baseModel = buildOpenAiCompatibleModel(config, modelName, true, timeout);
                 break;
         }
         
@@ -247,6 +252,36 @@ public class CopilotAgent {
                 return buildOpenAiStreamingModel(config, modelName, true, null);
             case "anthropic":
                 return buildAnthropicStreamingModel(config, modelName, null);
+            case "google_vertex_ai":
+            case "google_anthropic_vertex":
+                return buildVertexStreamingModel(config, modelName, null);
+            default:
+                throw new IllegalArgumentException(
+                    "Streaming is not supported for provider: " + provider);
+        }
+    }
+
+    /**
+     * Create a StreamingChatModel for sub-agent usage (no rate limiting).
+     * Uses a longer timeout (120s default) since sub-agents carry large contexts.
+     */
+    public static StreamingChatModel createSubAgentStreamingChatModel(CopilotConfig config) {
+        int timeoutSeconds = getIntParam(
+            config, 120,
+            "subagent_model_timeout", "subagent_timeout_seconds",
+            "deepagent_subagent_model_timeout");
+        Duration timeout = Duration.ofSeconds(timeoutSeconds);
+        String provider = config.getModelProvider();
+        String modelName = config.getModelName();
+
+        switch (provider) {
+            case "openai":
+                return buildOpenAiStreamingModel(config, modelName, false, null, timeout);
+            case "openai-compatible":
+            case "openai_compatible":
+                return buildOpenAiStreamingModel(config, modelName, true, null, timeout);
+            case "anthropic":
+                return buildAnthropicStreamingModel(config, modelName, null, timeout);
             case "google_vertex_ai":
             case "google_anthropic_vertex":
                 return buildVertexStreamingModel(config, modelName, null);
@@ -389,7 +424,7 @@ public class CopilotAgent {
             CopilotConfig config,
             String modelName,
             boolean requireBaseUrl) {
-        return buildOpenAiModel(config, modelName, requireBaseUrl, null);
+        return buildOpenAiModel(config, modelName, requireBaseUrl, null, null);
     }
 
     private static ChatModel buildOpenAiModel(
@@ -397,6 +432,15 @@ public class CopilotAgent {
             String modelName,
             boolean requireBaseUrl,
             Integer maxTokens) {
+        return buildOpenAiModel(config, modelName, requireBaseUrl, maxTokens, null);
+    }
+
+    private static ChatModel buildOpenAiModel(
+            CopilotConfig config,
+            String modelName,
+            boolean requireBaseUrl,
+            Integer maxTokens,
+            Duration timeout) {
         String baseUrl = getFirstStringParam(
             config,
             "base_url",
@@ -409,11 +453,12 @@ public class CopilotAgent {
             throw new IllegalArgumentException(
                 "Unsupported model provider: " + config.getModelProvider() + ". Missing base_url.");
         }
+        Duration resolvedTimeout = timeout != null ? timeout : getTimeoutParam(config, 30);
         OpenAiChatModel.OpenAiChatModelBuilder builder = OpenAiChatModel.builder()
             .apiKey(requireApiKey(config))
             .modelName(modelName)
             .temperature(getDoubleParam(config, 0.7, "temperature"))
-            .timeout(getTimeoutParam(config, 30));
+            .timeout(resolvedTimeout);
         Integer resolvedMaxTokens = maxTokens != null ? maxTokens : getIntParam(config, null, "max_tokens", "maxTokens");
         if (resolvedMaxTokens != null) {
             builder.maxTokens(resolvedMaxTokens);
@@ -430,6 +475,15 @@ public class CopilotAgent {
             String modelName,
             boolean requireBaseUrl,
             Integer maxTokens) {
+        return buildOpenAiStreamingModel(config, modelName, requireBaseUrl, maxTokens, null);
+    }
+
+    private static StreamingChatModel buildOpenAiStreamingModel(
+            CopilotConfig config,
+            String modelName,
+            boolean requireBaseUrl,
+            Integer maxTokens,
+            Duration timeout) {
         String baseUrl = getFirstStringParam(
             config,
             "base_url",
@@ -442,11 +496,12 @@ public class CopilotAgent {
             throw new IllegalArgumentException(
                 "Unsupported model provider: " + config.getModelProvider() + ". Missing base_url.");
         }
+        Duration resolvedTimeout = timeout != null ? timeout : getTimeoutParam(config, 30);
         OpenAiStreamingChatModel.OpenAiStreamingChatModelBuilder builder = OpenAiStreamingChatModel.builder()
             .apiKey(requireApiKey(config))
             .modelName(modelName)
             .temperature(getDoubleParam(config, 0.7, "temperature"))
-            .timeout(getTimeoutParam(config, 30));
+            .timeout(resolvedTimeout);
         Integer resolvedMaxTokens = maxTokens != null ? maxTokens : getIntParam(config, null, "max_tokens", "maxTokens");
         if (resolvedMaxTokens != null) {
             builder.maxTokens(resolvedMaxTokens);
@@ -462,11 +517,20 @@ public class CopilotAgent {
             CopilotConfig config,
             String modelName,
             Integer maxTokens) {
+        return buildAnthropicStreamingModel(config, modelName, maxTokens, null);
+    }
+
+    private static StreamingChatModel buildAnthropicStreamingModel(
+            CopilotConfig config,
+            String modelName,
+            Integer maxTokens,
+            Duration timeout) {
+        Duration resolvedTimeout = timeout != null ? timeout : getTimeoutParam(config, 30);
         AnthropicStreamingChatModel.AnthropicStreamingChatModelBuilder builder = AnthropicStreamingChatModel.builder()
             .apiKey(requireApiKey(config))
             .modelName(modelName)
             .temperature(getDoubleParam(config, 0.7, "temperature"))
-            .timeout(getTimeoutParam(config, 30));
+            .timeout(resolvedTimeout);
         Integer resolvedMaxTokens = maxTokens != null ? maxTokens : getIntParam(config, 4096, "max_tokens", "maxTokens");
         if (resolvedMaxTokens != null) {
             builder.maxTokens(resolvedMaxTokens);
@@ -500,7 +564,7 @@ public class CopilotAgent {
             CopilotConfig config,
             String modelName,
             boolean requireBaseUrl) {
-        return buildOpenAiCompatibleModel(config, modelName, requireBaseUrl, null);
+        return buildOpenAiCompatibleModel(config, modelName, requireBaseUrl, (Integer) null);
     }
 
     private static ChatModel buildOpenAiCompatibleModel(
@@ -508,6 +572,23 @@ public class CopilotAgent {
             String modelName,
             boolean requireBaseUrl,
             Integer maxTokens) {
+        return buildOpenAiCompatibleModel(config, modelName, requireBaseUrl, maxTokens, null);
+    }
+
+    private static ChatModel buildOpenAiCompatibleModel(
+            CopilotConfig config,
+            String modelName,
+            boolean requireBaseUrl,
+            Duration timeout) {
+        return buildOpenAiCompatibleModel(config, modelName, requireBaseUrl, null, timeout);
+    }
+
+    private static ChatModel buildOpenAiCompatibleModel(
+            CopilotConfig config,
+            String modelName,
+            boolean requireBaseUrl,
+            Integer maxTokens,
+            Duration timeout) {
         String baseUrl = getFirstStringParam(
             config,
             "base_url",
@@ -520,7 +601,7 @@ public class CopilotAgent {
             throw new IllegalArgumentException(
                 "Unsupported model provider: " + config.getModelProvider() + ". Missing base_url.");
         }
-        return buildOpenAiModel(config, modelName, requireBaseUrl, maxTokens);
+        return buildOpenAiModel(config, modelName, requireBaseUrl, maxTokens, timeout);
     }
 
     private static String getFirstStringParam(CopilotConfig config, String... keys) {
@@ -663,6 +744,17 @@ public class CopilotAgent {
             } catch (NumberFormatException e) {
                 return null;
             }
+        }
+        return null;
+    }
+
+    private static Boolean getBooleanParamNullable(CopilotConfig config, String... keys) {
+        Object value = getFirstParam(config, keys);
+        if (value instanceof Boolean) {
+            return (Boolean) value;
+        }
+        if (value instanceof String s) {
+            return Boolean.parseBoolean(s);
         }
         return null;
     }
@@ -822,6 +914,17 @@ public class CopilotAgent {
         if (thinkingBudgetTokens != null) {
             builder.thinkingBudgetTokens(thinkingBudgetTokens);
         }
+        // Prompt caching: caches system messages and tool definitions to save tokens
+        Boolean cacheSystemMessages = getBooleanParamNullable(config, "cache_system_messages", "cacheSystemMessages");
+        if (cacheSystemMessages != null) {
+            builder.cacheSystemMessages(cacheSystemMessages);
+        } else {
+            builder.cacheSystemMessages(true);
+        }
+        Boolean cacheTools = getBooleanParamNullable(config, "cache_tools", "cacheTools");
+        if (cacheTools != null) {
+            builder.cacheTools(cacheTools);
+        }
     }
 
     private static void applyAnthropicOptionalParams(AnthropicStreamingChatModel.AnthropicStreamingChatModelBuilder builder, CopilotConfig config) {
@@ -860,6 +963,17 @@ public class CopilotAgent {
         Integer thinkingBudgetTokens = getOptionalIntParam(config, "thinking_budget_tokens", "thinkingBudgetTokens");
         if (thinkingBudgetTokens != null) {
             builder.thinkingBudgetTokens(thinkingBudgetTokens);
+        }
+        // Prompt caching: caches system messages and tool definitions to save tokens
+        Boolean cacheSystemMessages = getBooleanParamNullable(config, "cache_system_messages", "cacheSystemMessages");
+        if (cacheSystemMessages != null) {
+            builder.cacheSystemMessages(cacheSystemMessages);
+        } else {
+            builder.cacheSystemMessages(true);
+        }
+        Boolean cacheTools = getBooleanParamNullable(config, "cache_tools", "cacheTools");
+        if (cacheTools != null) {
+            builder.cacheTools(cacheTools);
         }
     }
 

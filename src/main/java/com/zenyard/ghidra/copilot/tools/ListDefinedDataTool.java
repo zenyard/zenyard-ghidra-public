@@ -10,7 +10,7 @@ import ghidra.program.model.listing.DataIterator;
 import ghidra.program.model.listing.Listing;
 import ghidra.program.model.listing.Program;
 
-import com.zenyard.ghidra.copilot.tools.models.PagedResults;
+import com.zenyard.ghidra.copilot.tools.models.ToolOutput;
 
 /**
  * Tool to list defined data (global data structures).
@@ -23,13 +23,9 @@ public class ListDefinedDataTool {
         this.context = context;
     }
     
-    @Tool("Returns a paginated list of defined data (global data structures) in the program. " +
-          "If next_cursor is not empty, there are more pages which can be fetched using the cursor parameter.")
-    public PagedResults<String> listDefinedData(String cursor) {
+    @Tool("Returns a list of defined data (global data structures) in the program.")
+    public ToolOutput listDefinedData() {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
-        if (cursor != null) {
-            args.put("cursor", cursor);
-        }
         return ToolUtils.executeTool(context, "list_defined_data", args, () -> {
             try {
                 context.checkCancelled();
@@ -44,10 +40,6 @@ public class ListDefinedDataTool {
                 
                 List<String> allData = new ArrayList<>();
                 
-                // Parse cursor
-                Address cursorAddress = cursor != null ? ToolUtils.parseAddress(program, cursor) : null;
-                boolean pastCursor = (cursorAddress == null);
-                
                 while (dataIt.hasNext()) {
                     context.checkCancelled();
                     
@@ -57,15 +49,6 @@ public class ListDefinedDataTool {
                     }
                     
                     Address addr = data.getAddress();
-                    
-                    // Skip until past cursor
-                    if (!pastCursor) {
-                        if (addr.compareTo(cursorAddress) > 0) {
-                            pastCursor = true;
-                        } else {
-                            continue;
-                        }
-                    }
                     
                     String label = data.getLabel() != null ? data.getLabel() : "(unnamed)";
                     String valueRepr = "";
@@ -82,24 +65,11 @@ public class ListDefinedDataTool {
                     allData.add(dataStr);
                 }
                 
-                // Paginate
-                int pageSize = 200;
-                List<String> pageData;
-                String nextCursor = null;
-                
-                if (allData.size() > pageSize) {
-                    pageData = allData.subList(0, pageSize);
-                    // Extract address from last data string
-                    String lastData = pageData.get(pageSize - 1);
-                    int colonIndex = lastData.indexOf(':');
-                    if (colonIndex > 0) {
-                        nextCursor = lastData.substring(0, colonIndex).trim();
-                    }
-                } else {
-                    pageData = allData;
+                StringBuilder output = new StringBuilder();
+                for (String entry : allData) {
+                    output.append(entry).append("\n");
                 }
-                
-                return new PagedResults<>(pageData, nextCursor);
+                return ToolUtils.persistLargeOutput(context, "defined-data", output.toString(), allData.size());
             } catch (ToolExecutionException e) {
                 throw e;
             } catch (Exception e) {

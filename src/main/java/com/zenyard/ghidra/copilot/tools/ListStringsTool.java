@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Pattern;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.data.DataType;
@@ -12,8 +13,8 @@ import ghidra.program.model.listing.DataIterator;
 import ghidra.program.model.listing.Listing;
 import ghidra.program.model.listing.Program;
 
-import com.zenyard.ghidra.copilot.tools.models.PagedResults;
 import com.zenyard.ghidra.copilot.tools.models.StringData;
+import com.zenyard.ghidra.copilot.tools.models.ToolOutput;
 
 /**
  * Tool to list string literals in the binary.
@@ -26,16 +27,12 @@ public class ListStringsTool {
         this.context = context;
     }
     
-    @Tool("Returns a paginated list of string literals found in the binary. " +
-          "An optional filter can be provided to search for strings containing specific text. " +
-          "If next_cursor is not empty, there are more pages which can be fetched using the cursor parameter.")
-    public PagedResults<StringData> listStrings(String filter, String cursor) {
+    @Tool("List string literals found in the binary. Optional `filter` is a case-insensitive regex applied to string values.")
+    public ToolOutput listStrings(
+            @P(value = "Optional regex filter for string contents. Example: `password|token`.", required = false) String filter) {
         java.util.Map<String, Object> args = new java.util.HashMap<>();
         if (filter != null) {
             args.put("filter", filter);
-        }
-        if (cursor != null) {
-            args.put("cursor", cursor);
         }
         return ToolUtils.executeTool(context, "list_strings", args, () -> {
             try {
@@ -61,10 +58,6 @@ public class ListStringsTool {
                 
                 List<StringData> allStrings = new ArrayList<>();
                 
-                // Parse cursor
-                Address cursorAddress = cursor != null ? ToolUtils.parseAddress(program, cursor) : null;
-                boolean pastCursor = (cursorAddress == null);
-                
                 while (dataIt.hasNext()) {
                     context.checkCancelled();
                     
@@ -79,15 +72,6 @@ public class ListStringsTool {
                     }
                     
                     Address addr = data.getAddress();
-                    
-                    // Skip until past cursor
-                    if (!pastCursor) {
-                        if (addr.compareTo(cursorAddress) > 0) {
-                            pastCursor = true;
-                        } else {
-                            continue;
-                        }
-                    }
                     
                     String value = "";
                     try {
@@ -117,19 +101,15 @@ public class ListStringsTool {
                     ));
                 }
                 
-                // Paginate
-                int pageSize = 200;
-                List<StringData> pageStrings;
-                String nextCursor = null;
-                
-                if (allStrings.size() > pageSize) {
-                    pageStrings = allStrings.subList(0, pageSize);
-                    nextCursor = pageStrings.get(pageSize - 1).getAddress();
-                } else {
-                    pageStrings = allStrings;
+                StringBuilder output = new StringBuilder();
+                for (StringData str : allStrings) {
+                    output.append(str.getAddress())
+                        .append(" ")
+                        .append(str.getValue())
+                        .append("\n");
                 }
                 
-                return new PagedResults<>(pageStrings, nextCursor);
+                return ToolUtils.persistLargeOutput(context, "strings", output.toString(), allStrings.size());
             } catch (ToolExecutionException e) {
                 throw e;
             } catch (Exception e) {
