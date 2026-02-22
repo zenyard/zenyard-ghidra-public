@@ -237,18 +237,7 @@ jobs:
       SAFE_REF: ${{ needs.set-short-sha.outputs.safe_ref }}
 
     steps:
-<<<<<<< HEAD
-      - name: Validate short SHA
-        run: |
-          if [ -z "${{ needs.set-short-sha.outputs.short_sha }}" ]; then
-            echo "Error: short SHA output is empty"
-            exit 1
-          fi
-
-      - name: Download build artifact
-=======
       - name: Download all platform artifacts
->>>>>>> 77ab12c (Platform builds)
         uses: actions/download-artifact@v4
         with:
           pattern: zenyard-ghidra-*-${{ env.SAFE_REF }}-${{ env.SHORT_SHA }}
