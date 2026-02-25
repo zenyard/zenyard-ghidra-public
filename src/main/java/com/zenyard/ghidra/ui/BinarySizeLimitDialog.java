@@ -1,12 +1,19 @@
 package com.zenyard.ghidra.ui;
 
+import java.awt.Desktop;
 import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Cursor;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.net.URI;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
+import javax.swing.JTextArea;
 import javax.swing.border.EmptyBorder;
 
 import ghidra.framework.model.DomainFile;
@@ -18,27 +25,40 @@ import ghidra.program.model.listing.Program;
  */
 public class BinarySizeLimitDialog extends ZenyardDialogComponentProvider {
     private static final Set<String> SHOWN_PROGRAM_KEYS = ConcurrentHashMap.newKeySet();
+    private static final String CONTACT_EMAIL = "access@zenyard.ai";
 
     private final int maxSizeMb;
 
     public BinarySizeLimitDialog(int maxSizeMb) {
-        super("Binary Size Limit Exceeded", true);
+        super("Oops", true);
         this.maxSizeMb = maxSizeMb;
         buildPanel();
     }
 
     private void buildPanel() {
         JPanel contentPanel = new JPanel(new BorderLayout());
-        contentPanel.add(createTitlePanel("Binary Size Limit Exceeded"), BorderLayout.NORTH);
+        contentPanel.add(createTitlePanel("This Binary Is Over the Free Trial Limit"), BorderLayout.NORTH);
 
         JPanel mainPanel = new JPanel(new BorderLayout());
         mainPanel.setBorder(new EmptyBorder(12, 12, 12, 12));
 
-        String message = "<html>The demo version of Zenyard supports binaries up to "
-            + maxSizeMb
-            + "MB (full versions have no limit).<br><br>"
-            + "This binary exceeds the limit, so Zenyard has been disabled for this database.</html>";
-        mainPanel.add(new JLabel(message), BorderLayout.CENTER);
+        String message = "Oops, this binary is over the " + maxSizeMb + "MB limit for the Zenyard free trial.\n"
+            + "The full version supports larger files with no size limit.\n\n"
+            + "Need larger-file support?";
+        JTextArea messageArea = new JTextArea(message);
+        messageArea.setEditable(false);
+        messageArea.setOpaque(false);
+        messageArea.setLineWrap(true);
+        messageArea.setWrapStyleWord(true);
+        messageArea.setBorder(null);
+        messageArea.setFocusable(false);
+        mainPanel.add(messageArea, BorderLayout.CENTER);
+
+        JPanel contactPanel = new JPanel(new BorderLayout());
+        contactPanel.setOpaque(false);
+        contactPanel.setBorder(new EmptyBorder(6, 0, 0, 0));
+        contactPanel.add(createContactLabel(), BorderLayout.WEST);
+        mainPanel.add(contactPanel, BorderLayout.SOUTH);
 
         contentPanel.add(mainPanel, BorderLayout.CENTER);
         addWorkPanel(contentPanel);
@@ -48,6 +68,38 @@ public class BinarySizeLimitDialog extends ZenyardDialogComponentProvider {
     @Override
     protected void okCallback() {
         close();
+    }
+
+    private JLabel createContactLabel() {
+        JLabel contactLabel = new JLabel("Contact us");
+        contactLabel.setForeground(new Color(0, 102, 204));
+        contactLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        contactLabel.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent event) {
+                openContactEmail();
+            }
+        });
+        return contactLabel;
+    }
+
+    private void openContactEmail() {
+        if (!Desktop.isDesktopSupported()) {
+            return;
+        }
+        try {
+            URI emailUri = new URI("mailto:" + CONTACT_EMAIL);
+            Desktop desktop = Desktop.getDesktop();
+            if (desktop.isSupported(Desktop.Action.MAIL)) {
+                desktop.mail(emailUri);
+            }
+            else if (desktop.isSupported(Desktop.Action.BROWSE)) {
+                desktop.browse(emailUri);
+            }
+        }
+        catch (Exception ignored) {
+            // Best-effort link behavior only.
+        }
     }
 
     public static void showDialogIfNeeded(PluginTool tool, Program program, int maxSizeMb) {

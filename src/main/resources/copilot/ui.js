@@ -43,6 +43,7 @@
   let lastStreamingIndex = null;
   let lastStreamingText = "";
   let pendingSend = false;
+  let pendingTodoMinimized = null;
 
   const AUTOCOMPLETE_DEBOUNCE_MS = 200;
   const AUTOCOMPLETE_RESULT_LIMIT = 20;
@@ -1099,6 +1100,7 @@
     dot.className = "thinking-dot";
     label.appendChild(dot);
     const labelText = document.createElement("span");
+    labelText.className = "thinking-label-text";
     labelText.textContent = "Reasoning";
     label.appendChild(labelText);
     section.appendChild(label);
@@ -1113,8 +1115,11 @@
 
   function updateThinkingInBubble(nextState) {
     const thinkingText = nextState.thinkingText || "";
-    const isThinking = nextState.thinking && thinkingText.length > 0
-      && thinkingText !== "Reasoning...";
+    const inlineSubagentStream = (nextState.todoMinimized === true)
+      && ((nextState.subAgentType && String(nextState.subAgentType).trim())
+        || (nextState.subAgentStreamText && String(nextState.subAgentStreamText).trim()));
+    const isThinking = (nextState.thinking && thinkingText.length > 0
+      && thinkingText !== "Reasoning...") || inlineSubagentStream;
 
     // Find the last assistant message bubble
     const messages = chat.querySelectorAll(".message.assistant");
@@ -1139,9 +1144,24 @@
     const section = ensureThinkingSection(bubble);
     section.classList.remove("collapsed");
 
+    const labelText = section.querySelector(".thinking-label-text");
+    if (labelText) {
+      labelText.textContent = inlineSubagentStream ? "Task progress" : "Reasoning";
+    }
+
     const content = section.querySelector(".thinking-content");
     if (content) {
-      content.textContent = thinkingText;
+      let composed = thinkingText;
+      if (inlineSubagentStream) {
+        const agentType = (nextState.subAgentType && String(nextState.subAgentType).trim())
+          ? String(nextState.subAgentType).trim()
+          : "subagent";
+        const streamText = nextState.subAgentStreamText != null ? String(nextState.subAgentStreamText) : "";
+        const safeStream = streamText.trim().length > 0 ? streamText : "(waiting for output...)";
+        composed = composed ? `${composed}\n\n` : "";
+        composed += `Subagent stream (${agentType}):\n${safeStream}`;
+      }
+      content.textContent = composed;
     }
   }
 
@@ -1241,19 +1261,45 @@
     chat.scrollTop = chat.scrollHeight;
   }
 
+  function hasSubAgentStream(nextState) {
+    return Boolean(
+      (nextState.subAgentType && String(nextState.subAgentType).trim())
+      || (nextState.subAgentStreamText && String(nextState.subAgentStreamText).trim())
+    );
+  }
+
+  function shouldShowTodoSection(nextState) {
+    const todos = Array.isArray(nextState.todos) ? nextState.todos : [];
+    return todos.length > 0 || hasSubAgentStream(nextState);
+  }
+
+  function resolveTodoMinimized(nextState) {
+    const incoming = Boolean(nextState.todoMinimized);
+    if (pendingTodoMinimized === null) {
+      return incoming;
+    }
+    if (!shouldShowTodoSection(nextState)) {
+      pendingTodoMinimized = null;
+      return incoming;
+    }
+    if (incoming === pendingTodoMinimized) {
+      pendingTodoMinimized = null;
+      return incoming;
+    }
+    return pendingTodoMinimized;
+  }
+
   function renderTodos(nextState) {
     if (!todoSection || !todoList) {
       return;
     }
     const todos = Array.isArray(nextState.todos) ? nextState.todos : [];
-    const hasSubAgentStream = Boolean(
-      (nextState.subAgentType && String(nextState.subAgentType).trim())
-      || (nextState.subAgentStreamText && String(nextState.subAgentStreamText).trim())
-    );
+    const hasSubAgent = hasSubAgentStream(nextState);
     const completed = Array.isArray(nextState.completedTodos) ? new Set(nextState.completedTodos) : new Set();
     const failed = Array.isArray(nextState.failedTodos) ? new Set(nextState.failedTodos) : new Set();
     todoList.innerHTML = "";
-    if (todos.length === 0 && !hasSubAgentStream) {
+    if (todos.length === 0 && !hasSubAgent) {
+      pendingTodoMinimized = null;
       todoSection.classList.add("hidden");
       return;
     }
@@ -1356,7 +1402,7 @@
     state.toolHistory = Array.isArray(nextState.toolHistory) ? nextState.toolHistory : [];
     state.completedTodos = Array.isArray(nextState.completedTodos) ? nextState.completedTodos : [];
     state.failedTodos = Array.isArray(nextState.failedTodos) ? nextState.failedTodos : [];
-    state.todoMinimized = Boolean(nextState.todoMinimized);
+    state.todoMinimized = resolveTodoMinimized(nextState);
     state.subAgentType = nextState.subAgentType || null;
     state.subAgentStreamText = nextState.subAgentStreamText || null;
     logToHost("CopilotUI.darkTheme type=" + typeof nextState.darkTheme +
@@ -1369,10 +1415,10 @@
         app.dataset.theme = theme;
       }
     }
-    renderMessages(nextState);
-    renderTodos(nextState);
-    renderTools(nextState);
-    renderSubAgent(nextState);
+    renderMessages(state);
+    renderTodos(state);
+    renderTools(state);
+    renderSubAgent(state);
     applyAutocompleteState(state.autocomplete);
   }
 
@@ -1498,6 +1544,7 @@
   if (todoToggle) {
     todoToggle.addEventListener("click", () => {
       const nextMinimized = !Boolean(state.todoMinimized);
+      pendingTodoMinimized = nextMinimized;
       state.todoMinimized = nextMinimized;
       renderTodos(state);
       dispatchBridgeEvent("copilot-toggle-todos", { minimized: nextMinimized });

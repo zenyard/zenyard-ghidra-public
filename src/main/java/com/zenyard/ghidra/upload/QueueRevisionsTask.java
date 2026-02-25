@@ -83,6 +83,7 @@ public class QueueRevisionsTask extends EventAwareTask {
         types.add(ZenyardEvent.EventType.UPLOAD_ORIGINAL_FILES_COMPLETE);
         types.add(ZenyardEvent.EventType.INITIAL_DIALOG_CONFIRMED);
         types.add(ZenyardEvent.EventType.PROGRAM_DEACTIVATED);
+        types.add(ZenyardEvent.EventType.BINARY_PAUSED_UPDATED);
         return types;
     }
     
@@ -97,7 +98,15 @@ public class QueueRevisionsTask extends EventAwareTask {
         } else if (event.getType() == ZenyardEvent.EventType.PROGRAM_DEACTIVATED) {
             synchronized (waitLock) {
                 shouldStop = true;
-                waitLock.notify(); // Wake up any waiting threads
+                waitLock.notify();
+            }
+        } else if (event.getType() == ZenyardEvent.EventType.BINARY_PAUSED_UPDATED) {
+            Boolean paused = event.getPayloadValue("paused", Boolean.class);
+            if (Boolean.TRUE.equals(paused)) {
+                synchronized (waitLock) {
+                    shouldStop = true;
+                    waitLock.notify();
+                }
             }
         }
     }
@@ -114,6 +123,9 @@ public class QueueRevisionsTask extends EventAwareTask {
     protected void doRun(TaskMonitor monitor) {
         try {
             if (isUsageBlocked()) {
+                return;
+            }
+            if (isBinaryPaused()) {
                 return;
             }
             ZenyardProgramProperties props = new ZenyardProgramProperties(program);
@@ -195,6 +207,11 @@ public class QueueRevisionsTask extends EventAwareTask {
             return true;
         }
         return false;
+    }
+
+    private boolean isBinaryPaused() {
+        ZenyardProgramProperties props = new ZenyardProgramProperties(program);
+        return "true".equals(props.getString("binary_paused"));
     }
     
     /**
@@ -388,6 +405,17 @@ public class QueueRevisionsTask extends EventAwareTask {
                 Revision revision = parentTask.flushRevision(buffer, isInitialUpload, syncStatusStorage);
                 revisions.add(revision);
             }
+
+            // Only the last revision requests global analysis (mirrors IDA behavior).
+            if (!revisions.isEmpty()) {
+                int lastIdx = revisions.size() - 1;
+                Revision last = revisions.get(lastIdx);
+                revisions.set(lastIdx, last.withPerformGlobalAnalysis(true));
+                Msg.info(this, "Zenyard: Marked last revision for global analysis ("
+                    + (lastIdx + 1) + "/" + revisions.size()
+                    + ", objects=" + (last.getObjects() != null ? last.getObjects().size() : 0)
+                    + "): performGlobalAnalysis=true");
+            }
             
             // Mark queuing as complete
             ZenyardProgramProperties props = new ZenyardProgramProperties(program);
@@ -480,11 +508,18 @@ public class QueueRevisionsTask extends EventAwareTask {
         private final List<ModelObject> objects;
         private final List<QueuedObject> queuedObjects;
         private final boolean isInitialAnalysis;
+        private final boolean performGlobalAnalysis;
         
         public Revision(List<ModelObject> objects, List<QueuedObject> queuedObjects, boolean isInitialAnalysis) {
+            this(objects, queuedObjects, isInitialAnalysis, false);
+        }
+
+        public Revision(List<ModelObject> objects, List<QueuedObject> queuedObjects,
+                boolean isInitialAnalysis, boolean performGlobalAnalysis) {
             this.objects = objects;
             this.queuedObjects = queuedObjects;
             this.isInitialAnalysis = isInitialAnalysis;
+            this.performGlobalAnalysis = performGlobalAnalysis;
         }
         
         public List<ModelObject> getObjects() {
@@ -497,6 +532,14 @@ public class QueueRevisionsTask extends EventAwareTask {
         
         public boolean isInitialAnalysis() {
             return isInitialAnalysis;
+        }
+
+        public boolean isPerformGlobalAnalysis() {
+            return performGlobalAnalysis;
+        }
+
+        public Revision withPerformGlobalAnalysis(boolean performGlobalAnalysis) {
+            return new Revision(objects, queuedObjects, isInitialAnalysis, performGlobalAnalysis);
         }
     }
     

@@ -43,7 +43,7 @@ public class UsageDetailsDialog extends ZenyardDialogComponentProvider {
         gbc.gridy++;
         mainPanel.add(new JLabel("Usage:"), gbc);
         gbc.gridx = 1;
-        String usageText = usageState.getDisplayText();
+        String usageText = usageState.getDisplayTextForDialog();
         if (usageText == null || usageText.isEmpty()) {
             usageText = "Not available";
         }

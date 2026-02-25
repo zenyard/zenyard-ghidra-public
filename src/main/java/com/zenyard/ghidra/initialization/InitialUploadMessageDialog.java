@@ -33,7 +33,7 @@ public class InitialUploadMessageDialog extends ZenyardDialogComponentProvider {
     private JCheckBox dontShowAgainCheckBox;
     
     public InitialUploadMessageDialog(PluginTool tool, ZenyardOptions options) {
-        super("Zenyard Is Now Analyzing in the Background", true);
+        super("Notification", true);
         this.tool = tool;
         this.options = options;
         
@@ -42,7 +42,7 @@ public class InitialUploadMessageDialog extends ZenyardDialogComponentProvider {
     
     private void buildPanel() {
         JPanel contentPanel = new JPanel(new BorderLayout());
-        JPanel titlePanel = createTitlePanel("Zenyard Is Now Analyzing in the Background");
+        JPanel titlePanel = createTitlePanel("Analysis Will Continue in the Background");
         contentPanel.add(titlePanel, BorderLayout.NORTH);
 
         JPanel mainPanel = new JPanel(new GridBagLayout());

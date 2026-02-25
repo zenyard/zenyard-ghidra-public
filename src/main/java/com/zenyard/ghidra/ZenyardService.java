@@ -20,6 +20,7 @@ import com.zenyard.ghidra.events.ZenyardEvent;
 import com.zenyard.ghidra.illum.IlluminatorController;
 import com.zenyard.ghidra.initialization.InitialQuestionsDialog;
 import com.zenyard.ghidra.status.AnalysisProgressMonitor;
+import com.zenyard.ghidra.status.QueuePositionMonitor;
 import com.zenyard.ghidra.status.StatusBarActions;
 import com.zenyard.ghidra.status.StatusBarManager;
 import com.zenyard.ghidra.status.StatusBarState;
@@ -76,6 +77,7 @@ public class ZenyardService {
     private TrackChangesTaskManager trackChangesTaskManager;
     private EventDispatcher eventDispatcher;
     private AnalysisProgressMonitor analysisProgressMonitor;
+    private QueuePositionMonitor queuePositionMonitor;
     private volatile boolean userConfigFetchInFlight;
     private volatile boolean userConfigFetched;
     private volatile long lastUserConfigFetchAttemptMs;
@@ -138,6 +140,8 @@ public class ZenyardService {
         
         // Initialize analysis progress monitor
         this.analysisProgressMonitor = new AnalysisProgressMonitor(statusBarManager, eventDispatcher);
+        // Initialize queue position monitor
+        this.queuePositionMonitor = new QueuePositionMonitor(statusBarManager, eventDispatcher);
         // Keep a service-level connectivity flag for UI consumers (e.g. Copilot send button).
         // This is updated by PollServerStatusTask / DownloadInferencesTask via SERVER_CONNECTIVITY_CHANGED.
         eventDispatcher.subscribe(serverConnectivityConsumer);
@@ -397,6 +401,10 @@ public class ZenyardService {
                     showUsageBlockedDialog();
                     return;
                 }
+                if (isBinaryPaused()) {
+                    showBinaryPausedDialog();
+                    return;
+                }
                 if (statusBarManager == null || eventDispatcher == null) {
                     Msg.warn(this, "Status bar rerun ignored: missing dependencies");
                     return;
@@ -433,6 +441,10 @@ public class ZenyardService {
                 }
                 if (isUsageBlocked()) {
                     showUsageBlockedDialog();
+                    return;
+                }
+                if (isBinaryPaused()) {
+                    showBinaryPausedDialog();
                     return;
                 }
                 if (statusBarManager == null || eventDispatcher == null) {
@@ -499,9 +511,37 @@ public class ZenyardService {
     private void showUsageBlockedDialog() {
         UsageState.showBlockedDialog(plugin.getTool().getActiveWindow(), usageState);
     }
+
+    /**
+     * Check if the current binary is paused (persisted flag set by PollServerStatusTask).
+     */
+    public boolean isBinaryPaused() {
+        Program program = getCurrentProgram();
+        if (program == null || program.isClosed()) {
+            return false;
+        }
+        ZenyardProgramProperties props = new ZenyardProgramProperties(program);
+        return "true".equals(props.getString("binary_paused"));
+    }
+
+    private void showBinaryPausedDialog() {
+        UsageState state = usageState;
+        if (state != null && state.isBlocked()) {
+            UsageState.showBlockedDialog(plugin.getTool().getActiveWindow(), state);
+        } else {
+            Msg.showError(this, plugin.getTool().getActiveWindow(),
+                "Analysis Paused",
+                "Analysis is currently paused for this binary.\n"
+                    + "Check your usage quota or contact Zenyard support.");
+        }
+    }
     
     public AnalysisProgressMonitor getAnalysisProgressMonitor() {
         return analysisProgressMonitor;
+    }
+
+    public QueuePositionMonitor getQueuePositionMonitor() {
+        return queuePositionMonitor;
     }
     
     /**

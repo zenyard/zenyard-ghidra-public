@@ -60,7 +60,13 @@ public class ZenyardEvent {
         SERVER_CONNECTIVITY_CHANGED,
 
         /** User usage updated (payload: usageState) */
-        USAGE_UPDATED
+        USAGE_UPDATED,
+
+        /** Queue position updated (payload: queuePosition = Integer or null) */
+        QUEUE_POSITION_UPDATED,
+
+        /** Binary paused state changed (payload: paused = Boolean) */
+        BINARY_PAUSED_UPDATED
     }
     
     private final EventType type;

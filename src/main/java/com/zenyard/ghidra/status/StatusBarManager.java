@@ -200,7 +200,7 @@ public class StatusBarManager {
         if (isEulaRejected()) {
             state = StatusBarState.empty()
                 .withShowReviewTerms(true)
-                .withStatus("Zenyard disabled — review terms to re-enable")
+                .withStatus("Zenyard disabled")
                 .withShowWarningIcon(current.isShowWarningIcon())
                 .withUsageDisplay(current.getUsageText(), current.getUsageTooltip(),
                     current.isUsageVisible(), current.getUsageLevel());
@@ -225,6 +225,17 @@ public class StatusBarManager {
                 state = StatusBarState.empty()
                     .withStatus(status)
                     .withShowWarningIcon(true)
+                    .withShowReviewTerms(showReviewTerms)
+                    .withUsageDisplay(current.getUsageText(), current.getUsageTooltip(),
+                        current.isUsageVisible(), current.getUsageLevel());
+                state = applyServerUnreachableIfNeeded(state, disconnected);
+                viewModel.updateState(state);
+                return;
+            }
+            if (isBinaryPaused()) {
+                state = StatusBarState.empty()
+                    .withStatus("Analysis paused — click Usage for details")
+                    .withShowWarningIcon(current.isShowWarningIcon())
                     .withShowReviewTerms(showReviewTerms)
                     .withUsageDisplay(current.getUsageText(), current.getUsageTooltip(),
                         current.isUsageVisible(), current.getUsageLevel());
@@ -343,6 +354,15 @@ public class StatusBarManager {
         String deferred = props.getString("initial_questions_deferred");
         String initialUploadComplete = props.getString("initial_upload_complete");
         return "true".equals(deferred) && !"true".equals(initialUploadComplete);
+    }
+
+    private boolean isBinaryPaused() {
+        Program program = getCurrentProgramSafely();
+        if (program == null) {
+            return false;
+        }
+        ZenyardProgramProperties props = new ZenyardProgramProperties(program);
+        return "true".equals(props.getString("binary_paused"));
     }
 
     private boolean hasPersistedBinarySizeLimitExceeded() {

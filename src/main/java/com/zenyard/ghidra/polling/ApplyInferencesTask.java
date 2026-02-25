@@ -157,14 +157,23 @@ public class ApplyInferencesTask extends StatusBarAwareTask {
         int[] totalApplied = new int[] { 0 };
         
         try {                        
-            // Count total inferences to apply for progress tracking
-            int totalToApply = inferenceQueue.size();
-            if (totalToApply == 0) {
+            // The inference queue can grow while we are applying results, so a percentage
+            // computed from an initial snapshot can exceed 100%. Use an indeterminate
+            // progress indicator instead.
+            if (inferenceQueue.isEmpty()) {
                 return;
             }
             
             try {
                 runWithStatusBar(() -> {
+                    if (statusBarManager != null) {
+                        statusBarManager.updateTaskStatus(
+                            TASK_ID,
+                            "Applying results",
+                            null,
+                            true
+                        );
+                    }
                     // Apply all available inferences in batches
                     while (!inferenceQueue.isEmpty() && !shouldStop) {
                         // Collect a batch of inferences from the queue
@@ -180,11 +189,13 @@ public class ApplyInferencesTask extends StatusBarAwareTask {
                             try {
                                 inferenceApplier.applyInferences(program, batch, monitor, () -> shouldStop);
                                 totalApplied[0] += batch.size();
-                                // Update status bar with progress
+                                // Update status bar (indeterminate; queue can grow while applying)
                                 if (statusBarManager != null) {
-                                    int progressPercent = calculateProgressPercent(totalApplied[0], totalToApply);
-                                    String statusMessage = "Applying results";
-                                    statusBarManager.updateTaskStatus(TASK_ID, statusMessage, progressPercent, false);
+                                    int queued = inferenceQueue.size();
+                                    String statusMessage = "Applying results"
+                                        + " (applied " + totalApplied[0]
+                                        + ", queued " + queued + ")";
+                                    statusBarManager.updateTaskStatus(TASK_ID, statusMessage, null, true);
                                     Msg.info(this, "ApplyInferencesTask: Applied " + batch.size() + " results");
                                 }
                             } catch (Exception e) {
@@ -239,12 +250,9 @@ public class ApplyInferencesTask extends StatusBarAwareTask {
     }
     
     /**
-     * Calculates the progress percentage for applied inferences.
-     * 
-     * @param applied Number of inferences applied
-     * @param total Total number of inferences to apply
-     * @return Progress percentage (0-100)
+     * Kept for API symmetry with other tasks; not currently used.
      */
+    @SuppressWarnings("unused")
     private int calculateProgressPercent(int applied, int total) {
         if (total == 0) {
             return 100;

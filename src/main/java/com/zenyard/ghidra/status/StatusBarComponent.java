@@ -38,6 +38,9 @@ public class StatusBarComponent extends JPanel {
     private final IconRegistry iconRegistry;
 
     private final JPanel unifiedStatusPanel;
+    private final JPanel leftPanel;
+    private final JPanel centerPanel;
+    private final JPanel rightPanel;
     private final JLabel logoLabel;
     private final JLabel unifiedStatusLabel;
     private final JProgressBar unifiedProgressBar;
@@ -62,15 +65,33 @@ public class StatusBarComponent extends JPanel {
         setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
 
         unifiedStatusPanel = new JPanel();
-        unifiedStatusPanel.setLayout(new BoxLayout(unifiedStatusPanel, BoxLayout.X_AXIS));
+        // Split into 3 regions so the progress bar can be centered between the left status
+        // text and whatever appears on the right (usage, etc).
+        unifiedStatusPanel.setLayout(new BorderLayout());
         unifiedStatusPanel.setOpaque(false);
         unifiedStatusPanel.setMinimumSize(new Dimension(200, PANEL_HEIGHT));
         unifiedStatusPanel.setPreferredSize(new Dimension(400, PANEL_HEIGHT));
 
+        leftPanel = new JPanel();
+        leftPanel.setLayout(new BoxLayout(leftPanel, BoxLayout.X_AXIS));
+        leftPanel.setOpaque(false);
+
+        centerPanel = new JPanel();
+        centerPanel.setLayout(new BoxLayout(centerPanel, BoxLayout.X_AXIS));
+        centerPanel.setOpaque(false);
+
+        rightPanel = new JPanel();
+        rightPanel.setLayout(new BoxLayout(rightPanel, BoxLayout.X_AXIS));
+        rightPanel.setOpaque(false);
+
+        unifiedStatusPanel.add(leftPanel, BorderLayout.WEST);
+        unifiedStatusPanel.add(centerPanel, BorderLayout.CENTER);
+        unifiedStatusPanel.add(rightPanel, BorderLayout.EAST);
+
         logoLabel = new JLabel();
         logoLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
         setIcon(logoLabel, "icons/zenyard_icon.png", "Z");
-        unifiedStatusPanel.add(logoLabel);
+        leftPanel.add(logoLabel);
 
         initialUploadButton = new JButton();
         initialUploadButton.setToolTipText("Click to analyze with Zenyard");
@@ -83,8 +104,8 @@ public class StatusBarComponent extends JPanel {
             }
         });
 
-        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_SMALL));
-        unifiedStatusPanel.add(initialUploadButton);
+        leftPanel.add(Box.createHorizontalStrut(SPACING_SMALL));
+        leftPanel.add(initialUploadButton);
 
         rerunButton = new JButton();
         rerunButton.setToolTipText("Rerun analysis");
@@ -97,17 +118,17 @@ public class StatusBarComponent extends JPanel {
             }
         });
 
-        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_SMALL));
-        unifiedStatusPanel.add(rerunButton);
-        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
+        leftPanel.add(Box.createHorizontalStrut(SPACING_SMALL));
+        leftPanel.add(rerunButton);
+        leftPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
 
         warningIconLabel = new JLabel();
         warningIconLabel.setToolTipText("Can't reach server");
         warningIconLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
         warningIconLabel.setVisible(false);
         setIcon(warningIconLabel, "icons/warning_icon.png", "!");
-        unifiedStatusPanel.add(warningIconLabel);
-        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
+        leftPanel.add(warningIconLabel);
+        leftPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
 
         reviewTermsButton = new JButton("Review Terms");
         reviewTermsButton.setToolTipText("Review Terms of Use");
@@ -118,8 +139,8 @@ public class StatusBarComponent extends JPanel {
                 actions.onReviewTerms();
             }
         });
-        unifiedStatusPanel.add(reviewTermsButton);
-        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
+        leftPanel.add(reviewTermsButton);
+        leftPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
 
         unifiedStatusLabel = new GDLabel("");
         unifiedStatusLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
@@ -131,21 +152,24 @@ public class StatusBarComponent extends JPanel {
                 }
             }
         });
-        unifiedStatusPanel.add(unifiedStatusLabel);
-        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
+        leftPanel.add(unifiedStatusLabel);
 
         unifiedProgressBar = new JProgressBar(0, 100);
         unifiedProgressBar.setStringPainted(false);
         unifiedProgressBar.setAlignmentY(Component.CENTER_ALIGNMENT);
-        unifiedProgressBar.setPreferredSize(new Dimension(PROGRESS_WIDTH, 18));
+        Dimension progressSize = new Dimension(PROGRESS_WIDTH, 18);
+        unifiedProgressBar.setPreferredSize(progressSize);
+        unifiedProgressBar.setMaximumSize(progressSize);
         unifiedProgressBar.setVisible(false);
-        unifiedStatusPanel.add(unifiedProgressBar);
-        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_SMALL));
+        centerPanel.add(Box.createHorizontalGlue());
+        centerPanel.add(unifiedProgressBar);
+        centerPanel.add(Box.createHorizontalStrut(SPACING_SMALL));
 
         unifiedProgressLabel = new GDLabel("");
         unifiedProgressLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
         unifiedProgressLabel.setVisible(false);
-        unifiedStatusPanel.add(unifiedProgressLabel);
+        centerPanel.add(unifiedProgressLabel);
+        centerPanel.add(Box.createHorizontalGlue());
 
         usageLabel = new GDLabel("");
         usageLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
@@ -159,9 +183,8 @@ public class StatusBarComponent extends JPanel {
                 }
             }
         });
-        unifiedStatusPanel.add(Box.createHorizontalGlue());
-        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
-        unifiedStatusPanel.add(usageLabel);
+        rightPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
+        rightPanel.add(usageLabel);
         usageBaseFont = usageLabel.getFont();
 
         unifiedStatusPanel.setVisible(true);

@@ -644,6 +644,32 @@ public class InferenceStorage {
     }
 
     /**
+     * Remove all stored metadata for a struct UUID: registry entry, name, path,
+     * effective name, fingerprint, and the global inference record.
+     */
+    public void removeStructMetadata(java.util.UUID structId) {
+        if (structId == null) {
+            return;
+        }
+        String idStr = structId.toString();
+
+        Map<UUID, StructDefinition> registry = getStructRegistryDefinitions();
+        if (registry.remove(structId) != null) {
+            saveStructRegistryDefinitions(registry);
+        }
+
+        Map<String, String> effectiveNames = getStructEffectiveNamesInternal();
+        if (effectiveNames.remove(idStr) != null) {
+            properties.setString(STRUCT_EFFECTIVE_NAMES_KEY, gson.toJson(effectiveNames));
+        }
+
+        properties.removeOption(STRUCT_PREFIX + "name." + idStr);
+        properties.removeOption(STRUCT_PREFIX + "path." + idStr);
+        properties.removeOption(STRUCT_PREFIX + "fingerprint." + idStr);
+        properties.removeOption(INFERENCE_PREFIX + "global." + idStr + ".struct_definition");
+    }
+
+    /**
      * Add or replace a deferred parameter type inference.
      */
     public void enqueueDeferredParameterType(ParameterType inference, int attempts) {

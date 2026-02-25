@@ -9,6 +9,9 @@ import com.zenyard.ghidra.api.generated.ApiClient;
 import com.zenyard.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.ghidra.api.generated.api.DefaultApi;
 import com.zenyard.ghidra.api.generated.ApiException;
+import com.zenyard.ghidra.api.generated.model.BinaryState;
+import com.zenyard.ghidra.api.generated.model.BinaryStatePaused;
+import com.zenyard.ghidra.api.generated.model.BinaryStateQueued;
 import com.zenyard.ghidra.api.generated.model.BinaryStatus;
 import com.zenyard.ghidra.api.generated.model.RevisionAnalysisStatus;
 import com.zenyard.ghidra.events.ZenyardEvent;
@@ -54,6 +57,14 @@ public class PollServerStatusTask extends EventAwareTask {
     private final Object waitLock = new Object();
     private volatile boolean binaryIdAvailable = false;
     private UUID binaryId = null;
+    
+    // Queue position tracking (only published on change, never on error)
+    private Integer lastPublishedQueuePosition = null;
+    private boolean hasPublishedQueuePosition = false;
+    
+    // Paused state tracking (only published on change, never on error)
+    private Boolean lastPublishedPaused = null;
+    private boolean hasPublishedPaused = false;
     
     public PollServerStatusTask(PluginTool tool, ApiClient apiClient, Program program, EventDispatcher eventDispatcher) {
         super("Poll Server Status", true, false, false, eventDispatcher);
@@ -169,6 +180,13 @@ public class PollServerStatusTask extends EventAwareTask {
                     // Poll server status
                     BinaryStatus status = binariesApi.getDetailedStatus(binaryId);
                     
+                    // Extract and publish queue position from BinaryStatus.state
+                    publishQueuePositionIfChanged(status);
+                    
+                    // Extract and publish paused state from BinaryStatus.state
+                    publishPausedStateIfChanged(status);
+                    boolean paused = extractIsPaused(status);
+                    
                     // Refresh local revision each poll to avoid stale progress/ETA calculations
                     int currentLocalRevision = getLocalRevision();
                     if (currentLocalRevision != localRevision) {
@@ -200,65 +218,60 @@ public class PollServerStatusTask extends EventAwareTask {
                         Msg.debug(this, "Server revision unchanged: " + fractionalServerRevision + " (old: " + oldFractionalServerRevision + ")");
                     }
                     
-                    // Track RemoteAnalysisStats when analysis starts
-                    boolean isAnalyzing = (status.getRevisionAnalyses() != null && !status.getRevisionAnalyses().isEmpty());
-                    Msg.debug(this, "PollServerStatusTask: isAnalyzing=" + isAnalyzing 
-                        + ", revision_analyses=" + (status.getRevisionAnalyses() != null ? status.getRevisionAnalyses().size() : 0));
-                    
-                    // Check if analysis was in progress but server shows it's not analyzing anymore
-                    // This handles the case where analysis completed while program was closed
-                    if (!isAnalyzing && isAnalysisInProgress()) {
-                        // Analysis flag says in progress, but server says not analyzing
-                        // This means analysis completed while program was closed
-                        Msg.info(this, "PollServerStatusTask: Analysis completed while program was closed");
-                        clearRemoteAnalysisStats(); // This also clears analysis_in_progress flag
-                        setRemoteAnalysisCompletedOnce();
-                        // Publish null status to clear the status bar immediately
-                        publishAnalysisStatus(null, fractionalServerRevision);
-                    }
-                    
-                    if (isAnalyzing && getRemoteAnalysisStats() == null) {
-                        // Analysis just started - create stats with fractional revision for accuracy
-                        // Use wall-clock time (milliseconds since epoch) for persistence across restarts
-                        setRemoteAnalysisStats(new RemoteAnalysisStats(System.currentTimeMillis(), fractionalServerRevision));
-                        Msg.debug(this, "PollServerStatusTask: Analysis started, created RemoteAnalysisStats");
-                    }
-                    boolean hadAnalysisStats = (getRemoteAnalysisStats() != null);
-                    
-                    // Check if client is in sync with server (fractional compare, like IDA)
-                    boolean clientInSync = Math.abs(localRevision - fractionalServerRevision) < REVISION_EPS;
-
-                    if (clientInSync) {
-                        // Client is in sync - analysis has completed
-                        // Store last_done_revision and clear stats
-                        setLastDoneRevision(localRevision);
+                    // When paused, suppress analysis progress tracking entirely so
+                    // the status bar doesn't misleadingly show "Analyzing in background".
+                    if (paused) {
                         if (getRemoteAnalysisStats() != null) {
-                            clearRemoteAnalysisStats(); // This also clears analysis_in_progress flag
-                        } else if (isAnalysisInProgress()) {
-                            // Stats were cleared but flag wasn't - clear it now
-                            // This handles the case where analysis completed while program was closed
-                            setAnalysisInProgress(false);
-                            Msg.debug(this, "PollServerStatusTask: Analysis completed while program was closed, clearing flag");
+                            clearRemoteAnalysisStats();
                         }
-                        // Wait for client to be ahead
-                        waitForClientAhead(monitor, localRevision);
-                        localRevision = getLocalRevision();
-                    }
-                    
-                    // Calculate and publish analysis status (progress and ETA).
-                    // IDA-style reactive completion: if calculateAnalysisStatus() returns null while we had stats
-                    // and the client is in sync, signal completion by publishing a null status.
-                    AnalysisStatus analysisStatus = calculateAnalysisStatus(localRevision, fractionalServerRevision);
-                    if (analysisStatus != null) {
-                        Msg.debug(this, "PollServerStatusTask: Publishing ANALYSIS_STATUS_UPDATED, progress=" 
-                            + analysisStatus.getProgress() + ", eta=" + analysisStatus.getEta());
-                        publishAnalysisStatus(analysisStatus, fractionalServerRevision);
-                    } else if (clientInSync && hadAnalysisStats) {
-                        Msg.debug(this, "PollServerStatusTask: Client in sync, signaling completion");
-                        setRemoteAnalysisCompletedOnce();
                         publishAnalysisStatus(null, fractionalServerRevision);
                     } else {
-                        Msg.debug(this, "PollServerStatusTask: No analysis status to publish");
+                        // Track RemoteAnalysisStats when analysis starts
+                        boolean isAnalyzing = (status.getRevisionAnalyses() != null && !status.getRevisionAnalyses().isEmpty());
+                        Msg.debug(this, "PollServerStatusTask: isAnalyzing=" + isAnalyzing 
+                            + ", revision_analyses=" + (status.getRevisionAnalyses() != null ? status.getRevisionAnalyses().size() : 0));
+                        
+                        // Check if analysis was in progress but server shows it's not analyzing anymore
+                        if (!isAnalyzing && isAnalysisInProgress()) {
+                            Msg.info(this, "PollServerStatusTask: Analysis completed while program was closed");
+                            clearRemoteAnalysisStats();
+                            setRemoteAnalysisCompletedOnce();
+                            publishAnalysisStatus(null, fractionalServerRevision);
+                        }
+                        
+                        if (isAnalyzing && getRemoteAnalysisStats() == null) {
+                            setRemoteAnalysisStats(new RemoteAnalysisStats(System.currentTimeMillis(), fractionalServerRevision));
+                            Msg.debug(this, "PollServerStatusTask: Analysis started, created RemoteAnalysisStats");
+                        }
+                        boolean hadAnalysisStats = (getRemoteAnalysisStats() != null);
+                        
+                        // Check if client is in sync with server (fractional compare, like IDA)
+                        boolean clientInSync = Math.abs(localRevision - fractionalServerRevision) < REVISION_EPS;
+
+                        if (clientInSync) {
+                            setLastDoneRevision(localRevision);
+                            if (getRemoteAnalysisStats() != null) {
+                                clearRemoteAnalysisStats();
+                            } else if (isAnalysisInProgress()) {
+                                setAnalysisInProgress(false);
+                                Msg.debug(this, "PollServerStatusTask: Analysis completed while program was closed, clearing flag");
+                            }
+                            waitForClientAhead(monitor, localRevision);
+                            localRevision = getLocalRevision();
+                        }
+                        
+                        AnalysisStatus analysisStatus = calculateAnalysisStatus(localRevision, fractionalServerRevision);
+                        if (analysisStatus != null) {
+                            Msg.debug(this, "PollServerStatusTask: Publishing ANALYSIS_STATUS_UPDATED, progress=" 
+                                + analysisStatus.getProgress() + ", eta=" + analysisStatus.getEta());
+                            publishAnalysisStatus(analysisStatus, fractionalServerRevision);
+                        } else if (clientInSync && hadAnalysisStats) {
+                            Msg.debug(this, "PollServerStatusTask: Client in sync, signaling completion");
+                            setRemoteAnalysisCompletedOnce();
+                            publishAnalysisStatus(null, fractionalServerRevision);
+                        } else {
+                            Msg.debug(this, "PollServerStatusTask: No analysis status to publish");
+                        }
                     }
                     
                     // Reset connection failure counter on successful poll
@@ -680,6 +693,79 @@ public class PollServerStatusTask extends EventAwareTask {
         }
     }
     
+    /**
+     * Extract queue position from BinaryStatus and publish if changed.
+     * Only called on successful getDetailedStatus responses (never on errors).
+     */
+    private void publishQueuePositionIfChanged(BinaryStatus status) {
+        Integer queuePosition = extractQueuePosition(status);
+        boolean changed = !hasPublishedQueuePosition
+            || !java.util.Objects.equals(lastPublishedQueuePosition, queuePosition);
+        if (!changed) {
+            return;
+        }
+        lastPublishedQueuePosition = queuePosition;
+        hasPublishedQueuePosition = true;
+
+        java.util.Map<String, Object> payload = new java.util.HashMap<>();
+        payload.put("queuePosition", queuePosition);
+        publishEvent(new ZenyardEvent(ZenyardEvent.EventType.QUEUE_POSITION_UPDATED,
+            getTaskTitle(), payload));
+        Msg.debug(this, "PollServerStatusTask: Published QUEUE_POSITION_UPDATED, queuePosition=" + queuePosition);
+    }
+
+    static Integer extractQueuePosition(BinaryStatus status) {
+        if (status == null) {
+            return null;
+        }
+        BinaryState state = status.getState();
+        if (state == null) {
+            return null;
+        }
+        Object actual = state.getActualInstance();
+        if (actual instanceof BinaryStateQueued) {
+            return ((BinaryStateQueued) actual).getQueuePosition();
+        }
+        return null;
+    }
+
+    static boolean extractIsPaused(BinaryStatus status) {
+        if (status == null) {
+            return false;
+        }
+        BinaryState state = status.getState();
+        if (state == null) {
+            return false;
+        }
+        return state.getActualInstance() instanceof BinaryStatePaused;
+    }
+
+    /**
+     * Extract paused state from BinaryStatus and publish if changed.
+     * Persists the flag so the status bar can show paused immediately on restart.
+     */
+    private void publishPausedStateIfChanged(BinaryStatus status) {
+        boolean paused = extractIsPaused(status);
+        Boolean pausedBoxed = paused;
+        boolean changed = !hasPublishedPaused
+            || !java.util.Objects.equals(lastPublishedPaused, pausedBoxed);
+        if (!changed) {
+            return;
+        }
+        lastPublishedPaused = pausedBoxed;
+        hasPublishedPaused = true;
+
+        // Persist so StatusBarManager can check on restart before first poll
+        ZenyardProgramProperties props = new ZenyardProgramProperties(program);
+        props.setString("binary_paused", paused ? "true" : "");
+
+        java.util.Map<String, Object> payload = new java.util.HashMap<>();
+        payload.put("paused", paused);
+        publishEvent(new ZenyardEvent(ZenyardEvent.EventType.BINARY_PAUSED_UPDATED,
+            getTaskTitle(), payload));
+        Msg.debug(this, "PollServerStatusTask: Published BINARY_PAUSED_UPDATED, paused=" + paused);
+    }
+
     /**
      * Publish analysis status event.
      * 

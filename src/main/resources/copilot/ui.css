@@ -84,6 +84,7 @@ html, body {
   background: var(--bg);
   color: var(--text);
   color-scheme: light dark;
+  overflow: hidden;
 }
 
 .app {
@@ -92,6 +93,7 @@ html, body {
   height: 100%;
   background: var(--bg);
   position: relative;
+  overflow: hidden;
 }
 
 .app-header {
@@ -229,6 +231,7 @@ html, body {
 
 .chat {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -339,6 +342,8 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  max-height: clamp(120px, 38vh, 320px);
+  overflow-y: auto;
 }
 
 .todo-section.hidden {
@@ -357,18 +362,28 @@ html, body {
 }
 
 .todo-toggle {
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  padding: 2px 6px;
-  border-radius: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  min-height: 26px;
 }
 
 .todo-toggle:hover {
   color: var(--accent);
+  border-color: var(--accent);
+}
+
+.todo-toggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(122, 162, 247, 0.25);
 }
 
 .todo-list {

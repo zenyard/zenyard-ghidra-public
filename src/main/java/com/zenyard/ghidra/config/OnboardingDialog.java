@@ -47,7 +47,8 @@ public class OnboardingDialog extends ZenyardDialogComponentProvider {
     private boolean accepted;
 
     public OnboardingDialog(PluginTool tool, ZenyardOptions options) {
-        super("Zenyard Setup", true);
+        // Dialog/window title (OS title bar); header bar text is controlled separately via createTitlePanel(...)
+        super("Hello, reverse engineer", true);
         this.tool = tool;
         this.options = options;
         this.stepIndex = 0;
@@ -216,7 +217,7 @@ public class OnboardingDialog extends ZenyardDialogComponentProvider {
         if (STEP_CONFIG.equals(steps[stepIndex])) {
             return "Wire It Up (API Key + Server URL)";
         }
-        return "Hello, reverse engineer";
+        return "Zenyard Setup";
     }
 
 

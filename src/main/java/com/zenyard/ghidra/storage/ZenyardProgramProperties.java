@@ -122,6 +122,53 @@ public class ZenyardProgramProperties {
     }
     
     /**
+     * Remove a property by key (delegates to Options.removeOption inside a transaction).
+     */
+    public void removeOption(String key) {
+        if (program == null || program.isClosed()) {
+            return;
+        }
+
+        int transactionId;
+        try {
+            transactionId = program.startTransaction("Remove Zenyard property: " + key);
+        } catch (RuntimeException e) {
+            Msg.debug(this, "Skipping property remove during shutdown: " + key + " (" + e.getMessage() + ")");
+            return;
+        }
+
+        boolean success = false;
+        RuntimeException primary = null;
+        try {
+            if (options.contains(key)) {
+                options.removeOption(key);
+            }
+            success = true;
+        } catch (RuntimeException e) {
+            primary = e;
+        } finally {
+            try {
+                program.endTransaction(transactionId, success);
+            } catch (RuntimeException endEx) {
+                if (primary != null) {
+                    primary.addSuppressed(endEx);
+                } else {
+                    Msg.debug(this, "endTransaction failed for property remove " + key + ": " + endEx.getMessage());
+                }
+            }
+        }
+
+        if (primary != null) {
+            String msg = String.valueOf(primary.getMessage());
+            if (msg.contains("Database is closed") || msg.contains("Transaction has been terminated")) {
+                Msg.debug(this, "Skipping property remove during shutdown: " + key + " (" + msg + ")");
+                return;
+            }
+            Msg.error(this, "Failed to remove property: " + primary.getMessage(), primary);
+        }
+    }
+
+    /**
      * Get an integer property.
      */
     public Integer getInt(String key) {

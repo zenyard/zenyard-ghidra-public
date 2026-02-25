@@ -25,7 +25,8 @@ public class StatusBarEventController implements EventConsumer {
         return Set.of(
             ZenyardEvent.EventType.CHANGES_DETECTED,
             ZenyardEvent.EventType.SERVER_CONNECTIVITY_CHANGED,
-            ZenyardEvent.EventType.USAGE_UPDATED
+            ZenyardEvent.EventType.USAGE_UPDATED,
+            ZenyardEvent.EventType.BINARY_PAUSED_UPDATED
         );
     }
 
@@ -55,12 +56,20 @@ public class StatusBarEventController implements EventConsumer {
             }
             StatusBarState current = viewModel.getStateSnapshot();
             StatusBarState next = current.withUsageDisplay(
-                usageState.getDisplayText(),
+                usageState.getDisplayTextForStatusBar(),
                 usageState.getTooltip(),
                 usageState.isVisible(),
                 usageState.getDisplayLevel()
             );
             viewModel.updateState(next);
+            return;
+        }
+
+        if (event.getType() == ZenyardEvent.EventType.BINARY_PAUSED_UPDATED) {
+            ZenyardService services = ZenyardService.getInstance();
+            if (services != null && services.getStatusBarManager() != null) {
+                services.getStatusBarManager().refreshDisplayNow();
+            }
             return;
         }
 

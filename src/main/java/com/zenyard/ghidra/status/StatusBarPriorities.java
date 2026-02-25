@@ -35,6 +35,9 @@ public class StatusBarPriorities {
     
     /** Queue revisions task */
     public static final int QUEUE_REVISIONS = 35;
+
+    /** Server-side queue waiting (between local queueing and remote analysis) */
+    public static final int IN_QUEUE = 38;
     
     // Analysis progress display
     /** Analyzing in background task */

@@ -70,6 +70,7 @@ public class InferenceApplier {
     private final VariableRenamer variableRenamer;
     private final StructInferenceApplier structInferenceApplier;
     private final FunctionTypeInferenceApplier functionTypeInferenceApplier;
+    private final MergedStructCleaner mergedStructCleaner;
     private final PluginTool tool;
     private static final int MAX_DEFERRED_RETRY_ATTEMPTS = 3;
     private static final Pattern FUN_TOKEN_PATTERN = Pattern.compile("\\bFUN_([0-9a-fA-F]+)\\b");
@@ -90,6 +91,7 @@ public class InferenceApplier {
         this.variableRenamer = new VariableRenamer(inferenceStorage);
         this.structInferenceApplier = new StructInferenceApplier(inferenceStorage);
         this.functionTypeInferenceApplier = new FunctionTypeInferenceApplier(inferenceStorage, structInferenceApplier);
+        this.mergedStructCleaner = new MergedStructCleaner(inferenceStorage, structInferenceApplier);
         this.tool = tool;
     }
     
@@ -235,6 +237,20 @@ public class InferenceApplier {
             TransactionUtils.runInTransaction(program, "Zenyard: Type-change rename refresh", () -> {
                 variableRenamer.refreshCallerRenames(program, typeChangedAddresses, monitor, shouldStop);
             });
+        }
+
+        if (shouldStop != null && shouldStop.getAsBoolean()) {
+            return;
+        }
+        if (monitor != null && monitor.isCancelled()) {
+            return;
+        }
+        if (program != null && !program.isClosed()) {
+            try {
+                mergedStructCleaner.cleanupMergedOrphanStructs(program, inferences, monitor);
+            } catch (Exception e) {
+                Msg.warn(this, "Merged-struct cleanup failed: " + e.getMessage(), e);
+            }
         }
 
         refreshFunctionOverviewInferences(program, inferences);

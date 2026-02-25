@@ -81,6 +81,9 @@ public class CopilotController {
     private long lastObservedActiveTodoSinceMs;
     private volatile long currentRunSendStartNs;
     private volatile long currentRunLastTodoDoneNs;
+    // Tracks whether Task Progress is currently visible (todos or subagent stream).
+    // Used to expand the panel once when it is first added, without re-expanding on later updates.
+    private boolean taskProgressVisible;
     
     public CopilotController(CopilotProvider provider, ApiClient apiClient, BinariesApi binariesApi, UserApi userApi, PluginTool tool) {
         this.provider = provider;
@@ -102,6 +105,7 @@ public class CopilotController {
         this.lastObservedActiveTodoSinceMs = 0L;
         this.currentRunSendStartNs = 0L;
         this.currentRunLastTodoDoneNs = 0L;
+        this.taskProgressVisible = false;
     }
 
     private static final class DeepAgentRunResult {
@@ -276,6 +280,7 @@ public class CopilotController {
             viewModel.clearToolHistory();
             viewModel.clearSubAgentStreaming();
         }
+        taskProgressVisible = false;
     }
     
     /**
@@ -726,6 +731,7 @@ public class CopilotController {
                     // Auto-finalize and collapse TODO panel once a final response is shown.
                     viewModel.finalizeTodos(null);
                     viewModel.setTodoMinimized(true);
+                    taskProgressVisible = isTaskProgressVisible(viewModel);
                 } else {
                     provider.appendMessage("Zenyard: " + result.response);
                 }
@@ -935,6 +941,23 @@ public class CopilotController {
         }
     }
 
+    private static boolean hasSubAgentStream(CopilotViewModel model) {
+        if (model == null) {
+            return false;
+        }
+        String agentType = model.getSubAgentType();
+        String streamText = model.getSubAgentStreamText();
+        return (agentType != null && !agentType.trim().isEmpty())
+            || (streamText != null && !streamText.trim().isEmpty());
+    }
+
+    private static boolean isTaskProgressVisible(CopilotViewModel model) {
+        if (model == null) {
+            return false;
+        }
+        return !model.getTodos().isEmpty() || hasSubAgentStream(model);
+    }
+
     private com.zenyard.ghidra.copilot.deepagent.CopilotTaskToolBuilder.SubAgentProgressListener
             createSubAgentProgressListener() {
         return new com.zenyard.ghidra.copilot.deepagent.CopilotTaskToolBuilder.SubAgentProgressListener() {
@@ -942,8 +965,13 @@ public class CopilotController {
             public void onSubAgentStart(String agentType, String description) {
                 if (viewModel != null) {
                     SwingUtilities.invokeLater(() -> {
+                        // Expand once when Task Progress becomes visible (subagent stream starts).
+                        if (!taskProgressVisible) {
+                            viewModel.setTodoMinimized(false);
+                        }
                         viewModel.setThinking(true, "Running " + agentType + " subagent...");
                         viewModel.setSubAgentStreaming(agentType, "");
+                        taskProgressVisible = isTaskProgressVisible(viewModel);
                     });
                 }
             }
@@ -953,6 +981,7 @@ public class CopilotController {
                 if (viewModel != null) {
                     SwingUtilities.invokeLater(() -> {
                         viewModel.clearSubAgentStreaming();
+                        taskProgressVisible = isTaskProgressVisible(viewModel);
                         viewModel.setThinking(true, "Thinking...");
                     });
                 }
@@ -1016,6 +1045,11 @@ public class CopilotController {
         if (!displayActive.isBlank() && activeAgeMs > 5000L) {
             effectiveActive = "";
         }
+        boolean nextVisible = !displayTodos.isEmpty() || hasSubAgentStream(model);
+        if (!taskProgressVisible && nextVisible) {
+            // Expand once when the section is first added to the UI.
+            model.setTodoMinimized(false);
+        }
         model.syncTodoState(
             displayTodos,
             effectiveActive.isBlank() ? null : effectiveActive,
@@ -1023,6 +1057,7 @@ public class CopilotController {
             displayFailed
         );
         model.setToolHistory(new ArrayList<>(state.toolEvents()));
+        taskProgressVisible = isTaskProgressVisible(model);
     }
 }
 

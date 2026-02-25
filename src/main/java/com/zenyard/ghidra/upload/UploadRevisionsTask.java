@@ -76,6 +76,7 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
         types.add(ZenyardEvent.EventType.REVISIONS_QUEUED);
         types.add(ZenyardEvent.EventType.BINARY_ID_AVAILABLE);
         types.add(ZenyardEvent.EventType.PROGRAM_DEACTIVATED);
+        types.add(ZenyardEvent.EventType.BINARY_PAUSED_UPDATED);
         return types;
     }
     
@@ -144,7 +145,19 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
             }
             synchronized (waitLock) {
                 shouldStop = true;
-                waitLock.notify(); // Wake up any waiting threads
+                waitLock.notify();
+            }
+        } else if (event.getType() == ZenyardEvent.EventType.BINARY_PAUSED_UPDATED) {
+            Boolean paused = event.getPayloadValue("paused", Boolean.class);
+            if (Boolean.TRUE.equals(paused)) {
+                Msg.info(this, "UploadRevisionsTask: Binary paused, stopping upload");
+                if (runningMonitor != null) {
+                    runningMonitor.cancel();
+                }
+                synchronized (waitLock) {
+                    shouldStop = true;
+                    waitLock.notify();
+                }
             }
         }
     }
@@ -159,8 +172,14 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
         }
         try {
             try {
-            // Get binary ID from properties
+            // Early exit if binary is paused
             ZenyardProgramProperties props = new ZenyardProgramProperties(program);
+            if ("true".equals(props.getString("binary_paused"))) {
+                Msg.info(this, "UploadRevisionsTask: Binary is paused, skipping upload");
+                return;
+            }
+
+            // Get binary ID from properties
             String binaryIdStr = props.getString("binary_id");
             if (binaryIdStr != null && !binaryIdStr.isEmpty()) {
                 try {
@@ -336,12 +355,24 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
                     }
                 }
                 
-                // Finish revision
-                boolean analyzeDependents = revision.isInitialAnalysis();
+                // Finish revision (mirrors IDA: analyze_dependents = !is_initial_analysis)
+                boolean analyzeDependents = !revision.isInitialAnalysis();
+                boolean performGlobalAnalysis = revision.isPerformGlobalAnalysis();
                 FinishAndAnalyzeCurrentRevisionBody finishParams = new FinishAndAnalyzeCurrentRevisionBody();
                 finishParams.setAnalyzeDependents(analyzeDependents);
+                finishParams.setSwiftOnly(false);
+                finishParams.setPerformGlobalAnalysis(performGlobalAnalysis);
                 
-                finishAndAnalyzeWithRetry(binaryId, finishParams, currentRevision);
+                // Evidence log: only last revision should set performGlobalAnalysis=true.
+                if (performGlobalAnalysis) {
+                    Msg.info(this, "Zenyard: Finishing revision " + currentRevision
+                        + " with performGlobalAnalysis=true ("
+                        + (revIndex + 1) + "/" + totalRevisions
+                        + ", analyzeDependents=" + analyzeDependents
+                        + ", swiftOnly=false)");
+                }
+
+                finishAndAnalyzeWithRetry(binaryId, finishParams, currentRevision, analyzeDependents, performGlobalAnalysis);
 
                 // Clear dirty list for objects in this revision after successful upload
                 markUploadedObjects(revision, syncStatusStorage);
@@ -382,19 +413,32 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
         }
     }
 
-    private void finishAndAnalyzeWithRetry(UUID binaryId, FinishAndAnalyzeCurrentRevisionBody finishParams,
-            int currentRevision) {
+    private void finishAndAnalyzeWithRetry(
+            UUID binaryId,
+            FinishAndAnalyzeCurrentRevisionBody finishParams,
+            int currentRevision,
+            boolean analyzeDependents,
+            boolean performGlobalAnalysis) {
         int attempt = 0;
         int maxAttempts = 3;
         while (true) {
             attempt++;
             try {
                 binariesApi.finishAndAnalyzeCurrentRevision(binaryId, finishParams);
+                if (performGlobalAnalysis) {
+                    Msg.info(this, "Zenyard: Finish-and-analyze succeeded for revision " + currentRevision
+                        + " (performGlobalAnalysis=true, analyzeDependents=" + analyzeDependents
+                        + ", swiftOnly=false)");
+                }
                 return;
             } catch (ApiException e) {
                 String responseBody = e.getResponseBody();
                 Msg.warn(this, "Finish and analyze failed for revision " + currentRevision
-                    + " (attempt " + attempt + "/" + maxAttempts + ", code=" + e.getCode() + "): "
+                    + " (attempt " + attempt + "/" + maxAttempts
+                    + ", code=" + e.getCode()
+                    + ", performGlobalAnalysis=" + performGlobalAnalysis
+                    + ", analyzeDependents=" + analyzeDependents
+                    + ", swiftOnly=false): "
                     + (responseBody != null ? responseBody : e.getMessage()));
                 if (responseBody != null && responseBody.contains("No current edited revision")) {
                     throw new RuntimeException(e);
@@ -407,7 +451,10 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
                     throw new RuntimeException(e);
                 }
                 Msg.warn(this, "Finish and analyze error for revision " + currentRevision
-                    + " (attempt " + attempt + "/" + maxAttempts + "): " + e.getMessage());
+                    + " (attempt " + attempt + "/" + maxAttempts
+                    + ", performGlobalAnalysis=" + performGlobalAnalysis
+                    + ", analyzeDependents=" + analyzeDependents
+                    + ", swiftOnly=false): " + e.getMessage());
             }
 
             try {
