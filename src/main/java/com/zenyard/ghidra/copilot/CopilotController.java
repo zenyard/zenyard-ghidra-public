@@ -45,6 +45,7 @@ import com.zenyard.ghidra.ZenyardService;
 import com.zenyard.ghidra.usage.UsageState;
 import org.bsc.langgraph4j.NodeOutput;
 
+import dev.langchain4j.exception.AuthenticationException;
 import dev.langchain4j.memory.ChatMemory;
 import dev.langchain4j.model.chat.ChatModel;
 
@@ -743,10 +744,8 @@ public class CopilotController {
     }
     
     private void handleError(String errorMsg, Throwable throwable) {
-        if (throwable != null && throwable.getCause() instanceof ApiException) {
-            errorMsg = "API Error: " + throwable.getCause().getMessage();
-        }
-        final String finalErrorMsg = errorMsg;
+        Throwable rootCause = findRootCause(throwable);
+        final String finalErrorMsg = getUserFriendlyErrorMessage(errorMsg, rootCause);
         
         // Use view-model if available, otherwise update provider directly
         SwingUtilities.invokeLater(() -> {
@@ -762,6 +761,50 @@ public class CopilotController {
                 }
             }
         });
+    }
+
+    private String getUserFriendlyErrorMessage(String fallbackErrorMsg, Throwable rootCause) {
+        if (rootCause instanceof ApiException apiException) {
+            if (apiException.getCode() == 401) {
+                return "Authentication failed: your Zenyard API key is invalid or expired. "
+                    + "Update it in Tools -> Zenyard -> Configuration and try again.";
+            }
+            return "API Error: " + apiException.getMessage();
+        }
+
+        if (rootCause instanceof AuthenticationException || isLikelyModelAuthenticationError(rootCause)) {
+            return "Authentication failed when contacting the AI provider. "
+                + "Your model API key appears invalid or expired. "
+                + "Update your Copilot model API key in Tools -> Zenyard -> Configuration and try again.";
+        }
+
+        if (rootCause != null && rootCause.getMessage() != null && !rootCause.getMessage().isBlank()) {
+            return "Error: " + rootCause.getMessage();
+        }
+        return fallbackErrorMsg;
+    }
+
+    private boolean isLikelyModelAuthenticationError(Throwable throwable) {
+        if (throwable == null || throwable.getMessage() == null) {
+            return false;
+        }
+        String lowerMessage = throwable.getMessage().toLowerCase(java.util.Locale.ROOT);
+        return lowerMessage.contains("invalid api key")
+            || lowerMessage.contains("auth_error")
+            || lowerMessage.contains("authentication")
+            || lowerMessage.contains("\"code\":\"401\"")
+            || lowerMessage.contains("'code':'401'");
+    }
+
+    private Throwable findRootCause(Throwable throwable) {
+        if (throwable == null) {
+            return null;
+        }
+        Throwable rootCause = throwable;
+        while (rootCause.getCause() != null && rootCause.getCause() != rootCause) {
+            rootCause = rootCause.getCause();
+        }
+        return rootCause;
     }
 
     private boolean shouldSanitizeToolMessages(CopilotConfig config) {

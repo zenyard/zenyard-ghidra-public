@@ -258,18 +258,20 @@ public class ZenyardService {
         if (backendApiKey == null || backendApiKey.isBlank()) {
             return config;
         }
-        Object rawKey = config.getAdditionalParams().get("api_key");
-        if (rawKey instanceof String && backendApiKey.equals(rawKey)) {
-            Map<String, Object> adjusted = new HashMap<>(config.getAdditionalParams());
-            adjusted.remove("api_key");
-            Msg.warn(this, "Copilot config API key matches backend key; removing to avoid invalid LLM auth.");
-            return new CopilotConfig(
-                config.getModelName(),
-                config.getModelProvider(),
-                adjusted
-            );
+        Map<String, Object> params = config.getAdditionalParams();
+        Object rawKey = params != null ? params.get("api_key") : null;
+        String keyValue = rawKey instanceof String ? (String) rawKey : (rawKey != null ? String.valueOf(rawKey) : null);
+        if (keyValue != null && !keyValue.isBlank()) {
+            return config;
         }
-        return config;
+        Map<String, Object> adjusted = params != null ? new HashMap<>(params) : new HashMap<>();
+        adjusted.put("api_key", backendApiKey);
+        Msg.info(this, "Copilot config missing api_key; defaulting to configured user API key.");
+        return new CopilotConfig(
+            config.getModelName(),
+            config.getModelProvider(),
+            adjusted
+        );
     }
 
     private void logCopilotConfigSummary(CopilotConfig config) {
