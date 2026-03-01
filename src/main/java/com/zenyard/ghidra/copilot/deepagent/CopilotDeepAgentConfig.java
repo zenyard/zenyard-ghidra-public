@@ -58,10 +58,10 @@ public record CopilotDeepAgentConfig(
             toolArgTruncateThreshold = 5000;
         }
         if (subAgentTimeoutMs <= 0) {
-            subAgentTimeoutMs = 180_000L;
+            subAgentTimeoutMs = 540_000L;
         }
         if (subAgentRecursionLimit <= 0) {
-            subAgentRecursionLimit = 25;
+            subAgentRecursionLimit = 50;
         }
         if (toolCallTimeoutMs <= 0) {
             toolCallTimeoutMs = 60_000L;
@@ -87,8 +87,8 @@ public record CopilotDeepAgentConfig(
             0.8,
             20,
             5000,
-            180_000L,
-            25,
+            540_000L,
+            50,
             60_000L
         );
     }

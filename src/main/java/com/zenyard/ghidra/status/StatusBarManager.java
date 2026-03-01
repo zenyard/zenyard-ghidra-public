@@ -209,6 +209,17 @@ public class StatusBarManager {
             return;
         }
         boolean showReviewTerms = false;
+        if (isBinaryPaused()) {
+            state = StatusBarState.empty()
+                .withStatus("Analysis paused — click Usage for details")
+                .withShowWarningIcon(current.isShowWarningIcon())
+                .withShowReviewTerms(showReviewTerms)
+                .withUsageDisplay(current.getUsageText(), current.getUsageTooltip(),
+                    current.isUsageVisible(), current.getUsageLevel());
+            state = applyServerUnreachableIfNeeded(state, disconnected);
+            viewModel.updateState(state);
+            return;
+        }
         if (activeTask.isPresent()) {
             TaskStatus task = activeTask.get();
             state = new StatusBarState(task.taskId, task.priority, task.status, task.progress,
@@ -225,17 +236,6 @@ public class StatusBarManager {
                 state = StatusBarState.empty()
                     .withStatus(status)
                     .withShowWarningIcon(true)
-                    .withShowReviewTerms(showReviewTerms)
-                    .withUsageDisplay(current.getUsageText(), current.getUsageTooltip(),
-                        current.isUsageVisible(), current.getUsageLevel());
-                state = applyServerUnreachableIfNeeded(state, disconnected);
-                viewModel.updateState(state);
-                return;
-            }
-            if (isBinaryPaused()) {
-                state = StatusBarState.empty()
-                    .withStatus("Analysis paused — click Usage for details")
-                    .withShowWarningIcon(current.isShowWarningIcon())
                     .withShowReviewTerms(showReviewTerms)
                     .withUsageDisplay(current.getUsageText(), current.getUsageTooltip(),
                         current.isUsageVisible(), current.getUsageLevel());

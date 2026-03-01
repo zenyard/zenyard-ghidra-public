@@ -33,6 +33,8 @@ public class CopilotDeepState extends MessagesState<ChatMessage> {
     public static final String FAILED_TODOS = "failed_todos";
     public static final String LAST_TOOL_BATCH_SIGNATURE = "last_tool_batch_signature";
     public static final String SAME_TOOL_BATCH_COUNT = "same_tool_batch_count";
+    public static final String LOOP_GUARD_MESSAGE = "loop_guard_message";
+    public static final String LOOP_GUARD_PIVOT_COUNT = "loop_guard_pivot_count";
 
     public static final Map<String, Channel<?>> SCHEMA = buildSchema();
 
@@ -50,6 +52,8 @@ public class CopilotDeepState extends MessagesState<ChatMessage> {
         schema.put(FAILED_TODOS, Channels.base(SharedStateSchema.replaceReducer(), ArrayList::new));
         schema.put(LAST_TOOL_BATCH_SIGNATURE, Channels.base(SharedStateSchema.replaceReducer(), () -> ""));
         schema.put(SAME_TOOL_BATCH_COUNT, Channels.base(SharedStateSchema.replaceReducer(), () -> 0));
+        schema.put(LOOP_GUARD_MESSAGE, Channels.base(SharedStateSchema.replaceReducer(), () -> ""));
+        schema.put(LOOP_GUARD_PIVOT_COUNT, Channels.base(SharedStateSchema.replaceReducer(), () -> 0));
         return Map.copyOf(schema);
     }
 
@@ -117,5 +121,16 @@ public class CopilotDeepState extends MessagesState<ChatMessage> {
 
     public int sameToolBatchCount() {
         return this.<Integer>value(SAME_TOOL_BATCH_COUNT).orElse(0);
+    }
+
+    public Optional<String> loopGuardMessage() {
+        return value(LOOP_GUARD_MESSAGE)
+            .filter(String.class::isInstance)
+            .map(String.class::cast)
+            .filter(s -> !s.isBlank());
+    }
+
+    public int loopGuardPivotCount() {
+        return this.<Integer>value(LOOP_GUARD_PIVOT_COUNT).orElse(0);
     }
 }

@@ -9,6 +9,7 @@ import javax.swing.SwingUtilities;
 
 import docking.ActionContext;
 import docking.action.DockingAction;
+import docking.action.KeyBindingData;
 import docking.action.MenuData;
 import ghidra.app.events.FirstTimeAnalyzedPluginEvent;
 import ghidra.app.plugin.ProgramPlugin;
@@ -76,8 +77,7 @@ import java.util.concurrent.ConcurrentHashMap;
     packageName = "com.zenyard.ghidra",
     category = "Reverse Engineering",
     shortDescription = "Zenyard - AI-powered reverse engineering assistance",
-    description = "In-depth binary understanding with a purpose built AI agent that helps you get straight to the" +
-                  "meaningful parts and understand them faster.",
+    description = "In-depth binary understanding with a purpose built AI agent that helps you get straight to the meaningful parts and understand them faster.",
     eventsConsumed = { FirstTimeAnalyzedPluginEvent.class }
 )
 public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer {
@@ -309,9 +309,15 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
             }
         };
         copilotAction.setMenuBarData(new MenuData(
-            new String[] { "Zenyard", "Open Copilot" },
+            new String[] { "Zenyard", "Copilot" },
             null,
             "Zenyard"
+        ));
+        copilotAction.setKeyBindingData(new KeyBindingData(
+            javax.swing.KeyStroke.getKeyStroke(
+                java.awt.event.KeyEvent.VK_C,
+                java.awt.event.InputEvent.CTRL_DOWN_MASK | java.awt.event.InputEvent.ALT_DOWN_MASK
+            )
         ));
         copilotAction.setDescription("Open the Zenyard Copilot chat window");
         tool.addAction(copilotAction);

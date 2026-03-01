@@ -1,14 +1,21 @@
 package com.zenyard.ghidra.ui;
 
 import java.awt.BorderLayout;
+import java.awt.Cursor;
+import java.awt.FlowLayout;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.border.EmptyBorder;
 
+import java.awt.Color;
+
+import com.zenyard.ghidra.usage.UsageLevel;
 import com.zenyard.ghidra.usage.UsageState;
 import ghidra.framework.plugintool.PluginTool;
 
@@ -16,14 +23,14 @@ public class UsageDetailsDialog extends ZenyardDialogComponentProvider {
     private final UsageState usageState;
 
     public UsageDetailsDialog(UsageState usageState) {
-        super("Zenyard Usage", true);
+        super("Usage", true);
         this.usageState = usageState != null ? usageState : UsageState.unknown();
         buildPanel();
     }
 
     private void buildPanel() {
         JPanel contentPanel = new JPanel(new BorderLayout());
-        JPanel titlePanel = createTitlePanel("Zenyard Usage");
+        JPanel titlePanel = createTitlePanel("Current Package Usage");
         contentPanel.add(titlePanel, BorderLayout.NORTH);
 
         JPanel mainPanel = new JPanel(new GridBagLayout());
@@ -47,7 +54,12 @@ public class UsageDetailsDialog extends ZenyardDialogComponentProvider {
         if (usageText == null || usageText.isEmpty()) {
             usageText = "Not available";
         }
-        mainPanel.add(new JLabel(usageText), gbc);
+        JLabel usageValueLabel = new JLabel(usageText);
+        UsageLevel level = usageState.getDisplayLevel();
+        if (level == UsageLevel.WARNING || level == UsageLevel.OVER_LIMIT || level == UsageLevel.EXPIRED) {
+            usageValueLabel.setForeground(Color.RED);
+        }
+        mainPanel.add(usageValueLabel, gbc);
 
         if (usageState.getExpiration() != null && !usageState.getExpiration().isEmpty()) {
             gbc.gridx = 0;
@@ -62,8 +74,8 @@ public class UsageDetailsDialog extends ZenyardDialogComponentProvider {
         gbc.gridwidth = 2;
         String guidance = usageState.isBlocked()
             ? usageState.getBlockedMessage()
-            : "For more usage or top-ups, contact Zenyard support.";
-        mainPanel.add(new JLabel("<html>" + guidance + "</html>"), gbc);
+            : "For more usage or top-ups, " + UsageState.getContactSupportText();
+        mainPanel.add(createGuidanceComponent(guidance), gbc);
 
         contentPanel.add(mainPanel, BorderLayout.CENTER);
         addWorkPanel(contentPanel);
@@ -78,5 +90,44 @@ public class UsageDetailsDialog extends ZenyardDialogComponentProvider {
     public static void showDialog(PluginTool tool, UsageState usageState) {
         UsageDetailsDialog dialog = new UsageDetailsDialog(usageState);
         tool.showDialog(dialog);
+    }
+
+    private JPanel createGuidanceComponent(String guidance) {
+        JPanel panel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        panel.setOpaque(false);
+        String text = guidance == null ? "" : guidance;
+        String clickableText = "Contact us";
+        int clickableIndex = text.indexOf(clickableText);
+        if (clickableIndex < 0) {
+            panel.add(new JLabel(text));
+            return panel;
+        }
+        if (!UsageState.isContactEmailSupported()) {
+            panel.add(new JLabel(text.replace(clickableText, UsageState.getContactSupportText())));
+            return panel;
+        }
+
+        String before = text.substring(0, clickableIndex);
+        String after = text.substring(clickableIndex + clickableText.length());
+
+        if (!before.isEmpty()) {
+            panel.add(new JLabel(before));
+        }
+
+        JLabel contactLink = new JLabel("<html><u>" + clickableText + "</u></html>");
+        contactLink.setForeground(new Color(0, 102, 204));
+        contactLink.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        contactLink.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                UsageState.openContactEmail();
+            }
+        });
+        panel.add(contactLink);
+
+        if (!after.isEmpty()) {
+            panel.add(new JLabel(after));
+        }
+        return panel;
     }
 }

@@ -1,5 +1,6 @@
 (() => {
   const chat = document.getElementById("chat");
+  const contentScroll = document.getElementById("contentScroll");
   const input = document.getElementById("input");
   const sendBtn = document.getElementById("sendBtn");
   const stopBtn = document.getElementById("stopBtn");
@@ -44,6 +45,86 @@
   let lastStreamingText = "";
   let pendingSend = false;
   let pendingTodoMinimized = null;
+  let taskProgressEverRendered = false;
+  let lastTaskProgressSnapshot = {
+    todos: [],
+    completed: [],
+    failed: [],
+    activeTodo: null,
+  };
+
+  const PLACEHOLDER_EMPTY = 'Start with a broad scan (e.g., "Analyze structure") or use @ to focus...';
+  const PLACEHOLDER_ACTIVE = "Ask a follow-up question or use @ to reference function...";
+  const SUPPORT_EMAIL = "access@zenyard.ai";
+
+  function updatePlaceholder() {
+    if (!input) {
+      return;
+    }
+    const hasMessages = Array.isArray(state.messages) && state.messages.length > 0;
+    input.dataset.placeholder = hasMessages ? PLACEHOLDER_ACTIVE : PLACEHOLDER_EMPTY;
+  }
+
+  let userScrolledUp = false;
+  const SCROLL_NEAR_BOTTOM_THRESHOLD = 150;
+
+  function isNearBottom(el) {
+    return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_THRESHOLD;
+  }
+
+  function scrollTranscriptToBottom() {
+    const target = contentScroll || chat;
+    if (!target) {
+      return;
+    }
+    if (userScrolledUp) {
+      return;
+    }
+    target.scrollTop = target.scrollHeight;
+  }
+
+  function forceScrollToBottom() {
+    const target = contentScroll || chat;
+    if (!target) {
+      return;
+    }
+    userScrolledUp = false;
+    target.scrollTop = target.scrollHeight;
+  }
+
+  (function initScrollTracking() {
+    const target = contentScroll || chat;
+    if (!target) {
+      return;
+    }
+    target.addEventListener("scroll", () => {
+      userScrolledUp = !isNearBottom(target);
+    }, { passive: true });
+  })();
+
+  function resetTaskProgressUiState() {
+    pendingTodoMinimized = null;
+    taskProgressEverRendered = false;
+    lastTaskProgressSnapshot = {
+      todos: [],
+      completed: [],
+      failed: [],
+      activeTodo: null,
+    };
+    state.todos = [];
+    state.completedTodos = [];
+    state.failedTodos = [];
+    state.activeTodo = null;
+    state.toolHistory = [];
+    state.subAgentType = null;
+    state.subAgentStreamText = null;
+    if (todoList) {
+      todoList.innerHTML = "";
+    }
+    if (todoSection) {
+      todoSection.classList.add("hidden");
+    }
+  }
 
   const AUTOCOMPLETE_DEBOUNCE_MS = 200;
   const AUTOCOMPLETE_RESULT_LIMIT = 20;
@@ -1065,16 +1146,14 @@
     
     // Clear rendered position tracking for this message
     renderedPositions.delete(messageIndex);
-    
-    // Preserve any thinking section (collapsed) from the planning phase
+
+    // Save the thinking section so it survives the innerHTML replacement
     const thinkingSection = bubble.querySelector(".thinking-section");
 
-    // Render final markdown
     const html = marked.parse(linkifyGhidraUrls(text));
     bubble.innerHTML = sanitize(html);
 
     if (thinkingSection) {
-      thinkingSection.classList.add("collapsed");
       bubble.insertBefore(thinkingSection, bubble.firstChild);
     }
 
@@ -1084,6 +1163,8 @@
     lastStreamingText = "";
     lastStreamingIndex = null;
   }
+
+  let thinkingUserCollapsed = false;
 
   function ensureThinkingSection(bubble) {
     let section = bubble.querySelector(".thinking-section");
@@ -1103,6 +1184,13 @@
     labelText.className = "thinking-label-text";
     labelText.textContent = "Reasoning";
     label.appendChild(labelText);
+
+    label.addEventListener("click", () => {
+      const willCollapse = !section.classList.contains("collapsed");
+      section.classList.toggle("collapsed");
+      thinkingUserCollapsed = willCollapse;
+    });
+
     section.appendChild(label);
 
     const content = document.createElement("div");
@@ -1115,19 +1203,16 @@
 
   function updateThinkingInBubble(nextState) {
     const thinkingText = nextState.thinkingText || "";
-    const inlineSubagentStream = (nextState.todoMinimized === true)
-      && ((nextState.subAgentType && String(nextState.subAgentType).trim())
-        || (nextState.subAgentStreamText && String(nextState.subAgentStreamText).trim()));
-    const isThinking = (nextState.thinking && thinkingText.length > 0
-      && thinkingText !== "Reasoning...") || inlineSubagentStream;
+    const panelOwnsProgress = shouldShowTodoSection(nextState) && !Boolean(nextState.todoMinimized);
+    const inlineSubagentStream = !panelOwnsProgress && shouldInlineTaskProgress(nextState);
+    const agentBusy = Boolean(nextState.loading || nextState.thinking);
+    const hasReasoningContent = thinkingText.length > 0 && thinkingText !== "Reasoning...";
 
-    // Find the last assistant message bubble
     const messages = chat.querySelectorAll(".message.assistant");
     const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
     const bubble = lastMsg ? lastMsg.querySelector(".bubble") : null;
 
-    if (!isThinking) {
-      // Collapse thinking sections (keep them for context, hide content)
+    if (!agentBusy) {
       if (bubble) {
         const section = bubble.querySelector(".thinking-section");
         if (section && !section.classList.contains("collapsed")) {
@@ -1141,8 +1226,15 @@
       return;
     }
 
+    if (!hasReasoningContent && !inlineSubagentStream) {
+      return;
+    }
+
     const section = ensureThinkingSection(bubble);
-    section.classList.remove("collapsed");
+
+    if (!thinkingUserCollapsed) {
+      section.classList.remove("collapsed");
+    }
 
     const labelText = section.querySelector(".thinking-label-text");
     if (labelText) {
@@ -1179,7 +1271,34 @@
     const banner = existing || document.createElement("div");
     banner.id = "floatingError";
     banner.className = "error-banner is-visible";
-    banner.textContent = error;
+    banner.classList.remove("interactive");
+    const errorText = String(error);
+    const contactLabel = "Contact us";
+    const contactIndex = errorText.indexOf(contactLabel);
+    if (contactIndex >= 0) {
+      const before = errorText.slice(0, contactIndex);
+      const after = errorText.slice(contactIndex + contactLabel.length);
+      banner.textContent = "";
+      if (before) {
+        banner.appendChild(document.createTextNode(before));
+      }
+      const contactButton = document.createElement("button");
+      contactButton.type = "button";
+      contactButton.className = "error-contact-link";
+      contactButton.textContent = contactLabel;
+      contactButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        dispatchBridgeEvent("copilot-open-contact-email", { email: SUPPORT_EMAIL });
+      });
+      banner.appendChild(contactButton);
+      if (after) {
+        banner.appendChild(document.createTextNode(after));
+      }
+      banner.classList.add("interactive");
+    } else {
+      banner.textContent = errorText;
+    }
     if (!existing) {
       const container = app || document.body;
       container.appendChild(banner);
@@ -1258,7 +1377,8 @@
       statusPill.textContent = statusLabel;
       statusPill.classList.toggle("busy", showThinking);
     }
-    chat.scrollTop = chat.scrollHeight;
+    updatePlaceholder();
+    scrollTranscriptToBottom();
   }
 
   function hasSubAgentStream(nextState) {
@@ -1268,9 +1388,44 @@
     );
   }
 
+  function collectTodoItems(nextState) {
+    const ordered = [];
+    const seen = new Set();
+    const add = (value) => {
+      if (value == null) {
+        return;
+      }
+      const text = String(value).trim();
+      if (!text || seen.has(text)) {
+        return;
+      }
+      seen.add(text);
+      ordered.push(text);
+    };
+    const todoSource = Array.isArray(nextState.todos) ? nextState.todos : [];
+    const completedSource = Array.isArray(nextState.completedTodos) ? nextState.completedTodos : [];
+    const failedSource = Array.isArray(nextState.failedTodos) ? nextState.failedTodos : [];
+    todoSource.forEach(add);
+    completedSource.forEach(add);
+    failedSource.forEach(add);
+    add(nextState.activeTodo);
+    return ordered;
+  }
+
+  function hasToolHistory(nextState) {
+    return Array.isArray(nextState.toolHistory) && nextState.toolHistory.length > 0;
+  }
+
+  function hasTaskProgressContent(nextState) {
+    return collectTodoItems(nextState).length > 0 || hasSubAgentStream(nextState) || hasToolHistory(nextState);
+  }
+
+  function shouldInlineTaskProgress(nextState) {
+    return Boolean(nextState.todoMinimized) && hasSubAgentStream(nextState);
+  }
+
   function shouldShowTodoSection(nextState) {
-    const todos = Array.isArray(nextState.todos) ? nextState.todos : [];
-    return todos.length > 0 || hasSubAgentStream(nextState);
+    return hasTaskProgressContent(nextState) || taskProgressEverRendered;
   }
 
   function resolveTodoMinimized(nextState) {
@@ -1278,7 +1433,7 @@
     if (pendingTodoMinimized === null) {
       return incoming;
     }
-    if (!shouldShowTodoSection(nextState)) {
+    if (!hasTaskProgressContent(nextState)) {
       pendingTodoMinimized = null;
       return incoming;
     }
@@ -1293,16 +1448,60 @@
     if (!todoSection || !todoList) {
       return;
     }
-    const todos = Array.isArray(nextState.todos) ? nextState.todos : [];
+    const incomingTodos = collectTodoItems(nextState);
     const hasSubAgent = hasSubAgentStream(nextState);
-    const completed = Array.isArray(nextState.completedTodos) ? new Set(nextState.completedTodos) : new Set();
-    const failed = Array.isArray(nextState.failedTodos) ? new Set(nextState.failedTodos) : new Set();
-    todoList.innerHTML = "";
-    if (todos.length === 0 && !hasSubAgent) {
+    const incomingCompleted = Array.isArray(nextState.completedTodos)
+      ? new Set(nextState.completedTodos.map((item) => String(item).trim()).filter(Boolean))
+      : new Set();
+    const incomingFailed = Array.isArray(nextState.failedTodos)
+      ? new Set(nextState.failedTodos.map((item) => String(item).trim()).filter(Boolean))
+      : new Set();
+    const hasProgressContent = incomingTodos.length > 0 || hasSubAgent;
+    const isConversationReset = Array.isArray(nextState.messages)
+      && nextState.messages.length === 0
+      && !hasProgressContent;
+
+    if (isConversationReset) {
+      taskProgressEverRendered = false;
+      lastTaskProgressSnapshot = {
+        todos: [],
+        completed: [],
+        failed: [],
+        activeTodo: null,
+      };
+    }
+
+    if (hasProgressContent) {
+      taskProgressEverRendered = true;
+      if (incomingTodos.length > 0) {
+        lastTaskProgressSnapshot = {
+          todos: incomingTodos.slice(),
+          completed: Array.from(incomingCompleted),
+          failed: Array.from(incomingFailed),
+          activeTodo: nextState.activeTodo || null,
+        };
+      }
+    }
+
+    if (!shouldShowTodoSection(nextState)) {
       pendingTodoMinimized = null;
+      todoList.innerHTML = "";
       todoSection.classList.add("hidden");
       return;
     }
+
+    let todos = incomingTodos;
+    let completed = incomingCompleted;
+    let failed = incomingFailed;
+    let activeTodo = nextState.activeTodo || null;
+    if (todos.length === 0 && lastTaskProgressSnapshot.todos.length > 0) {
+      todos = lastTaskProgressSnapshot.todos.slice();
+      completed = new Set(lastTaskProgressSnapshot.completed);
+      failed = new Set(lastTaskProgressSnapshot.failed);
+      activeTodo = lastTaskProgressSnapshot.activeTodo;
+    }
+
+    todoList.innerHTML = "";
     todoSection.classList.remove("hidden");
     const minimized = Boolean(nextState.todoMinimized);
     todoSection.classList.toggle("minimized", minimized);
@@ -1313,7 +1512,6 @@
       }
     }
     todoList.classList.toggle("hidden", todos.length === 0);
-    const activeTodo = nextState.activeTodo || null;
     todos.forEach((todo) => {
       const item = document.createElement("li");
       item.className = "todo-item";
@@ -1473,7 +1671,7 @@
     updateStreaming(messageEl, target.text || "");
     const showThinking = Boolean(state.loading || state.thinking);
     typingIndicator.classList.toggle("hidden", !showThinking);
-    chat.scrollTop = chat.scrollHeight;
+    scrollTranscriptToBottom();
   }
 
   function applyStreamFromBridge() {
@@ -1518,6 +1716,12 @@
     if (!text) {
       return;
     }
+    userScrolledUp = false;
+    thinkingUserCollapsed = false;
+    resetTaskProgressUiState();
+    renderTodos(state);
+    renderTools(state);
+    renderSubAgent(state);
     pendingSend = true;
     syncActionButtons(state);
     dispatchBridgeEvent("copilot-send", { message: text });
@@ -1538,6 +1742,13 @@
   }
   if (clearBtn) {
     clearBtn.addEventListener("click", () => {
+      resetTaskProgressUiState();
+      renderTodos(state);
+      renderTools(state);
+      renderSubAgent(state);
+      userScrolledUp = false;
+      thinkingUserCollapsed = false;
+      updatePlaceholder();
       dispatchBridgeEvent("copilot-clear", {});
     });
   }

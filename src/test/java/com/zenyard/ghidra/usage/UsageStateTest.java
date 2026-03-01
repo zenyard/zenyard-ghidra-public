@@ -55,6 +55,33 @@ class UsageStateTest {
     }
 
     @Test
+    void nearCapacityUsageReturnsWarningLevel() {
+        String body = "{\"usage_percentage\":85}";
+        UsageState state = UsageState.fromApiError(402, body);
+
+        assertEquals(UsageState.Kind.LIMITED, state.getKind());
+        assertEquals(UsageLevel.WARNING, state.getDisplayLevel());
+    }
+
+    @Test
+    void belowThresholdUsageReturnsNormalLevel() {
+        String body = "{\"usage_percentage\":50}";
+        UsageState state = UsageState.fromApiError(402, body);
+
+        assertEquals(UsageState.Kind.LIMITED, state.getKind());
+        assertEquals(UsageLevel.NORMAL, state.getDisplayLevel());
+    }
+
+    @Test
+    void atCapacityUsageReturnsOverLimitLevel() {
+        String body = "{\"usage_percentage\":100}";
+        UsageState state = UsageState.fromApiError(402, body);
+
+        assertEquals(UsageState.Kind.LIMITED, state.getKind());
+        assertEquals(UsageLevel.OVER_LIMIT, state.getDisplayLevel());
+    }
+
+    @Test
     void unlimitedUsageIsVisibleInStatusBar() {
         UsageResponse response = new UsageResponse();
         response.setActualInstance(new UnlimitedUsage());
@@ -62,6 +89,6 @@ class UsageStateTest {
         UsageState state = UsageState.fromUsageResponse(response);
         assertEquals(UsageState.Kind.UNLIMITED, state.getKind());
         assertTrue(state.isVisible());
-        assertEquals("Usage: Unlimited", state.getDisplayText());
+        assertEquals("Usage: Unlimited", state.getDisplayTextForStatusBar());
     }
 }

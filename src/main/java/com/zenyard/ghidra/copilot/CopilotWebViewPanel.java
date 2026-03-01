@@ -322,6 +322,7 @@ public class CopilotWebViewPanel extends JPanel {
         ((EventTarget) bridge).addEventListener("copilot-log", listener, false);
         ((EventTarget) bridge).addEventListener("copilot-loaded", listener, false);
         ((EventTarget) bridge).addEventListener("copilot-close", listener, false);
+        ((EventTarget) bridge).addEventListener("copilot-open-contact-email", listener, false);
         Msg.info(this, "Copilot DOM bridge listeners attached");
         pushStateToDom();
     }
@@ -404,6 +405,10 @@ public class CopilotWebViewPanel extends JPanel {
             if (controller != null) {
                 SwingUtilities.invokeLater(() -> controller.closePanel());
             }
+            return;
+        }
+        if ("copilot-open-contact-email".equals(type)) {
+            SwingUtilities.invokeLater(UsageState::openContactEmail);
             return;
         }
         Msg.debug(this, "Copilot DOM bridge: unhandled event " + type);
@@ -728,7 +733,6 @@ public class CopilotWebViewPanel extends JPanel {
             this.chips = chips;
         }
     }
-
 
     private static String readResource(URL resourceUrl) throws IOException {
         try (InputStream input = resourceUrl.openStream();

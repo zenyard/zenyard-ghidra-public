@@ -78,7 +78,7 @@ class QueuePositionMonitorTest {
 
         assertEquals(2, recorder.calls.size(), "expect register + update");
         assertEquals("register:" + QueuePositionMonitor.TASK_ID + ":38", recorder.calls.get(0));
-        assertTrue(recorder.calls.get(1).contains("In queue (3"));
+        assertTrue(recorder.calls.get(1).contains("In queue (3 remaining)"));
         assertTrue(recorder.taskRegistered);
     }
 
@@ -90,7 +90,7 @@ class QueuePositionMonitorTest {
         publishQueuePosition(2);
 
         assertEquals(1, recorder.calls.size(), "only update, no re-register");
-        assertTrue(recorder.calls.get(0).contains("In queue (2"));
+        assertTrue(recorder.calls.get(0).contains("In queue (2 remaining)"));
         assertTrue(recorder.taskRegistered);
     }
 

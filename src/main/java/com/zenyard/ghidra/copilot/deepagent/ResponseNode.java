@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -16,10 +17,14 @@ import com.zenyard.ghidra.copilot.CopilotStreamHandler;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.UserMessage;
+import dev.langchain4j.data.message.ToolExecutionResultMessage;
+import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.langsmith.RunTree;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.request.ChatRequestParameters;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 
@@ -35,6 +40,7 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
     private final boolean sanitizeToolMessages;
     private final long streamingTimeoutMs;
     private final LangSmithTracer tracer;
+    private final List<ToolSpecification> toolSpecifications;
 
     public ResponseNode(
             ChatModel chatModel,
@@ -43,7 +49,7 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
             String systemPrompt,
             boolean sanitizeToolMessages,
             long streamingTimeoutMs) {
-        this(chatModel, streamingChatModel, streamHandler, systemPrompt,
+        this(chatModel, streamingChatModel, streamHandler, List.of(), systemPrompt,
                 sanitizeToolMessages, streamingTimeoutMs, null);
     }
 
@@ -55,9 +61,23 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
             boolean sanitizeToolMessages,
             long streamingTimeoutMs,
             LangSmithTracer tracer) {
+        this(chatModel, streamingChatModel, streamHandler, List.of(), systemPrompt,
+            sanitizeToolMessages, streamingTimeoutMs, tracer);
+    }
+
+    public ResponseNode(
+            ChatModel chatModel,
+            StreamingChatModel streamingChatModel,
+            CopilotStreamHandler streamHandler,
+            List<ToolSpecification> toolSpecifications,
+            String systemPrompt,
+            boolean sanitizeToolMessages,
+            long streamingTimeoutMs,
+            LangSmithTracer tracer) {
         this.chatModel = chatModel;
         this.streamingChatModel = streamingChatModel;
         this.streamHandler = streamHandler;
+        this.toolSpecifications = toolSpecifications != null ? toolSpecifications : List.of();
         this.systemPrompt = systemPrompt;
         this.sanitizeToolMessages = sanitizeToolMessages;
         this.streamingTimeoutMs = streamingTimeoutMs > 0 ? streamingTimeoutMs : 120_000L;
@@ -85,9 +105,17 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
         List<ChatMessage> rawMessages = new ArrayList<>();
         rawMessages.add(SystemMessage.from(systemPrompt));
         rawMessages.addAll(state.messages());
-        MessageSanitizer.SanitizeResult sanitizeResult = MessageSanitizer.sanitizeMessages(rawMessages, sanitizeToolMessages);
-        List<ChatMessage> messages = sanitizeResult.messages();
+        List<ChatMessage> patched = MessageSanitizer.patchDanglingToolCalls(rawMessages);
+        MessageSanitizer.SanitizeResult sanitizeResult = MessageSanitizer.sanitizeMessages(patched, sanitizeToolMessages);
+        List<ChatMessage> messages = new ArrayList<>(sanitizeResult.messages());
+        state.loopGuardMessage().ifPresent(hint -> messages.add(UserMessage.from(hint)));
+        messages.add(UserMessage.from(
+            "Provide your final answer now as plain text. Do not call any tools."));
         ghidra.util.Msg.debug(this, "ResponseNode input messages=" + messages.size());
+
+        if (streamHandler != null) {
+            streamHandler.prepareForFinalResponse();
+        }
 
         RunTree traceRun = beginResponseTrace(messages);
 
@@ -98,6 +126,9 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
                 ghidra.util.Msg.info(this, "ResponseNode streaming success elapsedMs=" + elapsedMs);
                 endResponseTrace(traceRun, update);
                 return update;
+            } catch (CancellationException ce) {
+                endResponseTraceWithError(traceRun, ce);
+                throw ce;
             } catch (RuntimeException ex) {
                 ghidra.util.Msg.warn(this, "Streaming response failed, falling back to sync: " + ex.getMessage());
                 endResponseTraceWithError(traceRun, ex);
@@ -141,41 +172,52 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
 
     private Map<String, Object> syncResponse(List<ChatMessage> messages) {
         long startNs = System.nanoTime();
-        ChatRequest request = ChatRequest.builder()
-            .messages(messages)
-            .build();
+        ChatRequest request = buildRequest(messages);
         ChatResponse response = chatModel.chat(request);
         AiMessage aiMessage = response.aiMessage();
-        String text = aiMessage.text() != null ? aiMessage.text() : "";
+        String text = aiMessage != null && aiMessage.text() != null ? aiMessage.text() : "";
+        if (text.isBlank() || hasToolCalls(aiMessage)) {
+            text = forceTextOnlyResponse(messages, "sync");
+        }
         ghidra.util.Msg.debug(this, "ResponseNode sync aiTextLen=" + text.length());
 
         Map<String, Object> update = new HashMap<>();
-        update.put(CopilotDeepState.MESSAGES, aiMessage);
+        update.put(CopilotDeepState.MESSAGES, AiMessage.from(text));
         update.put(CopilotDeepState.FINAL_RESPONSE, text);
         long elapsedMs = Math.max(0L, (System.nanoTime() - startNs) / 1_000_000L);
         ghidra.util.Msg.debug(this, "ResponseNode syncResponse elapsedMs=" + elapsedMs);
         return update;
     }
 
+    private static final long CANCELLATION_POLL_MS = 500L;
+
     private Map<String, Object> streamResponse(List<ChatMessage> messages) {
+        if (streamHandler.isCancelled()) {
+            throw new CancellationException("Operation cancelled");
+        }
+
         long startNs = System.nanoTime();
-        ChatRequest request = ChatRequest.builder()
-            .messages(messages)
-            .build();
+        ChatRequest request = buildRequest(messages);
 
         CountDownLatch completion = new CountDownLatch(1);
         AtomicReference<String> finalText = new AtomicReference<>("");
+        AtomicReference<AiMessage> finalMessage = new AtomicReference<>();
         AtomicReference<Throwable> errorRef = new AtomicReference<>();
 
         StreamingChatResponseHandler handler = new StreamingChatResponseHandler() {
             @Override
             public void onPartialResponse(String partialResponse) {
+                if (streamHandler.isCancelled()) {
+                    completion.countDown();
+                    return;
+                }
                 streamHandler.onPartialResponse(partialResponse);
             }
 
             @Override
             public void onCompleteResponse(ChatResponse completeResponse) {
                 AiMessage message = completeResponse.aiMessage();
+                finalMessage.set(message);
                 finalText.set(message.text() != null ? message.text() : "");
                 streamHandler.onCompleteResponse(completeResponse);
                 completion.countDown();
@@ -192,7 +234,18 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
         streamingChatModel.chat(request, handler);
 
         try {
-            if (!completion.await(streamingTimeoutMs, TimeUnit.MILLISECONDS)) {
+            long remainingMs = streamingTimeoutMs;
+            while (remainingMs > 0) {
+                long pollMs = Math.min(CANCELLATION_POLL_MS, remainingMs);
+                if (completion.await(pollMs, TimeUnit.MILLISECONDS)) {
+                    break;
+                }
+                if (streamHandler.isCancelled()) {
+                    throw new CancellationException("Operation cancelled");
+                }
+                remainingMs -= pollMs;
+            }
+            if (remainingMs <= 0 && completion.getCount() > 0) {
                 throw new RuntimeException("Streaming response did not complete in time (timeoutMs="
                     + streamingTimeoutMs + ")");
             }
@@ -201,18 +254,25 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
             throw new RuntimeException("Streaming response interrupted", e);
         }
 
+        if (streamHandler.isCancelled()) {
+            throw new CancellationException("Operation cancelled");
+        }
+
         if (errorRef.get() != null) {
             throw new RuntimeException("Streaming response failed", errorRef.get());
         }
 
         String resolvedText = finalText.get();
-        if ((resolvedText == null || resolvedText.isBlank()) && chatModel != null) {
+        if ((resolvedText == null || resolvedText.isBlank() || hasToolCalls(finalMessage.get())) && chatModel != null) {
             ghidra.util.Msg.info(this, "ResponseNode stream produced empty text; running sync fallback request");
             ChatResponse fallbackResponse = chatModel.chat(request);
             AiMessage fallbackMessage = fallbackResponse.aiMessage();
             resolvedText = fallbackMessage != null && fallbackMessage.text() != null
                 ? fallbackMessage.text()
                 : "";
+            if (resolvedText.isBlank() || hasToolCalls(fallbackMessage)) {
+                resolvedText = forceTextOnlyResponse(messages, "stream");
+            }
         }
         AiMessage aiMessage = AiMessage.from(resolvedText != null ? resolvedText : "");
         Map<String, Object> update = new HashMap<>();
@@ -221,6 +281,74 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
         long elapsedMs = Math.max(0L, (System.nanoTime() - startNs) / 1_000_000L);
         ghidra.util.Msg.debug(this, "ResponseNode streamResponse elapsedMs=" + elapsedMs);
         return update;
+    }
+
+    private String forceTextOnlyResponse(List<ChatMessage> messages, String mode) {
+        if (chatModel == null) {
+            return "";
+        }
+        try {
+            List<ChatMessage> patched = MessageSanitizer.patchDanglingToolCalls(messages);
+            List<ChatMessage> textOnlyHistory = MessageSanitizer
+                .sanitizeMessages(patched, true)
+                .messages();
+            List<ChatMessage> promptMessages = new ArrayList<>(textOnlyHistory);
+            promptMessages.add(UserMessage.from(
+                "Provide the final answer now. Return plain text only and do not call any tools. "
+                + "Summarize what was investigated, what was found, and recommend the next concrete step "
+                + "using a different approach if the current one has not made progress."));
+            ChatRequest textOnlyRequest = ChatRequest.builder()
+                .messages(promptMessages)
+                .build();
+            ChatResponse textOnlyResponse = chatModel.chat(textOnlyRequest);
+            AiMessage textOnlyMessage = textOnlyResponse.aiMessage();
+            String text = textOnlyMessage != null && textOnlyMessage.text() != null
+                ? textOnlyMessage.text()
+                : "";
+            if (!text.isBlank()) {
+                return text;
+            }
+            ghidra.util.Msg.warn(this, "ResponseNode " + mode
+                + " text-only fallback also returned empty text");
+        } catch (Exception e) {
+            ghidra.util.Msg.warn(this, "ResponseNode " + mode
+                + " text-only fallback failed: " + e.getMessage());
+        }
+        return "I completed the analysis steps but couldn't generate a final response. "
+            + "Please try once more and I will summarize the result directly.";
+    }
+
+    private static boolean hasToolCalls(AiMessage message) {
+        return message != null
+            && message.toolExecutionRequests() != null
+            && !message.toolExecutionRequests().isEmpty();
+    }
+
+    private ChatRequest buildRequest(List<ChatMessage> messages) {
+        ChatRequest.Builder builder = ChatRequest.builder().messages(messages);
+        if (shouldAttachToolSpecifications(messages)) {
+            builder.parameters(ChatRequestParameters.builder()
+                .toolSpecifications(toolSpecifications)
+                .build());
+        }
+        return builder.build();
+    }
+
+    private boolean shouldAttachToolSpecifications(List<ChatMessage> messages) {
+        if (toolSpecifications == null || toolSpecifications.isEmpty() || messages == null || messages.isEmpty()) {
+            return false;
+        }
+        for (ChatMessage message : messages) {
+            if (message instanceof ToolExecutionResultMessage) {
+                return true;
+            }
+            if (message instanceof AiMessage aiMessage
+                    && aiMessage.toolExecutionRequests() != null
+                    && !aiMessage.toolExecutionRequests().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
 }

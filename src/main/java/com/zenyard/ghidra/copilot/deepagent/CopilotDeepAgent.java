@@ -127,6 +127,7 @@ public class CopilotDeepAgent {
             planningModel,
             streamingChatModel,
             streamHandler,
+            List.of(),
             systemPrompt,
             sanitizeToolMessages,
             resolvedConfig.responseStreamingTimeoutMs(),

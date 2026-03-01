@@ -2,6 +2,7 @@ package com.zenyard.ghidra.copilot.tools;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
@@ -25,6 +26,7 @@ public class CopilotToolRegistry {
     private final int subAgentRecursionLimit;
     private final LangSmithTracer tracer;
     private final CopilotTaskToolBuilder.SubAgentProgressListener progressListener;
+    private final Supplier<Boolean> cancelledSupplier;
     
     public CopilotToolRegistry(
             Program program,
@@ -35,7 +37,7 @@ public class CopilotToolRegistry {
             dev.langchain4j.model.chat.StreamingChatModel subAgentStreamingModel,
             String systemPrompt) {
         this(program, monitor, tool, toolExecutionListener, artifactStorage,
-             subAgentStreamingModel, systemPrompt, 180_000L, 25, null, null);
+             subAgentStreamingModel, systemPrompt, 540_000L, 50, null, null, null);
     }
 
     public CopilotToolRegistry(
@@ -49,7 +51,7 @@ public class CopilotToolRegistry {
             long subAgentTimeoutMs,
             int subAgentRecursionLimit) {
         this(program, monitor, tool, toolExecutionListener, artifactStorage,
-             subAgentStreamingModel, systemPrompt, subAgentTimeoutMs, subAgentRecursionLimit, null, null);
+             subAgentStreamingModel, systemPrompt, subAgentTimeoutMs, subAgentRecursionLimit, null, null, null);
     }
 
     public CopilotToolRegistry(
@@ -64,7 +66,7 @@ public class CopilotToolRegistry {
             int subAgentRecursionLimit,
             LangSmithTracer tracer) {
         this(program, monitor, tool, toolExecutionListener, artifactStorage,
-             subAgentStreamingModel, systemPrompt, subAgentTimeoutMs, subAgentRecursionLimit, tracer, null);
+             subAgentStreamingModel, systemPrompt, subAgentTimeoutMs, subAgentRecursionLimit, tracer, null, null);
     }
 
     public CopilotToolRegistry(
@@ -79,6 +81,24 @@ public class CopilotToolRegistry {
             int subAgentRecursionLimit,
             LangSmithTracer tracer,
             CopilotTaskToolBuilder.SubAgentProgressListener progressListener) {
+        this(program, monitor, tool, toolExecutionListener, artifactStorage,
+             subAgentStreamingModel, systemPrompt, subAgentTimeoutMs, subAgentRecursionLimit,
+             tracer, progressListener, null);
+    }
+
+    public CopilotToolRegistry(
+            Program program,
+            TaskMonitor monitor,
+            PluginTool tool,
+            ToolExecutionListener toolExecutionListener,
+            CopilotArtifactStorage artifactStorage,
+            dev.langchain4j.model.chat.StreamingChatModel subAgentStreamingModel,
+            String systemPrompt,
+            long subAgentTimeoutMs,
+            int subAgentRecursionLimit,
+            LangSmithTracer tracer,
+            CopilotTaskToolBuilder.SubAgentProgressListener progressListener,
+            Supplier<Boolean> cancelledSupplier) {
         this.context = new CopilotToolContext(program, monitor, tool, toolExecutionListener, artifactStorage);
         this.tool = tool;
         this.subAgentStreamingModel = subAgentStreamingModel;
@@ -87,6 +107,7 @@ public class CopilotToolRegistry {
         this.subAgentRecursionLimit = subAgentRecursionLimit;
         this.tracer = tracer;
         this.progressListener = progressListener;
+        this.cancelledSupplier = cancelledSupplier;
     }
     
     /**
@@ -133,6 +154,11 @@ public class CopilotToolRegistry {
         tools.add(new GoToAddressTool(context, tool));
         tools.add(new GetCurrentAddressTool(context, tool));
         
+        // Python scripting tool (conditional - only if PyGhidra or Jython available)
+        if (RunPythonScriptTool.isPythonAvailable()) {
+            tools.add(new RunPythonScriptTool(context));
+        }
+
         // Swift tools (conditional - only if Swift binary detected)
         Program program = context.getProgram();
         if (program != null && SwiftUtils.isSwiftBinary(program)) {
@@ -188,7 +214,8 @@ public class CopilotToolRegistry {
                 .subAgentTimeoutMs(subAgentTimeoutMs)
                 .subAgentRecursionLimit(subAgentRecursionLimit)
                 .tracer(tracer)
-                .progressListener(progressListener);
+                .progressListener(progressListener)
+                .cancelledSupplier(cancelledSupplier);
             if (domainTools != null && !domainTools.isEmpty()) {
                 builder.toolObjects(domainTools);
             }

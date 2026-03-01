@@ -267,6 +267,13 @@ jobs:
             - **macOS Apple Silicon**: `*-mac-aarch64.zip`
             - **Linux ARM64**: `*-linux-aarch64.zip`
 
+            ## Enabling the Copilot Python Tool
+            The Copilot includes a **Python script execution tool** (`run_python_script`) that gives the AI agent full access to the Ghidra API via Python. To enable it, launch Ghidra through PyGhidra using the provided script:
+            ```
+            ./support/pyghidraRun
+            ```
+            On first run, the script will offer to create a virtualenv with all required dependencies. If Ghidra is launched without PyGhidra, the Copilot will still work but the Python tool will be unavailable.
+
             ## Changes
             See the [commit log](https://github.com/${{ github.repository }}/compare/${{ github.event.before }}...${{ github.sha }}) for details.
           draft: false

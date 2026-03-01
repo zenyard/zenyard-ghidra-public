@@ -19,11 +19,13 @@ public class CopilotStreamHandler implements StreamingChatResponseHandler {
     private final StringBuilder currentMessage;
     private volatile boolean cancelled;
     private volatile boolean inPlanningPhase;
+    private volatile boolean planningTokenSeenInPhase;
     
     public CopilotStreamHandler(CopilotViewModel viewModel) {
         this.viewModel = viewModel;
         this.currentMessage = new StringBuilder();
         this.cancelled = false;
+        this.planningTokenSeenInPhase = false;
     }
     
     @Override
@@ -77,7 +79,8 @@ public class CopilotStreamHandler implements StreamingChatResponseHandler {
      */
     public void beginPlanningPhase() {
         inPlanningPhase = true;
-        SwingUtilities.invokeLater(() -> viewModel.setThinking(true, "Reasoning..."));
+        planningTokenSeenInPhase = false;
+        SwingUtilities.invokeLater(() -> viewModel.ensureThinking("Reasoning..."));
     }
 
     /**
@@ -90,16 +93,39 @@ public class CopilotStreamHandler implements StreamingChatResponseHandler {
         }
         SwingUtilities.invokeLater(() -> {
             if (!cancelled && inPlanningPhase) {
-                viewModel.appendThinkingText(token);
+                String chunk = token;
+                if (!planningTokenSeenInPhase) {
+                    planningTokenSeenInPhase = true;
+                    String current = viewModel.getThinkingText();
+                    if (current != null && !current.isEmpty()) {
+                        char lastChar = current.charAt(current.length() - 1);
+                        char firstChar = token.charAt(0);
+                        if (!Character.isWhitespace(lastChar) && !Character.isWhitespace(firstChar)) {
+                            chunk = "\n" + token;
+                        }
+                    }
+                }
+                viewModel.appendThinkingText(chunk);
             }
         });
     }
 
     /**
      * Signal the end of the planning phase.
-     * Clears the thinking area so the response area can take over.
+     * Keeps the accumulated reasoning text visible so the thinking section
+     * does not collapse between plan-tool cycles. The text is replaced when
+     * the next planning phase begins or cleared by {@link #prepareForFinalResponse()}.
      */
     public void endPlanningPhase() {
+        inPlanningPhase = false;
+    }
+
+    /**
+     * Prepare the UI for the final response.
+     * Clears reasoning tokens from the dialog bubble so the final response
+     * streams into a clean bubble without leftover planning text.
+     */
+    public void prepareForFinalResponse() {
         inPlanningPhase = false;
         SwingUtilities.invokeLater(() -> viewModel.clearThinkingText());
     }
@@ -128,6 +154,13 @@ public class CopilotStreamHandler implements StreamingChatResponseHandler {
     public void cancel() {
         this.cancelled = true;
     }
+
+    /**
+     * Returns {@code true} if this handler has been cancelled.
+     */
+    public boolean isCancelled() {
+        return cancelled;
+    }
     
     /**
      * Get the complete message accumulated so far.
@@ -147,6 +180,7 @@ public class CopilotStreamHandler implements StreamingChatResponseHandler {
         }
         this.cancelled = false;
         this.inPlanningPhase = false;
+        this.planningTokenSeenInPhase = false;
     }
 
 }

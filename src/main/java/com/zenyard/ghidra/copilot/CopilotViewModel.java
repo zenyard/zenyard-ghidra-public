@@ -73,7 +73,7 @@ public class CopilotViewModel {
             return address;
         }
     }
-    
+
     private final List<Message> messages;
     private final List<Runnable> listeners;
     private final List<Consumer<String>> streamChunkListeners;
@@ -95,7 +95,7 @@ public class CopilotViewModel {
     private boolean streamDeltaEnabled;
     private String subAgentType;
     private String subAgentStreamText;
-    
+
     public CopilotViewModel() {
         this.messages = new CopyOnWriteArrayList<>();
         this.listeners = new CopyOnWriteArrayList<>();
@@ -275,6 +275,58 @@ public class CopilotViewModel {
     public void setThinking(boolean thinking, String thinkingText) {
         this.thinking = thinking;
         this.thinkingText = truncateTail(thinkingText, MAX_THINKING_TEXT_CHARS);
+        notifyListeners();
+    }
+
+    /**
+     * Ensure thinking mode is active with a fallback text when empty.
+     * Does not overwrite existing non-empty thinking text.
+     */
+    public void ensureThinking(String fallbackText) {
+        boolean changed = false;
+        if (!this.thinking) {
+            this.thinking = true;
+            changed = true;
+        }
+        if ((this.thinkingText == null || this.thinkingText.isBlank())
+                && fallbackText != null
+                && !fallbackText.isBlank()) {
+            this.thinkingText = truncateTail(fallbackText, MAX_THINKING_TEXT_CHARS);
+            changed = true;
+        }
+        if (changed) {
+            notifyListeners();
+        }
+    }
+
+    /**
+     * Append a status line in the reasoning area.
+     * Replaces placeholder-only text (e.g. "Thinking...", "Reasoning...") with the first status line.
+     */
+    public void appendThinkingStatusLine(String statusLine) {
+        if (statusLine == null) {
+            return;
+        }
+        String line = statusLine.trim();
+        if (line.isEmpty()) {
+            return;
+        }
+
+        this.thinking = true;
+        String current = this.thinkingText;
+        if (current == null || current.isBlank() || isThinkingPlaceholder(current)) {
+            this.thinkingText = truncateTail(line, MAX_THINKING_TEXT_CHARS);
+            notifyListeners();
+            return;
+        }
+
+        String lastLine = extractLastLine(current);
+        if (line.equals(lastLine)) {
+            return;
+        }
+
+        String separator = current.endsWith("\n") ? "" : "\n";
+        this.thinkingText = appendWithTailLimit(current, separator + line, MAX_THINKING_TEXT_CHARS);
         notifyListeners();
     }
 
@@ -708,6 +760,25 @@ public class CopilotViewModel {
 
     public String getSubAgentStreamText() {
         return subAgentStreamText;
+    }
+
+    private static boolean isThinkingPlaceholder(String text) {
+        if (text == null) {
+            return false;
+        }
+        String normalized = text.trim();
+        return "Thinking...".equals(normalized) || "Reasoning...".equals(normalized);
+    }
+
+    private static String extractLastLine(String text) {
+        if (text == null || text.isEmpty()) {
+            return "";
+        }
+        int idx = text.lastIndexOf('\n');
+        if (idx < 0) {
+            return text.trim();
+        }
+        return text.substring(idx + 1).trim();
     }
 
     private static String truncateTail(String text, int maxChars) {

@@ -24,7 +24,6 @@ import ghidra.program.model.symbol.SymbolIterator;
 import ghidra.program.model.symbol.SymbolTable;
 import ghidra.program.util.ProgramLocation;
 import ghidra.util.Msg;
-import ghidra.util.task.TaskMonitor;
 
 import com.zenyard.ghidra.api.generated.ApiClient;
 import com.zenyard.ghidra.api.generated.ApiException;
@@ -80,11 +79,12 @@ public class CopilotController {
     private int subAgentCount;
     private String lastObservedActiveTodo;
     private long lastObservedActiveTodoSinceMs;
+    private String lastObservedToolBatchSignature;
     private volatile long currentRunSendStartNs;
     private volatile long currentRunLastTodoDoneNs;
-    // Tracks whether Task Progress is currently visible (todos or subagent stream).
-    // Used to expand the panel once when it is first added, without re-expanding on later updates.
-    private boolean taskProgressVisible;
+    private String persistedSessionNotes;
+    private CopilotCancellationMonitor cancellationMonitor;
+    private volatile CompletableFuture<?> currentRunFuture;
     
     public CopilotController(CopilotProvider provider, ApiClient apiClient, BinariesApi binariesApi, UserApi userApi, PluginTool tool) {
         this.provider = provider;
@@ -104,9 +104,10 @@ public class CopilotController {
         this.subAgentCount = 0;
         this.lastObservedActiveTodo = "";
         this.lastObservedActiveTodoSinceMs = 0L;
+        this.lastObservedToolBatchSignature = "";
         this.currentRunSendStartNs = 0L;
         this.currentRunLastTodoDoneNs = 0L;
-        this.taskProgressVisible = false;
+        this.persistedSessionNotes = "";
     }
 
     private static final class DeepAgentRunResult {
@@ -116,6 +117,7 @@ public class CopilotController {
         private final boolean usedFallback;
         private final boolean usedStreamBuffer;
         private final int streamBufferChars;
+        private final List<String> completedTodos;
 
         private DeepAgentRunResult(
                 String response,
@@ -123,13 +125,15 @@ public class CopilotController {
                 long finalTextNs,
                 boolean usedFallback,
                 boolean usedStreamBuffer,
-                int streamBufferChars) {
+                int streamBufferChars,
+                List<String> completedTodos) {
             this.response = response;
             this.finalStateNs = finalStateNs;
             this.finalTextNs = finalTextNs;
             this.usedFallback = usedFallback;
             this.usedStreamBuffer = usedStreamBuffer;
             this.streamBufferChars = streamBufferChars;
+            this.completedTodos = completedTodos != null ? completedTodos : List.of();
         }
     }
     
@@ -191,13 +195,17 @@ public class CopilotController {
             dev.langchain4j.model.chat.StreamingChatModel summarizationModel =
                 CopilotAgent.createStreamingSummarizationModel(copilotConfig);
             
-            // Get TokenCountEstimator from model (or use default based on provider)
-            dev.langchain4j.model.TokenCountEstimator tokenCountEstimator = getTokenCountEstimator(null, copilotConfig);
-            
-            // Create memory with TokenCountEstimator
-            memory = new CopilotMemory(COPILOT_THREAD_ID, tokenCountEstimator);
-            ChatMemory chatMemory = memory.getChatMemory();
-            deepAgentMemoryAdapter = new DeepAgentMemoryAdapter(chatMemory);
+            // Get TokenCountEstimator from model (or use default based on provider).
+            // Preserve existing conversation memory across agent re-initialization.
+            if (memory == null) {
+                dev.langchain4j.model.TokenCountEstimator tokenCountEstimator =
+                    getTokenCountEstimator(null, copilotConfig);
+                memory = new CopilotMemory(COPILOT_THREAD_ID, tokenCountEstimator);
+            }
+            if (deepAgentMemoryAdapter == null) {
+                ChatMemory chatMemory = memory.getChatMemory();
+                deepAgentMemoryAdapter = new DeepAgentMemoryAdapter(chatMemory);
+            }
             
             // Create summarizer (also needs TokenCountEstimator)
             dev.langchain4j.model.TokenCountEstimator summarizationEstimator = getTokenCountEstimator(null, copilotConfig);
@@ -205,25 +213,33 @@ public class CopilotController {
             
             artifactStorage = new CopilotArtifactStorage(currentProgram);
 
+            // Load session notes from previous runs and build a context-enriched system prompt
+            persistedSessionNotes = artifactStorage.loadSessionSummary();
+            String systemPrompt = persistedSessionNotes.isBlank()
+                ? CopilotPrompts.SYSTEM_PROMPT
+                : CopilotPrompts.SYSTEM_PROMPT + "\n\n" + CopilotPrompts.sessionNotesSection(persistedSessionNotes);
+
             CopilotDeepAgentConfig deepAgentConfig = buildDeepAgentConfig(copilotConfig);
 
             LangSmithTracer langSmithTracer = createLangSmithTracer();
 
-            // Create tools
+            // Create cancellation monitor for this agent instance
+            cancellationMonitor = new CopilotCancellationMonitor();
+
+            // Create tools with cancellation-aware monitor
             CopilotToolRegistry toolRegistry = new CopilotToolRegistry(
                 currentProgram,
-                // NOTE: Copilot currently runs in background task style; use DUMMY until
-                // request-scoped monitor propagation is introduced across controller/tool layers.
-                TaskMonitor.DUMMY,
+                cancellationMonitor,
                 tool,
                 toolExecutionListener,
                 artifactStorage,
                 CopilotAgent.createSubAgentStreamingChatModel(copilotConfig),
-                CopilotPrompts.SYSTEM_PROMPT,
+                systemPrompt,
                 deepAgentConfig.subAgentTimeoutMs(),
                 deepAgentConfig.subAgentRecursionLimit(),
                 langSmithTracer,
-                createSubAgentProgressListener()
+                createSubAgentProgressListener(),
+                cancellationMonitor.asCancelledSupplier()
             );
             List<Object> tools = toolRegistry.getAllTools();
             
@@ -235,7 +251,7 @@ public class CopilotController {
                 streamHandler,
                 deepAgentMemoryAdapter,
                 null,
-                CopilotPrompts.SYSTEM_PROMPT,
+                systemPrompt,
                 shouldSanitizeToolMessages(copilotConfig),
                 deepAgentConfig,
                 langSmithTracer
@@ -281,15 +297,24 @@ public class CopilotController {
             viewModel.clearToolHistory();
             viewModel.clearSubAgentStreaming();
         }
-        taskProgressVisible = false;
+        lastObservedToolBatchSignature = "";
     }
     
     /**
      * Stop the current agent operation.
+     * Cancels all layers: the cancellation monitor (propagates to tools and subagents),
+     * the stream handler (stops UI token forwarding), and the running future.
      */
     public void stop() {
+        if (cancellationMonitor != null) {
+            cancellationMonitor.cancel();
+        }
         if (streamHandler != null) {
             streamHandler.cancel();
+        }
+        CompletableFuture<?> runFuture = currentRunFuture;
+        if (runFuture != null) {
+            runFuture.cancel(true);
         }
         if (viewModel != null) {
             viewModel.setThinking(false, null);
@@ -598,11 +623,24 @@ public class CopilotController {
         }
         currentRunSendStartNs = System.nanoTime();
         currentRunLastTodoDoneNs = 0L;
+        lastObservedToolBatchSignature = "";
+        if (cancellationMonitor != null) {
+            cancellationMonitor.clearCancelled();
+        }
         if (streamHandler != null) {
             streamHandler.reset();
         }
         // Use view-model if available, otherwise update provider directly
         if (viewModel != null) {
+            // Reset task-progress state at the start of every prompt so each run starts fresh.
+            viewModel.syncTodoState(
+                Collections.emptyList(),
+                null,
+                Collections.emptyList(),
+                Collections.emptyList()
+            );
+            viewModel.clearToolHistory();
+            viewModel.clearSubAgentStreaming();
             viewModel.addMessage(message, true);
             viewModel.setLoading(true);
             viewModel.setThinking(true, "Thinking...");
@@ -634,11 +672,15 @@ public class CopilotController {
         }
         
         // Send message to deep agent asynchronously
-        CompletableFuture.supplyAsync(() -> {
+        currentRunFuture = CompletableFuture.supplyAsync(() -> {
             try {
                 NodeOutput<CopilotDeepState> lastOutput = null;
                 for (NodeOutput<CopilotDeepState> output : (Iterable<NodeOutput<CopilotDeepState>>) () ->
                         deepAgent.stream(message).stream().iterator()) {
+                    if (cancellationMonitor != null && cancellationMonitor.isCancelled()) {
+                        Msg.info(this, "Agent run cancelled by user");
+                        break;
+                    }
                     lastOutput = output;
                     if (output == null) {
                         continue;
@@ -649,6 +691,15 @@ public class CopilotController {
                     }
                     CopilotDeepState snapshot = state;
                     SwingUtilities.invokeLater(() -> syncDeepStateToViewModel(snapshot, viewModel));
+                }
+                boolean wasCancelled = cancellationMonitor != null && cancellationMonitor.isCancelled();
+                if (wasCancelled) {
+                    if (deepAgent != null) {
+                        deepAgent.endTrace("Cancelled by user");
+                    }
+                    return new DeepAgentRunResult(
+                        "", System.nanoTime(), System.nanoTime(),
+                        false, false, 0, List.of());
                 }
                 if (lastOutput == null || lastOutput.state() == null) {
                     throw new RuntimeException("Deep agent stream completed without state");
@@ -688,7 +739,8 @@ public class CopilotController {
                     finalTextNs,
                     usedFallback,
                     usedStreamBuffer,
-                    streamBufferChars
+                    streamBufferChars,
+                    new java.util.ArrayList<>(finalState.completedTodos())
                 );
             } catch (Exception e) {
                 if (deepAgent != null) {
@@ -715,25 +767,35 @@ public class CopilotController {
                     + " usedStreamBuffer=" + result.usedStreamBuffer
                     + " streamBufferChars=" + result.streamBufferChars);
 
+            // Persist session notes so subsequent runs (after restart) know what was explored
+            if (artifactStorage != null && !result.completedTodos.isEmpty()) {
+                artifactStorage.appendSessionEntry(message, result.completedTodos, result.response);
+            }
+
+            boolean cancelled = cancellationMonitor != null && cancellationMonitor.isCancelled();
+
             // Use view-model if available, otherwise update provider directly
             SwingUtilities.invokeLater(() -> {
+                if (!cancelled && deepAgentMemoryAdapter != null) {
+                    deepAgentMemoryAdapter.recordTurn(
+                        dev.langchain4j.data.message.UserMessage.from(message),
+                        dev.langchain4j.data.message.AiMessage.from(result.response)
+                    );
+                }
                 if (viewModel != null) {
                     viewModel.setLoading(false);
                     viewModel.setThinking(false, null);
-                    // If streaming isn't supported, append response to last message
-                    List<CopilotViewModel.Message> messages = viewModel.getMessages();
-                    if (!messages.isEmpty()) {
-                        CopilotViewModel.Message last = messages.get(messages.size() - 1);
-                        if (!last.isFromUser() && (last.getText() == null || last.getText().isEmpty())) {
-                            viewModel.appendToLastMessage(result.response);
+                    viewModel.setTodoMinimized(true);
+                    if (!cancelled) {
+                        List<CopilotViewModel.Message> messages = viewModel.getMessages();
+                        if (!messages.isEmpty()) {
+                            CopilotViewModel.Message last = messages.get(messages.size() - 1);
+                            if (!last.isFromUser() && (last.getText() == null || last.getText().isEmpty())) {
+                                viewModel.appendToLastMessage(result.response);
+                            }
                         }
                     }
-
-                    // Auto-finalize and collapse TODO panel once a final response is shown.
-                    viewModel.finalizeTodos(null);
-                    viewModel.setTodoMinimized(true);
-                    taskProgressVisible = isTaskProgressVisible(viewModel);
-                } else {
+                } else if (!cancelled) {
                     provider.appendMessage("Zenyard: " + result.response);
                 }
             });
@@ -745,13 +807,15 @@ public class CopilotController {
     
     private void handleError(String errorMsg, Throwable throwable) {
         Throwable rootCause = findRootCause(throwable);
-        final String finalErrorMsg = getUserFriendlyErrorMessage(errorMsg, rootCause);
+        final String finalErrorMsg = getUserFriendlyErrorMessage(errorMsg, rootCause, throwable);
+        logCopilotException(finalErrorMsg, throwable, rootCause);
         
         // Use view-model if available, otherwise update provider directly
         SwingUtilities.invokeLater(() -> {
             if (viewModel != null) {
                 viewModel.setLoading(false);
                 viewModel.setThinking(false, null);
+                viewModel.setTodoMinimized(true);
                 viewModel.setError(finalErrorMsg);
                 viewModel.addMessage(finalErrorMsg, false);
             } else {
@@ -763,16 +827,34 @@ public class CopilotController {
         });
     }
 
-    private String getUserFriendlyErrorMessage(String fallbackErrorMsg, Throwable rootCause) {
+    private void logCopilotException(String finalErrorMsg, Throwable throwable, Throwable rootCause) {
+        Throwable toLog = throwable != null ? throwable : rootCause;
+        if (toLog != null) {
+            Msg.error(this, "Copilot request failed: " + finalErrorMsg, toLog);
+        } else {
+            Msg.error(this, "Copilot request failed: " + finalErrorMsg);
+        }
+    }
+
+    private String getUserFriendlyErrorMessage(String fallbackErrorMsg, Throwable rootCause, Throwable throwable) {
+        if (isLikelyVertexThrottlingError(throwable)) {
+            return "Vertex AI request was throttled because your quota or rate limit was exceeded. "
+                + "Wait a minute and try again, or request a quota increase in Google Cloud Vertex AI.";
+        }
+
         if (rootCause instanceof ApiException apiException) {
             if (apiException.getCode() == 401) {
                 return "Authentication failed: your Zenyard API key is invalid or expired. "
                     + "Update it in Tools -> Zenyard -> Configuration and try again.";
             }
+            if (apiException.getCode() == 429) {
+                return "Request was throttled due to a quota or rate limit. "
+                    + "Please wait a minute and try again.";
+            }
             return "API Error: " + apiException.getMessage();
         }
 
-        if (rootCause instanceof AuthenticationException || isLikelyModelAuthenticationError(rootCause)) {
+        if (rootCause instanceof AuthenticationException || isLikelyModelAuthenticationError(throwable)) {
             return "Authentication failed when contacting the AI provider. "
                 + "Your model API key appears invalid or expired. "
                 + "Update your Copilot model API key in Tools -> Zenyard -> Configuration and try again.";
@@ -785,15 +867,66 @@ public class CopilotController {
     }
 
     private boolean isLikelyModelAuthenticationError(Throwable throwable) {
-        if (throwable == null || throwable.getMessage() == null) {
+        return exceptionChainMatches(throwable, lowerMessage ->
+            containsAny(lowerMessage,
+                "invalid api key",
+                "auth_error",
+                "authentication",
+                "\"code\":\"401\"",
+                "'code':'401'",
+                "\"code\":401",
+                "code: 401"));
+    }
+
+    private boolean isLikelyVertexThrottlingError(Throwable throwable) {
+        return exceptionChainMatches(throwable, lowerMessage -> {
+            boolean hasThrottlingMarker = containsAny(lowerMessage,
+                "throttling_error",
+                "resource_exhausted",
+                "quota exceeded",
+                "rate limit",
+                "rate_limit",
+                "too many requests",
+                "\"code\":\"429\"",
+                "\"code\":429",
+                "code: 429");
+            boolean hasVertexMarker = containsAny(lowerMessage,
+                "vertex",
+                "vertex_ai",
+                "aiplatform.googleapis.com",
+                "online_prediction_input_tokens_per_minute_per_base_model");
+            return hasThrottlingMarker && hasVertexMarker;
+        });
+    }
+
+    private boolean exceptionChainMatches(
+            Throwable throwable,
+            java.util.function.Predicate<String> messageMatcher) {
+        if (throwable == null || messageMatcher == null) {
             return false;
         }
-        String lowerMessage = throwable.getMessage().toLowerCase(java.util.Locale.ROOT);
-        return lowerMessage.contains("invalid api key")
-            || lowerMessage.contains("auth_error")
-            || lowerMessage.contains("authentication")
-            || lowerMessage.contains("\"code\":\"401\"")
-            || lowerMessage.contains("'code':'401'");
+        java.util.Set<Throwable> visited = new java.util.HashSet<>();
+        Throwable current = throwable;
+        while (current != null && visited.add(current)) {
+            String message = current.getMessage();
+            if (message != null && messageMatcher.test(message.toLowerCase(java.util.Locale.ROOT))) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private static boolean containsAny(String text, String... needles) {
+        if (text == null || needles == null) {
+            return false;
+        }
+        for (String needle : needles) {
+            if (needle != null && !needle.isBlank() && text.contains(needle)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Throwable findRootCause(Throwable throwable) {
@@ -862,9 +995,9 @@ public class CopilotController {
         int toolArgTruncateThreshold = getIntParam(
             config, 5000, "deepagent_tool_arg_truncate_threshold", "deepAgentToolArgTruncateThreshold");
         long subAgentTimeoutMs = (long) getIntParam(
-            config, 180_000, "deepagent_subagent_timeout_ms", "deepAgentSubAgentTimeoutMs");
+            config, 540_000, "deepagent_subagent_timeout_ms", "deepAgentSubAgentTimeoutMs");
         int subAgentRecursionLimit = getIntParam(
-            config, 25, "deepagent_subagent_recursion_limit", "deepAgentSubAgentRecursionLimit");
+            config, 50, "deepagent_subagent_recursion_limit", "deepAgentSubAgentRecursionLimit");
         long toolCallTimeoutMs = (long) getIntParam(
             config, 60_000, "deepagent_tool_call_timeout_ms", "deepAgentToolCallTimeoutMs");
 
@@ -984,23 +1117,6 @@ public class CopilotController {
         }
     }
 
-    private static boolean hasSubAgentStream(CopilotViewModel model) {
-        if (model == null) {
-            return false;
-        }
-        String agentType = model.getSubAgentType();
-        String streamText = model.getSubAgentStreamText();
-        return (agentType != null && !agentType.trim().isEmpty())
-            || (streamText != null && !streamText.trim().isEmpty());
-    }
-
-    private static boolean isTaskProgressVisible(CopilotViewModel model) {
-        if (model == null) {
-            return false;
-        }
-        return !model.getTodos().isEmpty() || hasSubAgentStream(model);
-    }
-
     private com.zenyard.ghidra.copilot.deepagent.CopilotTaskToolBuilder.SubAgentProgressListener
             createSubAgentProgressListener() {
         return new com.zenyard.ghidra.copilot.deepagent.CopilotTaskToolBuilder.SubAgentProgressListener() {
@@ -1008,13 +1124,8 @@ public class CopilotController {
             public void onSubAgentStart(String agentType, String description) {
                 if (viewModel != null) {
                     SwingUtilities.invokeLater(() -> {
-                        // Expand once when Task Progress becomes visible (subagent stream starts).
-                        if (!taskProgressVisible) {
-                            viewModel.setTodoMinimized(false);
-                        }
                         viewModel.setThinking(true, "Running " + agentType + " subagent...");
                         viewModel.setSubAgentStreaming(agentType, "");
-                        taskProgressVisible = isTaskProgressVisible(viewModel);
                     });
                 }
             }
@@ -1023,8 +1134,6 @@ public class CopilotController {
             public void onSubAgentEnd(String agentType, boolean success) {
                 if (viewModel != null) {
                     SwingUtilities.invokeLater(() -> {
-                        viewModel.clearSubAgentStreaming();
-                        taskProgressVisible = isTaskProgressVisible(viewModel);
                         viewModel.setThinking(true, "Thinking...");
                     });
                 }
@@ -1079,19 +1188,39 @@ public class CopilotController {
             currentRunLastTodoDoneNs = System.nanoTime();
         }
         long activeAgeMs = !active.isBlank() ? Math.max(0L, now - lastObservedActiveTodoSinceMs) : 0L;
-        List<String> displayTodos = new ArrayList<>(state.todos());
+        List<String> incomingTodos = new ArrayList<>(state.todos());
+        List<String> displayTodos = new ArrayList<>(incomingTodos);
         String displayActive = active;
         List<String> displayCompleted = new ArrayList<>(state.completedTodos());
         List<String> displayFailed = new ArrayList<>(state.failedTodos());
+        List<String> toolEvents = new ArrayList<>(state.toolEvents());
+
+        // Deep state updates can be incremental; merge with current view-model state
+        // to avoid transient list replacement/flicker in Task Progress.
+        if (model.isLoading() || model.isThinking()) {
+            java.util.LinkedHashSet<String> mergedTodos = new java.util.LinkedHashSet<>(model.getTodos());
+            mergedTodos.addAll(incomingTodos);
+            displayTodos = new ArrayList<>(mergedTodos);
+
+            java.util.LinkedHashSet<String> mergedCompleted = new java.util.LinkedHashSet<>(model.getCompletedTodos());
+            mergedCompleted.addAll(displayCompleted);
+            displayCompleted = new ArrayList<>(mergedCompleted);
+
+            java.util.LinkedHashSet<String> mergedFailed = new java.util.LinkedHashSet<>(model.getFailedTodos());
+            mergedFailed.addAll(displayFailed);
+            displayFailed = new ArrayList<>(mergedFailed);
+
+            if ((displayActive == null || displayActive.isBlank())) {
+                String priorActive = model.getActiveTodo();
+                if (priorActive != null && !priorActive.isBlank() && displayTodos.contains(priorActive)) {
+                    displayActive = priorActive;
+                }
+            }
+        }
 
         String effectiveActive = displayActive;
         if (!displayActive.isBlank() && activeAgeMs > 5000L) {
             effectiveActive = "";
-        }
-        boolean nextVisible = !displayTodos.isEmpty() || hasSubAgentStream(model);
-        if (!taskProgressVisible && nextVisible) {
-            // Expand once when the section is first added to the UI.
-            model.setTodoMinimized(false);
         }
         model.syncTodoState(
             displayTodos,
@@ -1099,8 +1228,13 @@ public class CopilotController {
             displayCompleted,
             displayFailed
         );
-        model.setToolHistory(new ArrayList<>(state.toolEvents()));
-        taskProgressVisible = isTaskProgressVisible(model);
+        String toolBatchSignature = String.join("\u001f", toolEvents);
+        if (!toolEvents.isEmpty() && !toolBatchSignature.equals(lastObservedToolBatchSignature)) {
+            for (String toolName : toolEvents) {
+                model.addToolHistory(toolName);
+            }
+            lastObservedToolBatchSignature = toolBatchSignature;
+        }
     }
 }
 

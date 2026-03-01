@@ -12,11 +12,12 @@ import com.zenyard.ghidra.api.generated.model.ExpiredUsage;
 import com.zenyard.ghidra.api.generated.model.LimitedUsage;
 import com.zenyard.ghidra.api.generated.model.UnlimitedUsage;
 import com.zenyard.ghidra.api.generated.model.UsageResponse;
-import ghidra.util.Msg;
+import com.zenyard.ghidra.ui.UsageBlockedDialog;
 
 public final class UsageState {
     public static final String BLOCKED_DIALOG_TITLE = "Usage Limit Reached";
     public static final String CONTACT_EMAIL = "access@zenyard.ai";
+    static final double NEAR_CAPACITY_THRESHOLD = 0.8;
 
     public enum Kind {
         UNKNOWN,
@@ -126,8 +127,13 @@ public final class UsageState {
         if (kind == Kind.EXPIRED) {
             return UsageLevel.EXPIRED;
         }
-        if (kind == Kind.LIMITED && usagePercentage != null && usagePercentage >= 1.0) {
-            return UsageLevel.OVER_LIMIT;
+        if (kind == Kind.LIMITED && usagePercentage != null) {
+            if (usagePercentage >= 1.0) {
+                return UsageLevel.OVER_LIMIT;
+            }
+            if (usagePercentage >= NEAR_CAPACITY_THRESHOLD) {
+                return UsageLevel.WARNING;
+            }
         }
         return UsageLevel.NORMAL;
     }
@@ -184,13 +190,13 @@ public final class UsageState {
 
     public String getTooltip() {
         if (kind == Kind.EXPIRED) {
-            return "Your plan has expired. Upgrade or contact us to continue.";
+            return "Your plan has expired. Upgrade to continue. " + getContactSupportText();
         }
         if (kind == Kind.LIMITED && usagePercentage != null) {
             if (usagePercentage >= 1.0) {
-                return "Have questions or want more quota? Contact us.";
+                return "Quota reached. Want to keep going? Contact us";
             }
-            return "Percent of your analysis quota used so far";
+            return "Have questions or want more quota? Contact us";
         }
         return "";
     }
@@ -205,16 +211,32 @@ public final class UsageState {
 
     public String getBlockedMessage() {
         String tooltip = getTooltip();
-        return tooltip.isEmpty() ? "Usage limit reached. Upgrade or contact us to continue." : tooltip;
+        return tooltip.isEmpty() ? "Usage limit reached. Upgrade to continue. " + getContactSupportText() : tooltip;
+    }
+
+    public static String getContactSupportText() {
+        return "Contact us: " + CONTACT_EMAIL;
     }
 
     public static void showBlockedDialog(Component parent, UsageState state) {
         UsageState resolved = state != null ? state : UsageState.unknown();
-        Msg.showError(UsageState.class, parent, BLOCKED_DIALOG_TITLE, resolved.getBlockedMessage(), null);
+        UsageBlockedDialog.showDialog(parent, resolved);
+    }
+
+    public static boolean isContactEmailSupported() {
+        if (!Desktop.isDesktopSupported()) {
+            return false;
+        }
+        try {
+            Desktop desktop = Desktop.getDesktop();
+            return desktop.isSupported(Desktop.Action.MAIL) || desktop.isSupported(Desktop.Action.BROWSE);
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     public static void openContactEmail() {
-        if (!Desktop.isDesktopSupported()) {
+        if (!isContactEmailSupported()) {
             return;
         }
         try {

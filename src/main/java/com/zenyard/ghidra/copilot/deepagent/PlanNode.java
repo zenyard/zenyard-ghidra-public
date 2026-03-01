@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -114,6 +115,9 @@ public class PlanNode implements AsyncNodeActionWithConfig<CopilotDeepState> {
     private CompletableFuture<Map<String, Object>> streamPlan(
             List<ChatMessage> messages,
             ChatRequestParameters parameters) {
+        if (streamHandler.isCancelled()) {
+            return CompletableFuture.failedFuture(new CancellationException("Operation cancelled"));
+        }
         CompletableFuture<Map<String, Object>> future = new CompletableFuture<>();
         streamHandler.beginPlanningPhase();
         RunTree traceRun = beginPlanTrace(messages);
@@ -126,12 +130,23 @@ public class PlanNode implements AsyncNodeActionWithConfig<CopilotDeepState> {
         streamingChatModel.chat(request, new StreamingChatResponseHandler() {
             @Override
             public void onPartialResponse(String partialResponse) {
+                if (streamHandler.isCancelled()) {
+                    streamHandler.endPlanningPhase();
+                    endPlanTraceWithError(traceRun, new CancellationException("Cancelled"));
+                    future.completeExceptionally(new CancellationException("Operation cancelled"));
+                    return;
+                }
                 streamHandler.onPlanningToken(partialResponse);
             }
 
             @Override
             public void onCompleteResponse(ChatResponse response) {
                 streamHandler.endPlanningPhase();
+                if (streamHandler.isCancelled()) {
+                    endPlanTraceWithError(traceRun, new CancellationException("Cancelled"));
+                    future.completeExceptionally(new CancellationException("Operation cancelled"));
+                    return;
+                }
                 AiMessage aiMessage = response.aiMessage();
                 logAiMessage(aiMessage);
                 endPlanTrace(traceRun, aiMessage);
@@ -141,6 +156,11 @@ public class PlanNode implements AsyncNodeActionWithConfig<CopilotDeepState> {
             @Override
             public void onError(Throwable error) {
                 streamHandler.endPlanningPhase();
+                if (streamHandler.isCancelled()) {
+                    endPlanTraceWithError(traceRun, new CancellationException("Cancelled"));
+                    future.completeExceptionally(new CancellationException("Operation cancelled"));
+                    return;
+                }
                 ghidra.util.Msg.warn(PlanNode.this, "PlanNode streaming failed, falling back to sync: " + error.getMessage());
                 endPlanTraceWithError(traceRun, error);
                 try {

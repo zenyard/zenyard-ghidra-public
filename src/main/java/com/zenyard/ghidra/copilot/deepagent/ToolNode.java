@@ -12,6 +12,8 @@ import java.util.stream.Collectors;
 import org.bsc.langgraph4j.action.AsyncNodeActionWithConfig;
 import org.bsc.langgraph4j.langchain4j.tool.LC4jToolService;
 
+import com.zenyard.ghidra.copilot.CopilotPrompts;
+
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
@@ -38,7 +40,7 @@ public class ToolNode implements AsyncNodeActionWithConfig<CopilotDeepState> {
     private final long toolCallTimeoutMs;
     private final LangSmithTracer tracer;
     private static final int TOOL_ARG_LOG_LIMIT = 2000;
-    private static final int REPEATED_TOOL_BATCH_LIMIT = 3;
+    private static final int REPEATED_TOOL_BATCH_LIMIT = CopilotPrompts.REPEATED_TOOL_BATCH_LIMIT;
     private static final int TOOL_SIGNATURE_MAX_NAMES = 64;
     private static final int TOOL_SIGNATURE_MAX_NAME_LEN = 64;
 
@@ -86,17 +88,19 @@ public class ToolNode implements AsyncNodeActionWithConfig<CopilotDeepState> {
             .invocationParameters(InvocationParameters.from(state.data()))
             .build();
 
-        List<String> toolNames = aiMessage.toolExecutionRequests()
-            .stream()
-            .map(request -> request.name())
+        List<ToolExecutionRequest> requests = aiMessage.toolExecutionRequests();
+        List<String> toolNames = requests.stream()
+            .map(ToolExecutionRequest::name)
             .collect(Collectors.toList());
-        String toolBatchSignature = buildToolBatchSignature(toolNames);
+        String toolBatchSignature = buildToolBatchSignature(requests);
+        String toolCategorySignature = buildToolCategorySignature(toolNames);
         String previousSignature = state.lastToolBatchSignature();
         int repeatCount = toolBatchSignature.equals(previousSignature)
             ? state.sameToolBatchCount() + 1
             : 1;
-        boolean repeatedTodosOnly = "write_todos".equals(toolBatchSignature) && repeatCount >= 2;
+        boolean repeatedTodosOnly = "write_todos".equals(toolCategorySignature) && repeatCount >= 2;
         boolean repeatedToolBatch = repeatCount >= REPEATED_TOOL_BATCH_LIMIT;
+        int pivotCount = state.loopGuardPivotCount();
 
         Map<String, RunTree> toolTraceRuns = new HashMap<>();
         aiMessage.toolExecutionRequests().forEach(request -> {
@@ -117,17 +121,40 @@ public class ToolNode implements AsyncNodeActionWithConfig<CopilotDeepState> {
             .thenApply(command -> {
                 Map<String, Object> update = new HashMap<>(command.update());
                 update.put(CopilotDeepState.TOOL_EVENTS, toolNames);
-                boolean forceReturnDirect = repeatedTodosOnly || repeatedToolBatch;
-                if (forceReturnDirect) {
+
+                boolean isReturnDirectTool = toolNames.stream().anyMatch(returnDirectTools::contains);
+                boolean forceReturnDirect;
+                int newPivotCount = pivotCount;
+
+                if (repeatedToolBatch && pivotCount == 0) {
+                    // First strike: inject pivot hint but let the agent continue
                     ghidra.util.Msg.warn(this,
-                        "Tool loop guard triggered for signature '" + toolBatchSignature
-                            + "' (repeatCount=" + repeatCount + ")");
+                        "Tool loop guard triggered (first pivot) for signature '"
+                            + toolCategorySignature + "' (repeatCount=" + repeatCount + ")");
+                    update.put(CopilotDeepState.LOOP_GUARD_MESSAGE,
+                        CopilotPrompts.loopGuardPivotHint(toolCategorySignature));
+                    update.put(CopilotDeepState.SAME_TOOL_BATCH_COUNT, 0);
+                    newPivotCount = 1;
+                    forceReturnDirect = false;
+                } else if (repeatedToolBatch || repeatedTodosOnly) {
+                    // Second+ strike or repeated todos: terminate
+                    ghidra.util.Msg.warn(this,
+                        "Tool loop guard triggered (terminating) for signature '"
+                            + toolCategorySignature + "' (repeatCount=" + repeatCount
+                            + ", pivotCount=" + pivotCount + ")");
+                    update.put(CopilotDeepState.LOOP_GUARD_MESSAGE,
+                        CopilotPrompts.loopGuardPivotHint(toolCategorySignature));
+                    forceReturnDirect = true;
+                } else {
+                    update.put(CopilotDeepState.LOOP_GUARD_MESSAGE, "");
+                    update.put(CopilotDeepState.SAME_TOOL_BATCH_COUNT, repeatCount);
+                    forceReturnDirect = false;
                 }
-                update.put(CopilotDeepState.RETURN_DIRECT,
-                    toolNames.stream().anyMatch(returnDirectTools::contains) || forceReturnDirect);
+
+                update.put(CopilotDeepState.LOOP_GUARD_PIVOT_COUNT, newPivotCount);
+                update.put(CopilotDeepState.RETURN_DIRECT, isReturnDirectTool || forceReturnDirect);
                 update.put(CopilotDeepState.JUMP_TO, "");
                 update.put(CopilotDeepState.LAST_TOOL_BATCH_SIGNATURE, toolBatchSignature);
-                update.put(CopilotDeepState.SAME_TOOL_BATCH_COUNT, repeatCount);
 
                 endToolTraceRuns(toolTraceRuns, update);
                 return update;
@@ -140,7 +167,7 @@ public class ToolNode implements AsyncNodeActionWithConfig<CopilotDeepState> {
                 toolTraceRuns.values().forEach(run ->
                         tracer.endRunWithError(run, errorText));
 
-                List<Object> errorMessages = aiMessage.toolExecutionRequests().stream()
+                List<Object> errorMessages = requests.stream()
                     .map(req -> (Object) new ToolExecutionResultMessage(req.id(), req.name(), errorText))
                     .collect(Collectors.toList());
 
@@ -151,6 +178,7 @@ public class ToolNode implements AsyncNodeActionWithConfig<CopilotDeepState> {
                 update.put(CopilotDeepState.JUMP_TO, "");
                 update.put(CopilotDeepState.LAST_TOOL_BATCH_SIGNATURE, toolBatchSignature);
                 update.put(CopilotDeepState.SAME_TOOL_BATCH_COUNT, repeatCount);
+                update.put(CopilotDeepState.LOOP_GUARD_PIVOT_COUNT, pivotCount);
                 return update;
             });
     }
@@ -266,7 +294,43 @@ public class ToolNode implements AsyncNodeActionWithConfig<CopilotDeepState> {
             + "...(truncated, len=" + arguments.length() + ")";
     }
 
-    private static String buildToolBatchSignature(List<String> toolNames) {
+    /**
+     * Full signature including argument hashes so that calls to the same tool
+     * with different parameters (e.g. different addresses) are not falsely
+     * counted as repeats.
+     */
+    private static String buildToolBatchSignature(List<ToolExecutionRequest> requests) {
+        if (requests == null || requests.isEmpty()) {
+            return "";
+        }
+        StringBuilder signature = new StringBuilder();
+        int count = Math.min(requests.size(), TOOL_SIGNATURE_MAX_NAMES);
+        for (int i = 0; i < count; i++) {
+            if (i > 0) {
+                signature.append(',');
+            }
+            ToolExecutionRequest req = requests.get(i);
+            String name = req.name() != null ? req.name() : "";
+            if (name.length() > TOOL_SIGNATURE_MAX_NAME_LEN) {
+                name = name.substring(0, TOOL_SIGNATURE_MAX_NAME_LEN);
+            }
+            signature.append(name);
+            String args = req.arguments();
+            if (args != null && !args.isBlank()) {
+                signature.append('#').append(Integer.toHexString(args.hashCode()));
+            }
+        }
+        if (requests.size() > TOOL_SIGNATURE_MAX_NAMES) {
+            signature.append(",+").append(requests.size() - TOOL_SIGNATURE_MAX_NAMES).append("more");
+        }
+        return signature.toString();
+    }
+
+    /**
+     * Name-only category signature used for special-case checks (e.g. write_todos)
+     * and for human-readable log messages.
+     */
+    private static String buildToolCategorySignature(List<String> toolNames) {
         if (toolNames == null || toolNames.isEmpty()) {
             return "";
         }

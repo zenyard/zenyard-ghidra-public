@@ -39,49 +39,48 @@
       </div>
     </header>
 
-    <main id="chat" class="chat">
-      <section id="emptyState" class="empty-state">
-        <div class="empty-orb"></div>
-        <h1 class="empty-title">Ask Copilot about this program</h1>
-        <p class="empty-subtitle">
-          Summaries, explanations, and navigation for the current analysis.
-        </p>
-        <div class="empty-actions">
-          <button class="empty-chip" data-suggestion="Summarize what this function does.">
-            Summarize this function
+    <div id="contentScroll" class="content-scroll">
+      <main id="chat" class="chat">
+        <section id="emptyState" class="empty-state">
+          <div class="empty-orb"></div>
+          <h1 class="empty-title">Copilot Analysis</h1>
+          <p class="empty-subtitle">
+            Copilot accuracy improves with context. We recommend starting with a high-level scan before drilling down into specific logic.
+          </p>
+          <div class="empty-actions">
+            <button class="empty-chip" data-suggestion="Perform a high-level analysis of this binary. What are its main capabilities, intended purpose, and architectural style? Also specify the main functions.">
+              <span class="chip-icon" aria-hidden="true">&#x26A1;&#xFE0F;</span> Explain Binary Capabilities
+            </button>
+            <button class="empty-chip" data-suggestion="Identify the entry point and list the most significant functions or classes in this binary based on complexity and usage. Don't list everything, just the backbone.">
+              <span class="chip-icon" aria-hidden="true">&#x1F5FA;&#xFE0F;</span> Map Key Functions
+            </button>
+            <button class="empty-chip" data-suggestion="List the critical system calls and external libraries this binary imports. What does this tell us about its behavior and external dependencies?">
+              <span class="chip-icon" aria-hidden="true">&#x1F517;</span> Analyze Imports &amp; APIs
+            </button>
+          </div>
+        </section>
+      </main>
+
+      <section id="todoSection" class="todo-section hidden">
+        <div class="todo-header">
+          <span class="todo-title">Task Progress</span>
+          <button id="todoToggle" class="todo-toggle" type="button" title="Toggle task progress">
+            <span class="todo-toggle-label">Hide</span>
           </button>
-          <button class="empty-chip" data-suggestion="Explain the control flow in this function.">
-            Explain control flow
-          </button>
-          <button class="empty-chip" data-suggestion="Find where this function is called.">
-            Find callers
-          </button>
-          <button class="empty-chip" data-suggestion="What does this program do overall?">
-            Program overview
-          </button>
+        </div>
+        <div id="toolInfo" class="tool-info hidden">
+          <div id="toolHistory" class="tool-history"></div>
+        </div>
+        <ul id="todoList" class="todo-list"></ul>
+        <div id="subAgentBox" class="subagent-box hidden">
+          <div class="subagent-header">
+            <span class="subagent-label">Subagent stream</span>
+            <span id="subAgentTypeName" class="subagent-type"></span>
+          </div>
+          <pre id="subAgentStream" class="subagent-stream"></pre>
         </div>
       </section>
-    </main>
-
-    <section id="todoSection" class="todo-section hidden">
-      <div class="todo-header">
-        <span class="todo-title">Task Progress</span>
-        <button id="todoToggle" class="todo-toggle" type="button" title="Toggle task progress">
-          <span class="todo-toggle-label">Hide</span>
-        </button>
-      </div>
-      <div id="toolInfo" class="tool-info hidden">
-        <div id="toolHistory" class="tool-history"></div>
-      </div>
-      <ul id="todoList" class="todo-list"></ul>
-      <div id="subAgentBox" class="subagent-box hidden">
-        <div class="subagent-header">
-          <span class="subagent-label">Subagent stream</span>
-          <span id="subAgentTypeName" class="subagent-type"></span>
-        </div>
-        <pre id="subAgentStream" class="subagent-stream"></pre>
-      </div>
-    </section>
+    </div>
 
     <div id="typingIndicator" class="typing hidden">
       <span class="dot"></span>
@@ -92,7 +91,7 @@
 
     <footer class="input-bar">
       <div id="input" class="input" contenteditable="true" role="textbox" aria-multiline="true"
-        data-placeholder="Ask the Copilot..."></div>
+        data-placeholder="Start with a broad scan (e.g., &quot;Analyze structure&quot;) or use @ to focus..."></div>
       <div class="action-switch">
         <button id="stopBtn" class="btn btn-secondary btn-icon action-btn is-hidden" title="Stop" aria-hidden="true">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">

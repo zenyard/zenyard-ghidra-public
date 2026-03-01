@@ -106,6 +106,15 @@ html, body {
   height: 48px;
 }
 
+.content-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
 .header-left {
   display: flex;
   align-items: center;
@@ -113,7 +122,7 @@ html, body {
 }
 
 .header-title {
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 700;
   letter-spacing: -0.44px;
   font-family: "Figtree", "Inter", sans-serif;
@@ -230,13 +239,13 @@ html, body {
 }
 
 .chat {
-  flex: 1;
+  flex: 1 0 auto;
   min-height: 0;
-  overflow-y: auto;
+  overflow: visible;
   display: flex;
   flex-direction: column;
   padding: 24px;
-  background: var(--bg);
+  background: transparent;
 }
 
 .empty-state {
@@ -267,13 +276,13 @@ html, body {
 
 .empty-title {
   margin: 0;
-  font-size: 18px;
+  font-size: 16px;
   color: var(--text);
 }
 
 .empty-subtitle {
   margin: 0;
-  max-width: 320px;
+  max-width: 480px;
   font-size: 13px;
 }
 
@@ -291,8 +300,14 @@ html, body {
   color: var(--text);
   padding: 6px 12px;
   font-size: 12px;
+  font-family: inherit;
   cursor: pointer;
   transition: border-color 0.2s ease, color 0.2s ease, transform 0.1s ease;
+}
+
+.chip-icon {
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji", sans-serif;
+  font-style: normal;
 }
 
 .empty-chip:hover {
@@ -342,8 +357,7 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: clamp(120px, 38vh, 320px);
-  overflow-y: auto;
+  overflow: visible;
 }
 
 .todo-section.hidden {
@@ -512,8 +526,8 @@ html, body {
   color: var(--text);
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 200px;
-  overflow-y: auto;
+  max-height: none;
+  overflow: visible;
   font-family: inherit;
 }
 
@@ -611,7 +625,7 @@ html, body {
   padding: 12px 16px;
   border-radius: 12px;
   border: 1px solid var(--bubble-border);
-  font-size: 16px;
+  font-size: 14px;
   line-height: 24px;
   font-family: "Figtree", "Inter", sans-serif;
 }
@@ -696,6 +710,18 @@ html, body {
   color: var(--muted);
   margin-bottom: 6px;
   opacity: 0.7;
+  cursor: pointer;
+  user-select: none;
+}
+
+.thinking-section .thinking-label::before {
+  content: "\25BE";
+  font-size: 10px;
+  transition: transform 0.15s ease;
+}
+
+.thinking-section.collapsed .thinking-label::before {
+  content: "\25B8";
 }
 
 .thinking-section .thinking-label .thinking-dot {
@@ -708,13 +734,12 @@ html, body {
 
 .thinking-section .thinking-content {
   color: var(--thinking-text);
+  white-space: pre-wrap;
 }
 
 .thinking-section + .rendered-content,
 .thinking-section + .streaming-content {
-  border-top: 1px solid var(--thinking-border);
   margin-top: 6px;
-  padding-top: 6px;
 }
 
 .thinking-section.collapsed + .rendered-content,
@@ -726,6 +751,10 @@ html, body {
 
 .thinking-section.collapsed .thinking-content {
   display: none;
+}
+
+.thinking-section .thinking-label:hover {
+  opacity: 1;
 }
 
 .thinking-section.collapsed .thinking-label {
@@ -1061,6 +1090,25 @@ code {
   opacity: 0;
   visibility: hidden;
   transition: opacity 140ms ease, transform 140ms ease, visibility 140ms ease;
+}
+
+.error-banner.interactive {
+  pointer-events: auto;
+}
+
+.error-contact-link {
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.error-contact-link:hover {
+  opacity: 0.9;
 }
 
 .error-banner.is-visible {

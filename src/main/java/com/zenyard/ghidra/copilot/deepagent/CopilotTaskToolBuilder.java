@@ -5,9 +5,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import org.bsc.async.AsyncGenerator;
@@ -51,10 +53,11 @@ public class CopilotTaskToolBuilder {
     private Map<ToolSpecification, ToolExecutor> toolMap = Map.of();
     private List<Object> toolObjects = List.of();
     private CompileConfig compileConfig = CompileConfig.builder().build();
-    private long subAgentTimeoutMs = 180_000L;
+    private long subAgentTimeoutMs = 540_000L;
     private int subAgentRecursionLimit = 50;
     private LangSmithTracer tracer;
     private SubAgentProgressListener progressListener;
+    private Supplier<Boolean> cancelledSupplier;
 
     public CopilotTaskToolBuilder streamingChatModel(StreamingChatModel model) {
         this.streamingChatModel = Objects.requireNonNull(model, "model cannot be null");
@@ -105,6 +108,11 @@ public class CopilotTaskToolBuilder {
         return this;
     }
 
+    public CopilotTaskToolBuilder cancelledSupplier(Supplier<Boolean> cancelledSupplier) {
+        this.cancelledSupplier = cancelledSupplier;
+        return this;
+    }
+
     public Object build() throws GraphStateException {
         if (streamingChatModel == null) {
             throw new IllegalStateException("streamingChatModel must be set");
@@ -112,7 +120,7 @@ public class CopilotTaskToolBuilder {
         if (subAgents == null || subAgents.isEmpty()) {
             throw new IllegalStateException("subAgents must be provided");
         }
-        return new TaskTool(buildSubAgentGraphs(), subAgentTimeoutMs, tracer, progressListener);
+        return new TaskTool(buildSubAgentGraphs(), subAgentTimeoutMs, tracer, progressListener, cancelledSupplier);
     }
 
     private Map<String, CompiledGraph<CopilotDeepAgentState>> buildSubAgentGraphs() throws GraphStateException {
@@ -176,6 +184,7 @@ public class CopilotTaskToolBuilder {
         private final long timeoutMs;
         private final LangSmithTracer tracer;
         private final SubAgentProgressListener progressListener;
+        private final Supplier<Boolean> cancelledSupplier;
 
         private static final java.util.Set<String> EXCLUDED_STATE_KEYS = java.util.Set.of(
             "messages", "todos", "active_todo", "skills_prompt",
@@ -185,11 +194,17 @@ public class CopilotTaskToolBuilder {
 
         private TaskTool(Map<String, CompiledGraph<CopilotDeepAgentState>> graphs,
                          long timeoutMs, LangSmithTracer tracer,
-                         SubAgentProgressListener progressListener) {
+                         SubAgentProgressListener progressListener,
+                         Supplier<Boolean> cancelledSupplier) {
             this.graphs = graphs;
             this.timeoutMs = timeoutMs;
             this.tracer = tracer;
             this.progressListener = progressListener;
+            this.cancelledSupplier = cancelledSupplier;
+        }
+
+        private boolean isCancelled() {
+            return cancelledSupplier != null && Boolean.TRUE.equals(cancelledSupplier.get());
         }
 
         @Tool("Launch a sub-agent to handle a complex task. Provide description and sub_agent_type.")
@@ -215,6 +230,11 @@ public class CopilotTaskToolBuilder {
                         "subagent:" + subAgentType, description);
             }
 
+            if (isCancelled()) {
+                endSubagentTrace(traceRun, "Cancelled before start", true);
+                return "Error: Operation was cancelled.";
+            }
+
             notifyStart(subAgentType, description);
 
             Map<String, Object> inputState = new HashMap<>();
@@ -229,11 +249,14 @@ public class CopilotTaskToolBuilder {
 
             CopilotDeepAgentState lastState = null;
             try {
-                lastState = CompletableFuture.supplyAsync(() -> {
+                CompletableFuture<CopilotDeepAgentState> subAgentFuture = CompletableFuture.supplyAsync(() -> {
                     AsyncGenerator<NodeOutput<CopilotDeepAgentState>> generator =
                         graph.stream(GraphInput.args(inputState), RunnableConfig.builder().build());
                     CopilotDeepAgentState finalState = null;
                     for (var output : (Iterable<NodeOutput<CopilotDeepAgentState>>) generator.stream()::iterator) {
+                        if (isCancelled()) {
+                            throw new CancellationException("Operation cancelled");
+                        }
                         if (output instanceof StreamingOutput<CopilotDeepAgentState> streaming) {
                             String chunk = streaming.chunk();
                             if (chunk != null && !chunk.isEmpty()) {
@@ -244,23 +267,15 @@ public class CopilotTaskToolBuilder {
                         }
                     }
                     return finalState;
-                }).get(timeoutMs, TimeUnit.MILLISECONDS);
-            } catch (TimeoutException e) {
-                notifyEnd(subAgentType, false);
-                ghidra.util.Msg.warn(this,
-                    "Sub-agent '" + subAgentType + "' timed out after " + timeoutMs + "ms");
-                String errorMsg = "Error: Sub-agent '" + subAgentType + "' timed out after "
-                    + (timeoutMs / 1000) + " seconds. The task may be too complex for a single sub-agent call. "
-                    + "Try breaking it into smaller, more focused tasks.";
-                endSubagentTrace(traceRun, errorMsg, true);
-                return errorMsg;
-            } catch (InterruptedException e) {
-                notifyEnd(subAgentType, false);
-                Thread.currentThread().interrupt();
-                String errorMsg = "Error: Sub-agent '" + subAgentType + "' was interrupted.";
-                endSubagentTrace(traceRun, errorMsg, true);
-                return errorMsg;
+                });
+                lastState = subAgentFuture.get(timeoutMs, TimeUnit.MILLISECONDS);
             } catch (java.util.concurrent.ExecutionException e) {
+                if (e.getCause() instanceof CancellationException) {
+                    notifyEnd(subAgentType, false);
+                    String errorMsg = "Sub-agent '" + subAgentType + "' was cancelled.";
+                    endSubagentTrace(traceRun, errorMsg, true);
+                    return errorMsg;
+                }
                 notifyEnd(subAgentType, false);
                 Throwable cause = e.getCause() != null ? e.getCause() : e;
                 if (isMaxIterationsReached(cause)) {
@@ -274,6 +289,26 @@ public class CopilotTaskToolBuilder {
                 ghidra.util.Msg.error(this,
                     "Sub-agent '" + subAgentType + "' failed: " + cause.getMessage(), cause);
                 String errorMsg = "Error: Sub-agent '" + subAgentType + "' failed: " + cause.getMessage();
+                endSubagentTrace(traceRun, errorMsg, true);
+                return errorMsg;
+            } catch (CancellationException e) {
+                notifyEnd(subAgentType, false);
+                String errorMsg = "Sub-agent '" + subAgentType + "' was cancelled.";
+                endSubagentTrace(traceRun, errorMsg, true);
+                return errorMsg;
+            } catch (TimeoutException e) {
+                notifyEnd(subAgentType, false);
+                ghidra.util.Msg.warn(this,
+                    "Sub-agent '" + subAgentType + "' timed out after " + timeoutMs + "ms");
+                String errorMsg = "Error: Sub-agent '" + subAgentType + "' timed out after "
+                    + (timeoutMs / 1000) + " seconds. The task may be too complex for a single sub-agent call. "
+                    + "Try breaking it into smaller, more focused tasks.";
+                endSubagentTrace(traceRun, errorMsg, true);
+                return errorMsg;
+            } catch (InterruptedException e) {
+                notifyEnd(subAgentType, false);
+                Thread.currentThread().interrupt();
+                String errorMsg = "Error: Sub-agent '" + subAgentType + "' was interrupted.";
                 endSubagentTrace(traceRun, errorMsg, true);
                 return errorMsg;
             }

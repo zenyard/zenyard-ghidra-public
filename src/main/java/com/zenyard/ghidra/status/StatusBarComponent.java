@@ -258,6 +258,7 @@ public class StatusBarComponent extends JPanel {
         switch (state.getUsageLevel()) {
             case EXPIRED:
             case OVER_LIMIT:
+            case WARNING:
                 usageLabel.setForeground(Color.RED);
                 usageLabel.setFont(usageBaseFont.deriveFont(12f));
                 break;
