@@ -1,6 +1,6 @@
-# DecompAI Ghidra Plugin
+# Zenyard Ghidra Plugin
 
-A Ghidra plugin that provides AI-powered reverse engineering assistance through the DecompAI service.
+A Ghidra plugin that provides AI-powered reverse engineering assistance through the Zenyard service.
 
 ## Features
 
@@ -15,24 +15,95 @@ A Ghidra plugin that provides AI-powered reverse engineering assistance through 
 
 ### Misc
 - Status bar UI for displaying analysis progress, errors, and other indications
-- External (remote) API interactions with DecompAI API server
+- External (remote) API interactions with Zenyard API server
 - License configuration screen
 
 ## Requirements
 
-- Ghidra 11.x (desktop)
-- Java 11 or later
-- Network access to DecompAI API server
+- Ghidra 12.x (desktop)
+- Java 21 or later
+- Network access to Zenyard API server
 
 ## Installation
 
-- Complete this section
+### Prerequisites
+
+Before building, you need to set the Ghidra installation directory. You can do this in one of three ways:
+
+1. **Environment variable** (recommended for one-time builds):
+   ```bash
+   export GHIDRA_INSTALL_DIR=/path/to/ghidra
+   ```
+
+2. **Gradle properties** (recommended for persistent configuration):
+   Edit `gradle.properties` and uncomment/add:
+   ```properties
+   GHIDRA_INSTALL_DIR=/path/to/ghidra
+   ```
+
+3. **Command line** (for one-time builds):
+   ```bash
+   ./gradlew -PGHIDRA_INSTALL_DIR=/path/to/ghidra buildExtension
+   ```
+
+**Note**: The path should point to the directory containing the `Ghidra` folder. For example:
+- If Ghidra is at `/Applications/ghidra_12.0/Ghidra/`, use `/Applications/ghidra_12.0`
+- If Ghidra is at `/opt/ghidra/Ghidra/`, use `/opt/ghidra`
+
+The build script will attempt to auto-detect common installation locations if `GHIDRA_INSTALL_DIR` is not set.
+
+### Building
+
+The extension embeds JavaFX (WebView) and ships platform-specific native libraries.
+Each build produces a ZIP containing JavaFX JARs for **one** target platform.
+
+**Default (build for your current OS/arch):**
+
+```bash
+./gradlew buildExtension
+```
+
+The build auto-detects your OS and architecture (e.g. `mac-aarch64` on Apple Silicon, `linux` on Linux x64).
+
+**Cross-build for a specific platform:**
+
+```bash
+./gradlew -PjavafxPlatform=linux buildExtension    # Linux x64
+./gradlew -PjavafxPlatform=win buildExtension      # Windows x64
+./gradlew -PjavafxPlatform=mac buildExtension      # macOS Intel
+./gradlew -PjavafxPlatform=mac-aarch64 buildExtension  # macOS Apple Silicon
+./gradlew -PjavafxPlatform=linux-aarch64 buildExtension # Linux ARM64
+```
+
+The `linux-aarch64` platform uses pre-extracted JARs from `third-party/javafx/linux-aarch64/`
+(already committed to the repo) since OpenJFX does not publish this classifier to Maven Central.
+
+The output ZIP is in `dist/`.
+
+### Installing
+
+1. Copy the built extension ZIP to `$GHIDRA_INSTALL_DIR/Ghidra/Extensions`, or use Ghidra's extension manager.
+2. Open Ghidra, go to `Edit -> Tool Options -> Zenyard`.
+3. Enter your API key and server URL, then click "Test Connection" to verify.
+
+## Troubleshooting
+
+### Plugin not available after installation
+
+In some cases, Ghidra installs the extension but does not automatically activate the plugin in the current tool.
+
+To activate it manually:
+
+1. Open the **CodeBrowser** tool window.
+2. Go to `File -> Config -> Misc`.
+3. Check `ZenyardGhidraPlugin`.
+4. Apply/OK the changes (restart the tool if prompted).
 
 ## Configuration
 
 The plugin requires:
-- **API Key**: Your DecompAI API key
-- **Server URL**: The base URL of the DecompAI API server (default: `https://api.decompai.com`)
+- **API Key**: Your Zenyard API key
+- **Server URL**: The base URL of the Zenyard API server (default: `https://api.zenyard.com`)
 
 Configuration is stored in Ghidra's tool options and persists across sessions.
 
@@ -46,18 +117,11 @@ When you open a binary in Ghidra:
 3. Choose your preferences (auto-apply results, allow preprocessing)
 4. The plugin will upload the binary and begin analysis in the background
 
-### Manual Analysis
-
-You can also trigger analysis manually:
-- Right-click on a function in the listing → "Analyze with DecompAI"
-- Use the toolbar button "Analyze Function with DecompAI"
-- Use the menu: `DecompAI → Analyze Current Function`
-
 ### Copilot
 
 Open the Copilot window:
-- Menu: `Window → DecompAI Copilot`
-- Or use the toolbar button
+- Menu: `Window → Copilot`
+- Or use the keyboard shortcut
 
 The Copilot window allows you to ask questions about the current function, selection, or binary.
 
@@ -65,97 +129,10 @@ The Copilot window allows you to ask questions about the current function, selec
 
 Logs are written to:
 - `<project_dir>/<binary_name>.log` (per-project)
-- Or `<ghidra_user_dir>/logs/decompai/<project_name>.log`
+- Or `<ghidra_user_dir>/logs/zenyard/<project_name>.log`
 
 Logs include:
 - Analysis steps
 - API calls
 - Errors
 - User actions
-
-## Development
-
-### OpenAPI Client Generation
-
-The project uses OpenAPI Generator to create the Java client from the API specification. The `openapi.json` file must be present in the project root directory.
-
-#### Obtaining openapi.json
-
-**Option 1: Download from local cluster (recommended for development)**
-
-If you have the DecompAI service running locally, you can download the latest OpenAPI spec:
-
-```bash
-# Download from default local cluster URL (http://localhost:32304/openapi.json)
-./gradlew downloadOpenApiSpecFromCluster
-
-# Or specify a custom URL
-OPENAPI_JSON_URL=http://localhost:32304/openapi.json ./gradlew downloadOpenApiSpecFromCluster
-```
-
-**Option 2: Manual download**
-
-Download the `openapi.json` file from your running DecompAI service:
-
-```bash
-# Using curl
-curl http://localhost:32304/openapi.json -o openapi.json
-
-# Or using wget
-wget http://localhost:32304/openapi.json -O openapi.json
-```
-
-**Option 3: Copy from decompai service**
-
-If you have access to the decompai service repository, you can copy the generated OpenAPI spec from there.
-
-#### Generating the Java Client
-
-Once `openapi.json` is in the project root, the Java client is automatically generated during the build:
-
-```bash
-# Generate OpenAPI client only
-./gradlew openApiGenerate
-
-# Or build the extension (which includes client generation)
-./gradlew buildExtension
-```
-
-The generated client code will be in `build/generated/src/main/java/com/zenyard/decompai/ghidra/api/generated/`.
-
-**Note:** The `downloadOpenApiSpecFromCluster` task is optional and not part of the default build flow. It's useful for keeping the client in sync with a running local development server.
-
-### Building
-
-```bash
-./gradlew buildExtension
-```
-
-### Project Structure
-
-```
-decompai-ghidra/
-├── src/main/java/com/zenyard/decompai/ghidra/
-│   ├── DecompaiGhidraPlugin.java      # Main plugin entry point
-│   ├── DecompaiServices.java          # Service registry
-│   ├── api/                            # API client
-│   ├── illum/                          # Illuminator features
-│   ├── copilot/                        # Copilot module
-│   ├── status/                         # Status bar integration
-│   ├── config/                         # Configuration UI
-│   ├── storage/                        # Data storage
-│   ├── initialization/                 # Initial analysis flow
-│   └── util/                           # Utilities
-├── resources/
-│   └── icons/                          # Plugin icons
-└── build.gradle                        # Build configuration
-```
-
-## License
-
-[To be determined]
-
-## Support
-
-For issues and questions, please contact [support information].
-
