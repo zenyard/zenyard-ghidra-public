@@ -1,3 +1,13 @@
+<p align="center">
+  <img src="./zenyard_logo.svg" alt="Zenyard logo" width="300" />
+</p>
+
+<p align="center">
+  <a href="https://zenyard.ai">zenyard.ai</a>
+  &nbsp;&nbsp;&middot;&nbsp;&nbsp;
+  <a href="https://zenyard.notion.site/Setting-up-Zenyard-in-Ghidra-30fe2d3032768024ba4cfb1fa0b91d66">User Guide</a>
+</p>
+
 # Zenyard for Ghidra
 
 **In-depth binary understanding with a purpose-built AI agent that helps you get straight to the meaningful parts and understand them faster.**
@@ -137,6 +147,12 @@ The extension includes platform-specific JavaFX WebView libraries. Pre-built pac
 Zenyard offers both free and paid plans. Your current usage is always visible in the status bar. When a plan limit is reached, analysis pauses automatically — the CoPilot and previously applied results remain available. Click the usage indicator for plan details or to upgrade.
 
 Binary size limits may apply depending on your plan. If a binary exceeds your plan's limit, a prompt will guide you to the appropriate plan.
+
+## License
+
+This project is licensed under the **GNU Affero General Public License v3.0 only**.
+
+See the [LICENSE](LICENSE) file in this repository for the full license text.
 
 ## Support
 
