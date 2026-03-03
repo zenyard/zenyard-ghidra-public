@@ -573,6 +573,8 @@ public class CopilotWebViewPanel extends JPanel {
         String usageBlockedMessage = null;
         boolean serverBlocked = false;
         String serverBlockedMessage = null;
+        boolean pythonUnavailableWarningVisible = false;
+        String pythonUnavailableWarningMessage = null;
         ZenyardService services = ZenyardService.getInstance();
         if (services != null) {
             UsageState usageState = services.getUsageState();
@@ -585,6 +587,8 @@ public class CopilotWebViewPanel extends JPanel {
                 serverBlockedMessage = "Can't reach server";
             }
         }
+        pythonUnavailableWarningVisible = viewModel.isPythonUnavailableWarningVisible();
+        pythonUnavailableWarningMessage = viewModel.getPythonUnavailableWarningMessage();
         return new UiState(
             mapped,
             viewModel.isLoading(),
@@ -597,6 +601,8 @@ public class CopilotWebViewPanel extends JPanel {
             usageBlockedMessage,
             serverBlocked,
             serverBlockedMessage,
+            pythonUnavailableWarningVisible,
+            pythonUnavailableWarningMessage,
             viewModel.getTodos(),
             viewModel.getTodoStatuses(),
             viewModel.getActiveTodo(),
@@ -656,6 +662,8 @@ public class CopilotWebViewPanel extends JPanel {
         private final String usageBlockedMessage;
         private final boolean serverBlocked;
         private final String serverBlockedMessage;
+        private final boolean pythonUnavailableWarningVisible;
+        private final String pythonUnavailableWarningMessage;
         private final List<String> todos;
         private final Map<String, String> todoStatuses;
         private final String activeTodo;
@@ -678,6 +686,8 @@ public class CopilotWebViewPanel extends JPanel {
                 String usageBlockedMessage,
                 boolean serverBlocked,
                 String serverBlockedMessage,
+                boolean pythonUnavailableWarningVisible,
+                String pythonUnavailableWarningMessage,
                 List<String> todos,
                 Map<String, String> todoStatuses,
                 String activeTodo,
@@ -698,6 +708,8 @@ public class CopilotWebViewPanel extends JPanel {
             this.usageBlockedMessage = usageBlockedMessage;
             this.serverBlocked = serverBlocked;
             this.serverBlockedMessage = serverBlockedMessage;
+            this.pythonUnavailableWarningVisible = pythonUnavailableWarningVisible;
+            this.pythonUnavailableWarningMessage = pythonUnavailableWarningMessage;
             this.todos = todos;
             this.todoStatuses = todoStatuses;
             this.activeTodo = activeTodo;

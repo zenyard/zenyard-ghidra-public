@@ -190,24 +190,46 @@ public class RunPythonScriptTool {
              + "    println('STDERR: ' + _copilot_err.rstrip())\n";
     }
 
+    private static volatile Boolean pythonAvailableCache;
+
     /**
-     * Check whether a Python script provider (PyGhidra or Jython) is available.
+     * Check whether a Python script provider (PyGhidra or Jython) is available
+     * and can actually instantiate scripts. The result is cached for the session
+     * since Python availability does not change after Ghidra starts.
      */
     public static boolean isPythonAvailable() {
+        Boolean cached = pythonAvailableCache;
+        if (cached != null) {
+            return cached;
+        }
+        boolean available = probePythonRuntime();
+        pythonAvailableCache = available;
+        Msg.info(RunPythonScriptTool.class,
+            "Python runtime availability: " + available);
+        return available;
+    }
+
+    private static boolean probePythonRuntime() {
         try {
             File tempFile = File.createTempFile("copilot_pycheck_", ".py");
             try {
+                java.nio.file.Files.writeString(tempFile.toPath(), "pass\n");
                 ResourceFile resourceFile = new ResourceFile(tempFile);
                 GhidraScriptProvider provider = GhidraScriptUtil.getProvider(resourceFile);
-                return provider != null;
+                if (provider == null) {
+                    return false;
+                }
+                java.io.PrintWriter pw = new java.io.PrintWriter(new java.io.StringWriter());
+                GhidraScript script = provider.getScriptInstance(resourceFile, pw);
+                return script != null;
             } finally {
                 if (!tempFile.delete()) {
                     tempFile.deleteOnExit();
                 }
             }
         } catch (Exception e) {
-            Msg.warn(RunPythonScriptTool.class,
-                "Failed to check Python availability: " + e.getMessage());
+            Msg.info(RunPythonScriptTool.class,
+                "Python runtime probe failed: " + e.getMessage());
             return false;
         }
     }

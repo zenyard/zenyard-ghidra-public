@@ -37,6 +37,9 @@ public class PluginConfiguration {
     @SerializedName("accepted_eula_version")
     private final Integer acceptedEulaVersion;
 
+    @SerializedName("show_python_unavailable_popup")
+    private final Boolean showPythonUnavailablePopup;
+
     @SerializedName("langsmith_api_key")
     private final String langsmithApiKey;
 
@@ -53,6 +56,7 @@ public class PluginConfiguration {
     private static final boolean DEFAULT_REQUEST_BINARY_INSTRUCTIONS = true;
     private static final boolean DEFAULT_REQUIRE_CONFIRMATION_PER_DB = true;
     private static final boolean DEFAULT_VERIFY_SSL = true;
+    private static final boolean DEFAULT_SHOW_PYTHON_UNAVAILABLE_POPUP = true;
     private static final int DEFAULT_ACCEPTED_EULA_VERSION = 0;
     
     // Constructor for Gson deserialization
@@ -68,7 +72,7 @@ public class PluginConfiguration {
             Integer acceptedEulaVersion) {
         this(apiUrl, apiKey, logLevel, showInitialUploadMessage,
                 requestBinaryInstructions, requireConfirmationPerDb,
-                verifySsl, acceptedEulaVersion, null, null, null);
+                verifySsl, acceptedEulaVersion, null, null, null, null);
     }
 
     public PluginConfiguration(
@@ -82,7 +86,8 @@ public class PluginConfiguration {
             Integer acceptedEulaVersion,
             String langsmithApiKey,
             String langsmithEndpoint,
-            String langsmithProject) {
+            String langsmithProject,
+            Boolean showPythonUnavailablePopup) {
         this.apiUrl = apiUrl != null ? apiUrl : DEFAULT_SERVER_URL;
         this.apiKey = apiKey != null ? apiKey : "";
         this.logLevel = logLevel != null ? logLevel : DEFAULT_LOG_LEVEL;
@@ -94,6 +99,7 @@ public class PluginConfiguration {
         this.langsmithApiKey = langsmithApiKey;
         this.langsmithEndpoint = langsmithEndpoint;
         this.langsmithProject = langsmithProject;
+        this.showPythonUnavailablePopup = showPythonUnavailablePopup != null ? showPythonUnavailablePopup : DEFAULT_SHOW_PYTHON_UNAVAILABLE_POPUP;
 
         validate();
     }
@@ -110,7 +116,11 @@ public class PluginConfiguration {
             DEFAULT_REQUEST_BINARY_INSTRUCTIONS,
             DEFAULT_REQUIRE_CONFIRMATION_PER_DB,
             DEFAULT_VERIFY_SSL,
-            DEFAULT_ACCEPTED_EULA_VERSION
+            DEFAULT_ACCEPTED_EULA_VERSION,
+            null,
+            null,
+            null,
+            DEFAULT_SHOW_PYTHON_UNAVAILABLE_POPUP
         );
     }
     
@@ -127,7 +137,11 @@ public class PluginConfiguration {
             this.requestBinaryInstructions,
             this.requireConfirmationPerDb,
             this.verifySsl,
-            this.acceptedEulaVersion
+            this.acceptedEulaVersion,
+            this.langsmithApiKey,
+            this.langsmithEndpoint,
+            this.langsmithProject,
+            this.showPythonUnavailablePopup
         );
     }
     
@@ -168,6 +182,8 @@ public class PluginConfiguration {
             ? (String) updates.get("langsmith_endpoint") : this.langsmithEndpoint;
         String newLangsmithProject = updates.containsKey("langsmith_project")
             ? (String) updates.get("langsmith_project") : this.langsmithProject;
+        Boolean newShowPythonUnavailablePopup = updates.containsKey("show_python_unavailable_popup")
+            ? (Boolean) updates.get("show_python_unavailable_popup") : this.showPythonUnavailablePopup;
 
         return new PluginConfiguration(
             newApiUrl,
@@ -180,7 +196,8 @@ public class PluginConfiguration {
             newAcceptedEulaVersion,
             newLangsmithApiKey,
             newLangsmithEndpoint,
-            newLangsmithProject
+            newLangsmithProject,
+            newShowPythonUnavailablePopup
         );
     }
     
@@ -255,6 +272,11 @@ public class PluginConfiguration {
 
     public String getLangsmithProject() {
         return langsmithProject;
+    }
+
+    public boolean isShowPythonUnavailablePopup() {
+        return showPythonUnavailablePopup != null
+            ? showPythonUnavailablePopup : DEFAULT_SHOW_PYTHON_UNAVAILABLE_POPUP;
     }
 
     public boolean isConfigured() {

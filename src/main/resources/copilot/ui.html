@@ -17,6 +17,10 @@
         <span class="header-title">Zenyard Copilot</span>
       </div>
       <div class="header-actions">
+        <span id="pythonWarningBadge" class="python-warning-badge hidden"
+              title="Python runtime unavailable. Start Ghidra via pyghidraRun.">
+          Python runtime unavailable
+        </span>
         <button id="clearBtn" class="header-btn icon" type="button" title="Clear chat">
           <span class="icon-wrap" aria-hidden="true">
             <img class="icon icon-light" src="assets/header_clear_light.svg" alt="" />
@@ -49,13 +53,22 @@
           </p>
           <div class="empty-actions">
             <button class="empty-chip" data-suggestion="Perform a high-level analysis of this binary. What are its main capabilities, intended purpose, and architectural style? Also specify the main functions.">
-              <span class="chip-icon" aria-hidden="true">&#x26A1;&#xFE0F;</span> Explain Binary Capabilities
+              <span class="chip-icon" aria-hidden="true">
+                <img src="assets/chip_bolt.svg" alt="" />
+              </span>
+              Explain Binary Capabilities
             </button>
             <button class="empty-chip" data-suggestion="Identify the entry point and list the most significant functions or classes in this binary based on complexity and usage. Don't list everything, just the backbone.">
-              <span class="chip-icon" aria-hidden="true">&#x1F5FA;&#xFE0F;</span> Map Key Functions
+              <span class="chip-icon" aria-hidden="true">
+                <img src="assets/chip_map.svg" alt="" />
+              </span>
+              Map Key Functions
             </button>
             <button class="empty-chip" data-suggestion="List the critical system calls and external libraries this binary imports. What does this tell us about its behavior and external dependencies?">
-              <span class="chip-icon" aria-hidden="true">&#x1F517;</span> Analyze Imports &amp; APIs
+              <span class="chip-icon" aria-hidden="true">
+                <img src="assets/chip_link.svg" alt="" />
+              </span>
+              Analyze Imports &amp; APIs
             </button>
           </div>
         </section>

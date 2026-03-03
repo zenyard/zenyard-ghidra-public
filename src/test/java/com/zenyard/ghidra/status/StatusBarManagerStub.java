@@ -22,6 +22,12 @@ class StatusBarManagerStub extends StatusBarManager {
     }
 
     @Override
+    public void updateTaskStatus(String taskId, String status, Integer progress,
+            boolean indeterminate, String tooltip) {
+        // no-op in stub
+    }
+
+    @Override
     public void unregisterTask(String taskId) {
         // no-op in stub
     }

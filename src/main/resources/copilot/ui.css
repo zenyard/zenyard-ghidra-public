@@ -238,6 +238,28 @@ html, body {
   background: rgba(122, 162, 247, 0.12);
 }
 
+.python-warning-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid #f2d06b;
+  background: #fff7d6;
+  color: #755600;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+:root[data-theme="dark"] .python-warning-badge {
+  border-color: rgba(242, 208, 107, 0.5);
+  background: rgba(117, 86, 0, 0.35);
+  color: #f6df9c;
+}
+
+.python-warning-badge.hidden {
+  display: none;
+}
+
 .chat {
   flex: 1 0 auto;
   min-height: 0;
@@ -294,20 +316,37 @@ html, body {
 }
 
 .empty-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border-radius: 999px;
   border: 1px solid var(--border);
   background: var(--panel-elevated);
   color: var(--text);
   padding: 6px 12px;
   font-size: 12px;
+  line-height: 1.2;
   font-family: inherit;
   cursor: pointer;
   transition: border-color 0.2s ease, color 0.2s ease, transform 0.1s ease;
 }
 
 .chip-icon {
-  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji", sans-serif;
-  font-style: normal;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  color: inherit;
+}
+
+.chip-icon svg,
+.chip-icon img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .empty-chip:hover {

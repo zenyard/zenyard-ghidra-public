@@ -95,6 +95,8 @@ public class CopilotViewModel {
     private boolean streamDeltaEnabled;
     private String subAgentType;
     private String subAgentStreamText;
+    private boolean pythonUnavailableWarningVisible;
+    private String pythonUnavailableWarningMessage;
 
     public CopilotViewModel() {
         this.messages = new CopyOnWriteArrayList<>();
@@ -118,6 +120,8 @@ public class CopilotViewModel {
         this.streamDeltaEnabled = false;
         this.subAgentType = null;
         this.subAgentStreamText = null;
+        this.pythonUnavailableWarningVisible = false;
+        this.pythonUnavailableWarningMessage = null;
     }
     
     /**
@@ -760,6 +764,31 @@ public class CopilotViewModel {
 
     public String getSubAgentStreamText() {
         return subAgentStreamText;
+    }
+
+    public void setPythonUnavailableWarning(boolean visible, String message) {
+        String normalized = message;
+        if (normalized != null) {
+            normalized = normalized.trim();
+            if (normalized.isEmpty()) {
+                normalized = null;
+            }
+        }
+        if (this.pythonUnavailableWarningVisible == visible
+                && Objects.equals(this.pythonUnavailableWarningMessage, normalized)) {
+            return;
+        }
+        this.pythonUnavailableWarningVisible = visible;
+        this.pythonUnavailableWarningMessage = normalized;
+        notifyListeners();
+    }
+
+    public boolean isPythonUnavailableWarningVisible() {
+        return pythonUnavailableWarningVisible;
+    }
+
+    public String getPythonUnavailableWarningMessage() {
+        return pythonUnavailableWarningMessage;
     }
 
     private static boolean isThinkingPlaceholder(String text) {

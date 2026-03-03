@@ -11,6 +11,7 @@
   const bridgeEl = document.getElementById("dom-bridge");
   const emptyState = document.getElementById("emptyState");
   const statusPill = document.getElementById("statusPill");
+  const pythonWarningBadge = document.getElementById("pythonWarningBadge");
   const todoSection = document.getElementById("todoSection");
   const todoList = document.getElementById("todoList");
   const toolInfo = document.getElementById("toolInfo");
@@ -31,6 +32,8 @@
     usageBlockedMessage: null,
     serverBlocked: false,
     serverBlockedMessage: null,
+    pythonUnavailableWarningVisible: false,
+    pythonUnavailableWarningMessage: null,
     todos: [],
     activeTodo: null,
     toolHistory: [],
@@ -1306,6 +1309,18 @@
     banner.classList.add("is-visible");
   }
 
+  function renderPythonWarning(nextState) {
+    if (!pythonWarningBadge) {
+      return;
+    }
+    const visible = Boolean(nextState.pythonUnavailableWarningVisible);
+    const warningText = nextState.pythonUnavailableWarningMessage
+      || "Python runtime unavailable. Start via pyghidraRun.";
+    pythonWarningBadge.classList.toggle("hidden", !visible);
+    pythonWarningBadge.textContent = warningText;
+    pythonWarningBadge.title = warningText;
+  }
+
   function renderMessages(nextState) {
     const shouldClear =
       nextState.messages.length === 0 ||
@@ -1595,6 +1610,8 @@
     state.usageBlockedMessage = nextState.usageBlockedMessage || null;
     state.serverBlocked = Boolean(nextState.serverBlocked);
     state.serverBlockedMessage = nextState.serverBlockedMessage || null;
+    state.pythonUnavailableWarningVisible = Boolean(nextState.pythonUnavailableWarningVisible);
+    state.pythonUnavailableWarningMessage = nextState.pythonUnavailableWarningMessage || null;
     state.todos = Array.isArray(nextState.todos) ? nextState.todos : [];
     state.activeTodo = nextState.activeTodo || null;
     state.toolHistory = Array.isArray(nextState.toolHistory) ? nextState.toolHistory : [];
@@ -1614,6 +1631,7 @@
       }
     }
     renderMessages(state);
+    renderPythonWarning(state);
     renderTodos(state);
     renderTools(state);
     renderSubAgent(state);

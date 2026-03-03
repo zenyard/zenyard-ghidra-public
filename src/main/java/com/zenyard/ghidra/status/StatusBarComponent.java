@@ -31,16 +31,12 @@ public class StatusBarComponent extends JPanel {
     private static final int PROGRESS_WIDTH = 100;
     private static final int SPACING_SMALL = 2;
     private static final int SPACING_MEDIUM = 4;
-
     private final StatusBarViewModel viewModel;
     @SuppressWarnings("unused")
     private final StatusBarActions actions;
     private final IconRegistry iconRegistry;
 
     private final JPanel unifiedStatusPanel;
-    private final JPanel leftPanel;
-    private final JPanel centerPanel;
-    private final JPanel rightPanel;
     private final JLabel logoLabel;
     private final JLabel unifiedStatusLabel;
     private final JProgressBar unifiedProgressBar;
@@ -65,33 +61,17 @@ public class StatusBarComponent extends JPanel {
         setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
 
         unifiedStatusPanel = new JPanel();
-        // Split into 3 regions so the progress bar can be centered between the left status
-        // text and whatever appears on the right (usage, etc).
-        unifiedStatusPanel.setLayout(new BorderLayout());
+        unifiedStatusPanel.setLayout(new BoxLayout(unifiedStatusPanel, BoxLayout.X_AXIS));
         unifiedStatusPanel.setOpaque(false);
         unifiedStatusPanel.setMinimumSize(new Dimension(200, PANEL_HEIGHT));
         unifiedStatusPanel.setPreferredSize(new Dimension(400, PANEL_HEIGHT));
 
-        leftPanel = new JPanel();
-        leftPanel.setLayout(new BoxLayout(leftPanel, BoxLayout.X_AXIS));
-        leftPanel.setOpaque(false);
-
-        centerPanel = new JPanel();
-        centerPanel.setLayout(new BoxLayout(centerPanel, BoxLayout.X_AXIS));
-        centerPanel.setOpaque(false);
-
-        rightPanel = new JPanel();
-        rightPanel.setLayout(new BoxLayout(rightPanel, BoxLayout.X_AXIS));
-        rightPanel.setOpaque(false);
-
-        unifiedStatusPanel.add(leftPanel, BorderLayout.WEST);
-        unifiedStatusPanel.add(centerPanel, BorderLayout.CENTER);
-        unifiedStatusPanel.add(rightPanel, BorderLayout.EAST);
-
         logoLabel = new JLabel();
         logoLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
         setIcon(logoLabel, "icons/zenyard_icon.png", "Z");
-        leftPanel.add(logoLabel);
+        unifiedStatusPanel.add(logoLabel);
+
+        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_SMALL));
 
         initialUploadButton = new JButton();
         initialUploadButton.setToolTipText("Click to analyze with Zenyard");
@@ -103,9 +83,9 @@ public class StatusBarComponent extends JPanel {
                 actions.onInitialUpload();
             }
         });
+        unifiedStatusPanel.add(initialUploadButton);
 
-        leftPanel.add(Box.createHorizontalStrut(SPACING_SMALL));
-        leftPanel.add(initialUploadButton);
+        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_SMALL));
 
         rerunButton = new JButton();
         rerunButton.setToolTipText("Rerun analysis");
@@ -117,18 +97,16 @@ public class StatusBarComponent extends JPanel {
                 actions.onRerun();
             }
         });
-
-        leftPanel.add(Box.createHorizontalStrut(SPACING_SMALL));
-        leftPanel.add(rerunButton);
-        leftPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
+        unifiedStatusPanel.add(rerunButton);
+        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
 
         warningIconLabel = new JLabel();
         warningIconLabel.setToolTipText("Can't reach server");
         warningIconLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
         warningIconLabel.setVisible(false);
         setIcon(warningIconLabel, "icons/warning_icon.png", "!");
-        leftPanel.add(warningIconLabel);
-        leftPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
+        unifiedStatusPanel.add(warningIconLabel);
+        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
 
         reviewTermsButton = new JButton("Review Terms");
         reviewTermsButton.setToolTipText("Review Terms of Use");
@@ -139,8 +117,8 @@ public class StatusBarComponent extends JPanel {
                 actions.onReviewTerms();
             }
         });
-        leftPanel.add(reviewTermsButton);
-        leftPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
+        unifiedStatusPanel.add(reviewTermsButton);
+        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
 
         unifiedStatusLabel = new GDLabel("");
         unifiedStatusLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
@@ -152,7 +130,9 @@ public class StatusBarComponent extends JPanel {
                 }
             }
         });
-        leftPanel.add(unifiedStatusLabel);
+        unifiedStatusPanel.add(unifiedStatusLabel);
+
+        unifiedStatusPanel.add(Box.createHorizontalGlue());
 
         unifiedProgressBar = new JProgressBar(0, 100);
         unifiedProgressBar.setStringPainted(false);
@@ -161,15 +141,14 @@ public class StatusBarComponent extends JPanel {
         unifiedProgressBar.setPreferredSize(progressSize);
         unifiedProgressBar.setMaximumSize(progressSize);
         unifiedProgressBar.setVisible(false);
-        centerPanel.add(Box.createHorizontalGlue());
-        centerPanel.add(unifiedProgressBar);
-        centerPanel.add(Box.createHorizontalStrut(SPACING_SMALL));
+        unifiedStatusPanel.add(unifiedProgressBar);
+        unifiedStatusPanel.add(Box.createHorizontalStrut(SPACING_SMALL));
 
         unifiedProgressLabel = new GDLabel("");
         unifiedProgressLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
         unifiedProgressLabel.setVisible(false);
-        centerPanel.add(unifiedProgressLabel);
-        centerPanel.add(Box.createHorizontalGlue());
+        unifiedStatusPanel.add(unifiedProgressLabel);
+        unifiedStatusPanel.add(Box.createHorizontalGlue());
 
         usageLabel = new GDLabel("");
         usageLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
@@ -183,8 +162,7 @@ public class StatusBarComponent extends JPanel {
                 }
             }
         });
-        rightPanel.add(Box.createHorizontalStrut(SPACING_MEDIUM));
-        rightPanel.add(usageLabel);
+        unifiedStatusPanel.add(usageLabel);
         usageBaseFont = usageLabel.getFont();
 
         unifiedStatusPanel.setVisible(true);
@@ -206,6 +184,7 @@ public class StatusBarComponent extends JPanel {
         }
         SwingUtilities.invokeLater(() -> {
             unifiedStatusLabel.setText(state.getStatus() != null ? state.getStatus() : "");
+            unifiedStatusLabel.setToolTipText(state.getStatusTooltip());
 
             Integer progress = state.getProgress();
             if (state.isIndeterminate()) {

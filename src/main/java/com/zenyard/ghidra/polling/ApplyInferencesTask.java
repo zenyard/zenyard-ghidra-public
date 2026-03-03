@@ -13,6 +13,8 @@ import com.zenyard.ghidra.tasks.StatusBarAwareTask;
 import com.zenyard.ghidra.illum.InferenceApplier;
 import com.zenyard.ghidra.illum.FunctionOverviewAnnotator;
 import com.zenyard.ghidra.storage.InferenceStorage;
+import com.zenyard.ghidra.status.AppliedInferenceCounts;
+import com.zenyard.ghidra.status.InferenceCountTracker;
 import com.zenyard.ghidra.status.StatusBarManager;
 import com.zenyard.ghidra.status.StatusBarPriorities;
 import com.zenyard.ghidra.tracking.TrackChangesTaskManager;
@@ -166,6 +168,8 @@ public class ApplyInferencesTask extends StatusBarAwareTask {
             
             try {
                 runWithStatusBar(() -> {
+                    InferenceCountTracker tracker = statusBarManager != null
+                        ? statusBarManager.getInferenceCountTracker() : null;
                     if (statusBarManager != null) {
                         statusBarManager.updateTaskStatus(
                             TASK_ID,
@@ -182,6 +186,12 @@ public class ApplyInferencesTask extends StatusBarAwareTask {
                             Inference inference = inferenceQueue.dequeue();
                             if (inference != null) {
                                 batch.add(inference);
+                                if (tracker != null) {
+                                    Object actual = inference.getActualInstance();
+                                    if (actual != null) {
+                                        tracker.increment(actual.getClass().getSimpleName());
+                                    }
+                                }
                             }
                         }
 
@@ -189,21 +199,21 @@ public class ApplyInferencesTask extends StatusBarAwareTask {
                             try {
                                 inferenceApplier.applyInferences(program, batch, monitor, () -> shouldStop);
                                 totalApplied[0] += batch.size();
-                                // Update status bar (indeterminate; queue can grow while applying)
                                 if (statusBarManager != null) {
-                                    int queued = inferenceQueue.size();
-                                    String statusMessage = "Applying results"
-                                        + " (applied " + totalApplied[0]
-                                        + ", queued " + queued + ")";
-                                    statusBarManager.updateTaskStatus(TASK_ID, statusMessage, null, true);
+                                    AppliedInferenceCounts counts = tracker != null
+                                        ? AppliedInferenceCounts.fromRawCounts(tracker.snapshot()) : null;
+                                    int total = counts != null ? counts.getTotal() : 0;
+                                    String statusMessage = total > 0
+                                        ? "Applying results \u2014 "
+                                            + AppliedInferenceCounts.formatCompactCount(total) + " results"
+                                        : "Applying results";
+                                    String tooltip = counts != null ? counts.formatTooltip() : null;
+                                    statusBarManager.updateTaskStatus(TASK_ID, statusMessage, null, true, tooltip);
                                     Msg.info(this, "ApplyInferencesTask: Applied " + batch.size() + " results");
                                 }
                             } catch (Exception e) {
                                 Msg.error(this, "ApplyInferencesTask: Error applying batch of "
                                     + batch.size() + " inferences: " + e.getMessage(), e);
-                                // Closing/unloading the program can terminate transactions or close the DB
-                                // mid-batch. Continuing to apply inferences after that just spams errors
-                                // and can prolong shutdown.
                                 if (shouldStop || monitor.isCancelled()
                                     || program == null || program.isClosed()
                                     || String.valueOf(e.getMessage()).contains("Database is closed")

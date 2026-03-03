@@ -164,6 +164,10 @@ public class ZenyardOptions {
         return config.getAcceptedEulaVersion() == eulaVersion;
     }
     
+    public boolean isShowPythonUnavailablePopup() {
+        return config.isShowPythonUnavailablePopup();
+    }
+
     public boolean isConfigured() {
         return config.isConfigured();
     }

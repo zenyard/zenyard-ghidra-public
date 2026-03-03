@@ -36,6 +36,7 @@ import com.zenyard.ghidra.copilot.deepagent.DeepAgentMemoryAdapter;
 import com.zenyard.ghidra.copilot.deepagent.LangSmithTracer;
 import com.zenyard.ghidra.copilot.storage.CopilotArtifactStorage;
 import com.zenyard.ghidra.copilot.tools.CopilotToolRegistry;
+import com.zenyard.ghidra.copilot.tools.RunPythonScriptTool;
 import com.zenyard.ghidra.config.PluginConfiguration;
 import com.zenyard.ghidra.config.ZenyardConfigFile;
 import com.zenyard.ghidra.copilot.tools.ToolUtils;
@@ -60,6 +61,8 @@ import dev.langchain4j.model.chat.ChatModel;
 public class CopilotController {
     
     private static final String COPILOT_THREAD_ID = "1"; // Matches IDA's COPILOT_THREAD_ID
+    private static final String PYTHON_UNAVAILABLE_WARNING_MESSAGE =
+        "Python runtime is unavailable. Start Ghidra via pyghidraRun to enable the Python tool for better Copilot results.";
     
     private final CopilotProvider provider;
     private final PluginTool tool;
@@ -150,6 +153,7 @@ public class CopilotController {
                 copilotConfig, false, "deepagent_ui_incremental_stream", "deepAgentUiIncrementalStream");
             viewModel.setStreamDeltaEnabled(incrementalStream);
         }
+        refreshPythonAvailabilityWarning();
     }
     
     public void setCurrentProgram(Program program) {
@@ -158,6 +162,7 @@ public class CopilotController {
         if (copilotConfig != null && program != null) {
             initializeAgent();
         }
+        refreshPythonAvailabilityWarning();
     }
     
     /**
@@ -170,6 +175,7 @@ public class CopilotController {
                 config, false, "deepagent_ui_incremental_stream", "deepAgentUiIncrementalStream");
             viewModel.setStreamDeltaEnabled(incrementalStream);
         }
+        refreshPythonAvailabilityWarning();
         if (currentProgram != null) {
             initializeAgent();
         }
@@ -183,6 +189,7 @@ public class CopilotController {
         if (copilotConfig == null || currentProgram == null) {
             return;
         }
+        refreshPythonAvailabilityWarning();
         
         try {
             // Create planning and streaming chat models
@@ -242,6 +249,7 @@ public class CopilotController {
                 cancellationMonitor.asCancelledSupplier()
             );
             List<Object> tools = toolRegistry.getAllTools();
+            refreshPythonAvailabilityWarning(tools);
             
             // Create deep agent graphs
             deepAgent = new CopilotDeepAgent(
@@ -864,6 +872,25 @@ public class CopilotController {
             return "Error: " + rootCause.getMessage();
         }
         return fallbackErrorMsg;
+    }
+
+    private void refreshPythonAvailabilityWarning() {
+        if (viewModel == null) {
+            return;
+        }
+        boolean pythonAvailable = RunPythonScriptTool.isPythonAvailable();
+        viewModel.setPythonUnavailableWarning(!pythonAvailable,
+            pythonAvailable ? null : PYTHON_UNAVAILABLE_WARNING_MESSAGE);
+    }
+
+    private void refreshPythonAvailabilityWarning(List<Object> tools) {
+        if (viewModel == null || tools == null) {
+            return;
+        }
+        boolean pythonToolRegistered = tools.stream()
+            .anyMatch(toolObject -> toolObject instanceof RunPythonScriptTool);
+        viewModel.setPythonUnavailableWarning(!pythonToolRegistered,
+            pythonToolRegistered ? null : PYTHON_UNAVAILABLE_WARNING_MESSAGE);
     }
 
     private boolean isLikelyModelAuthenticationError(Throwable throwable) {

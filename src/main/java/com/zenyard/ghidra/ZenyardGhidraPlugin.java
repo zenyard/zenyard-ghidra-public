@@ -52,12 +52,14 @@ import com.zenyard.ghidra.storage.SyncStatusStorage;
 import com.zenyard.ghidra.status.StatusBarManager;
 import com.zenyard.ghidra.status.StatusBarPriorities;
 import com.zenyard.ghidra.ui.BinarySizeLimitDialog;
+import com.zenyard.ghidra.ui.PythonUnavailableDialog;
 import com.zenyard.ghidra.upload.QueueRevisionsTask;
 import com.zenyard.ghidra.upload.RegisterBinaryTask;
 import com.zenyard.ghidra.upload.UploadOriginalFilesTask;
 import com.zenyard.ghidra.upload.UploadRevisionsTask;
 import com.zenyard.ghidra.tracking.TrackChangesTaskManager;
 import com.zenyard.ghidra.util.BinarySizeLimitGate;
+import com.zenyard.ghidra.copilot.tools.RunPythonScriptTool;
 import ghidra.util.task.Task;
 import ghidra.util.task.TaskMonitor;
 import java.util.Collections;
@@ -178,7 +180,28 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
             return;
         }
 
+        maybeShowPythonUnavailablePopup(program);
         activateForProgram(program);
+    }
+
+    private void maybeShowPythonUnavailablePopup(Program program) {
+        if (program == null || program.isClosed() || options == null) {
+            return;
+        }
+        if (!options.isShowPythonUnavailablePopup()) {
+            return;
+        }
+        if (RunPythonScriptTool.isPythonAvailable()) {
+            return;
+        }
+        SwingUtilities.invokeLater(() -> {
+            Program activeProgram = getCurrentProgram();
+            if (activeProgram == null || activeProgram.isClosed()) {
+                return;
+            }
+            PythonUnavailableDialog dialog = new PythonUnavailableDialog(options);
+            tool.showDialog(dialog);
+        });
     }
 
     private void enableVariadicSignatureOverrideAnalyzer(Program program) {

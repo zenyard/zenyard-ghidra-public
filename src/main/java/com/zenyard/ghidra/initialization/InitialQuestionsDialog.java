@@ -64,7 +64,7 @@ public class InitialQuestionsDialog extends ZenyardDialogComponentProvider {
     private InitialQuestionsResult result;
     
     public InitialQuestionsDialog(PluginTool tool, ZenyardOptions options, Program program) {
-        super("Run Zenyard Analysis", true);
+        super("Analysis Setup", true);
         this.options = options;
         this.program = program;
         this.result = null;
@@ -74,7 +74,7 @@ public class InitialQuestionsDialog extends ZenyardDialogComponentProvider {
     
     private void buildPanel() {
         JPanel contentPanel = new JPanel(new BorderLayout());
-        JPanel titlePanel = createTitlePanel("Run Zenyard Analysis");
+        JPanel titlePanel = createTitlePanel("Run Zenyard on This Binary˜");
         contentPanel.add(titlePanel, BorderLayout.NORTH);
 
         JPanel mainPanel = new JPanel(new GridBagLayout());
@@ -95,11 +95,11 @@ public class InitialQuestionsDialog extends ZenyardDialogComponentProvider {
         mainPanel.add(descriptionLabel, gbc);
         
         // Allow preprocessing checkbox
-        gbc.gridx = 0;
-        gbc.gridy = 1;
-        gbc.gridwidth = 2;
-        allowPreprocessingCheckBox = new JCheckBox("Allow Zenyard to improve database before uploading", true);
-        mainPanel.add(allowPreprocessingCheckBox, gbc);
+        // gbc.gridx = 0;
+        // gbc.gridy = 1;
+        // gbc.gridwidth = 2;
+        // allowPreprocessingCheckBox = new JCheckBox("Allow Zenyard to improve database before uploading", true);
+        // mainPanel.add(allowPreprocessingCheckBox, gbc);
         
         // Binary instructions (if enabled)
         int nextRow = 2;
@@ -153,7 +153,7 @@ public class InitialQuestionsDialog extends ZenyardDialogComponentProvider {
         
         result = new InitialQuestionsResult(
             true,
-            allowPreprocessingCheckBox.isSelected(),
+            false,
             binaryInstructions
         );
         

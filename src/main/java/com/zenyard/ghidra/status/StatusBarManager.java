@@ -34,13 +34,16 @@ public class StatusBarManager {
         final String taskId;
         final int priority;
         final String status;
+        final String statusTooltip;
         final Integer progress; // null = indeterminate, 0-100 = percentage
         final boolean indeterminate;
         
-        TaskStatus(String taskId, int priority, String status, Integer progress, boolean indeterminate) {
+        TaskStatus(String taskId, int priority, String status, String statusTooltip,
+                Integer progress, boolean indeterminate) {
             this.taskId = taskId;
             this.priority = priority;
             this.status = status;
+            this.statusTooltip = statusTooltip;
             this.progress = progress;
             this.indeterminate = indeterminate;
         }
@@ -53,6 +56,7 @@ public class StatusBarManager {
     private StatusBarEventController eventController;
     private final StatusBarViewModel viewModel;
     private final IconRegistry iconRegistry;
+    private final InferenceCountTracker inferenceCountTracker;
     private StatusBarActions actions;
     
     // Map of active tasks by taskId
@@ -66,6 +70,7 @@ public class StatusBarManager {
         this.eventController = null;
         this.viewModel = new StatusBarViewModel();
         this.iconRegistry = new IconRegistry();
+        this.inferenceCountTracker = new InferenceCountTracker();
         
         try {
             initializeStatusBar();
@@ -135,7 +140,7 @@ public class StatusBarManager {
      * @param priority Status bar priority (lower number = higher priority)
      */
     public void registerTask(String taskId, int priority) {
-        activeTasks.put(taskId, new TaskStatus(taskId, priority, "", null, true));
+        activeTasks.put(taskId, new TaskStatus(taskId, priority, "", null, null, true));
         Msg.debug(this, "Registering task: " + taskId + " with priority: " + priority);
         // Immediately show the status panel when a task is registered
         SwingUtilities.invokeLater(() -> {
@@ -164,12 +169,26 @@ public class StatusBarManager {
      * @param indeterminate Whether to show indeterminate progress (spinner)
      */
     public void updateTaskStatus(String taskId, String status, Integer progress, boolean indeterminate) {
+        updateTaskStatus(taskId, status, progress, indeterminate, null);
+    }
+
+    /**
+     * Update task status information with optional tooltip.
+     * @param taskId Unique identifier for the task
+     * @param status Status message to display
+     * @param progress Progress value (0-100), or null for indeterminate
+     * @param indeterminate Whether to show indeterminate progress (spinner)
+     * @param tooltip HTML tooltip to show on hover, or null for none
+     */
+    public void updateTaskStatus(String taskId, String status, Integer progress,
+            boolean indeterminate, String tooltip) {
         TaskStatus taskStatus = activeTasks.get(taskId);
         if (taskStatus != null) {
             TaskStatus updated = new TaskStatus(
                 taskId,
                 taskStatus.priority,
                 status != null ? status : "",
+                tooltip,
                 progress,
                 indeterminate
             );
@@ -222,8 +241,8 @@ public class StatusBarManager {
         }
         if (activeTask.isPresent()) {
             TaskStatus task = activeTask.get();
-            state = new StatusBarState(task.taskId, task.priority, task.status, task.progress,
-                task.indeterminate, current.isShowRerun(), current.isShowInitialUpload(),
+            state = new StatusBarState(task.taskId, task.priority, task.status, task.statusTooltip,
+                task.progress, task.indeterminate, current.isShowRerun(), current.isShowInitialUpload(),
                 current.isShowWarningIcon(), showReviewTerms, current.getUsageText(),
                 current.getUsageTooltip(), current.isUsageVisible(), current.getUsageLevel());
         } else {
@@ -392,6 +411,10 @@ public class StatusBarManager {
     
     public StatusBarViewModel getViewModel() {
         return viewModel;
+    }
+
+    public InferenceCountTracker getInferenceCountTracker() {
+        return inferenceCountTracker;
     }
 
     public void dispose() {

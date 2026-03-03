@@ -106,8 +106,8 @@ public class OnboardingDialog extends ZenyardDialogComponentProvider {
         gbc.gridy = 0;
 
         GDLabel titleLabel = new GDLabel("Welcome to Zenyard");
-        Font currentFont = titleLabel.getFont();
-        titleLabel.setFont(currentFont.deriveFont(Font.BOLD));
+        Font baseFont = titleLabel.getFont();
+        titleLabel.setFont(baseFont.deriveFont(Font.BOLD));
         panel.add(titleLabel, gbc);
 
         gbc.gridy++;
@@ -115,9 +115,11 @@ public class OnboardingDialog extends ZenyardDialogComponentProvider {
         gbc.weighty = 1.0;
         JTextArea descriptionArea = new JTextArea(getPluginDescription());
         descriptionArea.setEditable(false);
+        descriptionArea.setFocusable(false);
         descriptionArea.setLineWrap(true);
         descriptionArea.setWrapStyleWord(true);
         descriptionArea.setOpaque(false);
+        descriptionArea.setFont(baseFont);
         panel.add(descriptionArea, gbc);
 
         return panel;
@@ -136,6 +138,7 @@ public class OnboardingDialog extends ZenyardDialogComponentProvider {
         gbc.gridy = 0;
 
         JLabel introLabel = new JLabel("Please review and accept the following Terms of Use:");
+        Font baseFont = introLabel.getFont();
         panel.add(introLabel, gbc);
 
         gbc.gridy++;
@@ -143,12 +146,10 @@ public class OnboardingDialog extends ZenyardDialogComponentProvider {
         gbc.weighty = 1.0;
         JTextArea textArea = new JTextArea(EulaDialog.getEulaText());
         textArea.setEditable(false);
+        textArea.setFocusable(false);
         textArea.setLineWrap(true);
         textArea.setWrapStyleWord(true);
-        Font currentFont = textArea.getFont();
-        Font fixedFont = new Font(Font.MONOSPACED, currentFont.getStyle(),
-            Math.max(currentFont.getSize(), 12));
-        textArea.setFont(fixedFont);
+        textArea.setFont(baseFont.deriveFont((float) Math.max(baseFont.getSize(), 12)));
 
         JScrollPane scrollPane = new JScrollPane(textArea);
         panel.add(scrollPane, gbc);

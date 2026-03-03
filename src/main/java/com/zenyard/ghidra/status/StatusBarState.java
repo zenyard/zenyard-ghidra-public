@@ -11,6 +11,7 @@ public final class StatusBarState {
     private final String taskId;
     private final int priority;
     private final String status;
+    private final String statusTooltip;
     private final Integer progress;
     private final boolean indeterminate;
     private final boolean showRerun;
@@ -22,13 +23,14 @@ public final class StatusBarState {
     private final boolean usageVisible;
     private final UsageLevel usageLevel;
 
-    StatusBarState(String taskId, int priority, String status, Integer progress,
-            boolean indeterminate, boolean showRerun, boolean showInitialUpload,
+    StatusBarState(String taskId, int priority, String status, String statusTooltip,
+            Integer progress, boolean indeterminate, boolean showRerun, boolean showInitialUpload,
             boolean showWarningIcon, boolean showReviewTerms, String usageText,
             String usageTooltip, boolean usageVisible, UsageLevel usageLevel) {
         this.taskId = taskId;
         this.priority = priority;
         this.status = status;
+        this.statusTooltip = statusTooltip;
         this.progress = progress;
         this.indeterminate = indeterminate;
         this.showRerun = showRerun;
@@ -47,6 +49,7 @@ public final class StatusBarState {
             Integer.MAX_VALUE,
             "Ready",
             null,
+            null,
             false,
             false,
             false,
@@ -60,43 +63,57 @@ public final class StatusBarState {
     }
 
     public StatusBarState withStatus(String value) {
-        return new StatusBarState(taskId, priority, value, progress, indeterminate, showRerun,
-            showInitialUpload, showWarningIcon, showReviewTerms, usageText, usageTooltip, usageVisible, usageLevel);
+        return new StatusBarState(taskId, priority, value, statusTooltip, progress, indeterminate,
+            showRerun, showInitialUpload, showWarningIcon, showReviewTerms, usageText,
+            usageTooltip, usageVisible, usageLevel);
+    }
+
+    public StatusBarState withStatusTooltip(String value) {
+        return new StatusBarState(taskId, priority, status, value, progress, indeterminate,
+            showRerun, showInitialUpload, showWarningIcon, showReviewTerms, usageText,
+            usageTooltip, usageVisible, usageLevel);
     }
 
     public StatusBarState withProgress(Integer value, boolean isIndeterminate) {
-        return new StatusBarState(taskId, priority, status, value, isIndeterminate, showRerun,
-            showInitialUpload, showWarningIcon, showReviewTerms, usageText, usageTooltip, usageVisible, usageLevel);
+        return new StatusBarState(taskId, priority, status, statusTooltip, value, isIndeterminate,
+            showRerun, showInitialUpload, showWarningIcon, showReviewTerms, usageText,
+            usageTooltip, usageVisible, usageLevel);
     }
 
     public StatusBarState withShowRerun(boolean value) {
-        return new StatusBarState(taskId, priority, status, progress, indeterminate, value,
-            showInitialUpload, showWarningIcon, showReviewTerms, usageText, usageTooltip, usageVisible, usageLevel);
+        return new StatusBarState(taskId, priority, status, statusTooltip, progress, indeterminate,
+            value, showInitialUpload, showWarningIcon, showReviewTerms, usageText,
+            usageTooltip, usageVisible, usageLevel);
     }
 
     public StatusBarState withShowInitialUpload(boolean value) {
-        return new StatusBarState(taskId, priority, status, progress, indeterminate, showRerun, value,
-            showWarningIcon, showReviewTerms, usageText, usageTooltip, usageVisible, usageLevel);
+        return new StatusBarState(taskId, priority, status, statusTooltip, progress, indeterminate,
+            showRerun, value, showWarningIcon, showReviewTerms, usageText,
+            usageTooltip, usageVisible, usageLevel);
     }
 
     public StatusBarState withShowWarningIcon(boolean value) {
-        return new StatusBarState(taskId, priority, status, progress, indeterminate, showRerun,
-            showInitialUpload, value, showReviewTerms, usageText, usageTooltip, usageVisible, usageLevel);
+        return new StatusBarState(taskId, priority, status, statusTooltip, progress, indeterminate,
+            showRerun, showInitialUpload, value, showReviewTerms, usageText,
+            usageTooltip, usageVisible, usageLevel);
     }
 
     public StatusBarState withShowReviewTerms(boolean value) {
-        return new StatusBarState(taskId, priority, status, progress, indeterminate, showRerun,
-            showInitialUpload, showWarningIcon, value, usageText, usageTooltip, usageVisible, usageLevel);
+        return new StatusBarState(taskId, priority, status, statusTooltip, progress, indeterminate,
+            showRerun, showInitialUpload, showWarningIcon, value, usageText,
+            usageTooltip, usageVisible, usageLevel);
     }
 
     public StatusBarState withTask(String id, int taskPriority) {
-        return new StatusBarState(id, taskPriority, status, progress, indeterminate, showRerun,
-            showInitialUpload, showWarningIcon, showReviewTerms, usageText, usageTooltip, usageVisible, usageLevel);
+        return new StatusBarState(id, taskPriority, status, statusTooltip, progress, indeterminate,
+            showRerun, showInitialUpload, showWarningIcon, showReviewTerms, usageText,
+            usageTooltip, usageVisible, usageLevel);
     }
 
     public StatusBarState withUsageDisplay(String text, String tooltip, boolean visible, UsageLevel level) {
-        return new StatusBarState(taskId, priority, status, progress, indeterminate, showRerun,
-            showInitialUpload, showWarningIcon, showReviewTerms, text, tooltip, visible, level);
+        return new StatusBarState(taskId, priority, status, statusTooltip, progress, indeterminate,
+            showRerun, showInitialUpload, showWarningIcon, showReviewTerms, text,
+            tooltip, visible, level);
     }
 
     public String getTaskId() {
@@ -109,6 +126,10 @@ public final class StatusBarState {
 
     public String getStatus() {
         return status;
+    }
+
+    public String getStatusTooltip() {
+        return statusTooltip;
     }
 
     public Integer getProgress() {
@@ -169,6 +190,7 @@ public final class StatusBarState {
             && usageVisible == that.usageVisible
             && Objects.equals(taskId, that.taskId)
             && Objects.equals(status, that.status)
+            && Objects.equals(statusTooltip, that.statusTooltip)
             && Objects.equals(progress, that.progress)
             && Objects.equals(usageText, that.usageText)
             && Objects.equals(usageTooltip, that.usageTooltip)
@@ -177,7 +199,8 @@ public final class StatusBarState {
 
     @Override
     public int hashCode() {
-        return Objects.hash(taskId, priority, status, progress, indeterminate, showRerun,
-            showInitialUpload, showWarningIcon, showReviewTerms, usageText, usageTooltip, usageVisible, usageLevel);
+        return Objects.hash(taskId, priority, status, statusTooltip, progress, indeterminate,
+            showRerun, showInitialUpload, showWarningIcon, showReviewTerms, usageText,
+            usageTooltip, usageVisible, usageLevel);
     }
 }

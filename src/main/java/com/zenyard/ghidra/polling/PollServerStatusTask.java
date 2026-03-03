@@ -36,9 +36,6 @@ public class PollServerStatusTask extends EventAwareTask {
     private static final int POLL_INTERVAL_MS = ZenyardConstants.STATUS_POLL_INTERVAL_MS;
     private static final int MAX_BACKOFF_MS = ZenyardConstants.MAX_BACKOFF_MS;
     private static final int INITIAL_BACKOFF_MS = ZenyardConstants.INITIAL_BACKOFF_MS;
-    private static final long ETA_CALCULATION_TIME_MS = 30_000L; // 30 seconds in milliseconds
-    private static final long ETA_MIN_TIME_MS = 5_000L; // 5 seconds in milliseconds
-    private static final double ETA_MIN_PROGRESS = 0.05; // 5% progress to allow early ETA
     private static final double REVISION_EPS = 1e-6; // floating point tolerance for revision comparisons
     private static final int CONNECTIVITY_CHECK_TIMEOUT_MS = 5000;
     private static final int STATUS_REQUEST_TIMEOUT_MS = 10000;
@@ -263,7 +260,7 @@ public class PollServerStatusTask extends EventAwareTask {
                         AnalysisStatus analysisStatus = calculateAnalysisStatus(localRevision, fractionalServerRevision);
                         if (analysisStatus != null) {
                             Msg.debug(this, "PollServerStatusTask: Publishing ANALYSIS_STATUS_UPDATED, progress=" 
-                                + analysisStatus.getProgress() + ", eta=" + analysisStatus.getEta());
+                                + analysisStatus.getProgress());
                             publishAnalysisStatus(analysisStatus, fractionalServerRevision);
                         } else if (clientInSync && hadAnalysisStats) {
                             Msg.debug(this, "PollServerStatusTask: Client in sync, signaling completion");
@@ -528,112 +525,31 @@ public class PollServerStatusTask extends EventAwareTask {
     }
     
     /**
-     * Calculate analysis status (progress and ETA).
+     * Calculate analysis status (progress).
      * Mirrors _get_analysis_status_sync() in zenyard_ida/ui/status_bar_view_model.py
      * 
      * @param localRevision Current local revision
      * @param serverRevision Fractional server revision
-     * @return AnalysisStatus with progress and ETA, or null if analysis is not active
+     * @return AnalysisStatus with progress, or null if analysis is not active
      */
     private AnalysisStatus calculateAnalysisStatus(int localRevision, double serverRevision) {
-        // Get uploaded revision (current revision)
         int uploadedRevision = localRevision;
         
-        // Check if no revision was uploaded yet - prefer showing "Uploading" over "Analyzing"
         if (Math.abs(uploadedRevision - serverRevision) < REVISION_EPS) {
             return null;
         }
         
-        // Calculate target revision (assuming all queued revisions are uploaded)
-        // In Ghidra, revisions are uploaded immediately when queued, so target = current revision
         int revision = uploadedRevision;
         int lastDoneRevision = getLastDoneRevision();
         
-        // Avoid division by zero
         if (revision == lastDoneRevision) {
             return null;
         }
         
-        // Calculate progress: (server_revision - last_done_revision) / (revision - last_done_revision)
         double progress = (serverRevision - lastDoneRevision) / (revision - lastDoneRevision);
         progress = Math.max(0.0, Math.min(1.0, progress));
         
-        // Calculate ETA
-        Double eta = calculateEta(revision, serverRevision);
-        
-        return new AnalysisStatus(progress, eta);
-    }
-    
-    /**
-     * Calculate ETA for analysis completion.
-     * Mirrors _calculate_eta() in zenyard_ida/ui/status_bar_view_model.py
-     * 
-     * Uses wall-clock time (milliseconds since epoch) to handle program restarts correctly.
-     * 
-     * @param revision Target revision
-     * @param serverRevision Current fractional server revision
-     * @return ETA in seconds, or null if not available
-     */
-    private Double calculateEta(double revision, double serverRevision) {
-        RemoteAnalysisStats stats = getRemoteAnalysisStats();
-        if (stats == null) {
-            return null;
-        }
-        
-        // No progress yet
-        if (stats.getStartRevision() == serverRevision) {
-            return null;
-        }
-        
-        // Calculate time since stats were created using wall-clock time
-        // This handles program restarts correctly since we store absolute timestamps
-        long currentTimeMs = System.currentTimeMillis();
-        long startTimeMs = stats.getStartTime();
-        long timeSinceStatsMs = currentTimeMs - startTimeMs;
-        
-        // Handle case where stored time might be in old format (nanoseconds)
-        // If the stored time is unreasonably large (> year 2100 in milliseconds), it's likely nanoseconds
-        // Convert it by dividing by 1e6, but this is a one-time migration
-        if (startTimeMs > 4102444800000L) { // Year 2100 in milliseconds
-            // Likely stored as nanoseconds (old format) - convert to milliseconds
-            // For this calculation, we'll treat it as if it started now (can't recover exact time)
-            // This will cause ETA to recalculate from current point
-            Msg.debug(this, "PollServerStatusTask: Detected old timestamp format, treating as restart");
-            return null; // Let it recalculate from current state
-        }
-        
-        double timeSinceStatsSeconds = timeSinceStatsMs / 1000.0;
-        
-        // Calculate progress since stats were created
-        double denominator = (revision - stats.getStartRevision());
-        if (denominator <= 0.0) {
-            return null;
-        }
-        double progressSinceStats = (serverRevision - stats.getStartRevision()) / denominator;
-        
-        // Need at least some progress and time to produce a stable ETA.
-        if (progressSinceStats <= 0.0 || timeSinceStatsMs < ETA_MIN_TIME_MS) {
-            return null;
-        }
-        
-        // Allow early ETA once meaningful progress is observed; otherwise wait for stabilization.
-        if (progressSinceStats < ETA_MIN_PROGRESS && timeSinceStatsMs < ETA_CALCULATION_TIME_MS) {
-            return null;
-        }
-        
-        progressSinceStats = Math.min(1.0, progressSinceStats);
-        
-        // Calculate distance remaining and speed
-        double distance = 1.0 - progressSinceStats;
-        double speed = progressSinceStats / timeSinceStatsSeconds;
-        
-        // Avoid division by zero
-        if (speed == 0.0) {
-            return null;
-        }
-        
-        // ETA = distance / speed
-        return distance / speed;
+        return new AnalysisStatus(progress);
     }
     
     /**
@@ -684,7 +600,7 @@ public class PollServerStatusTask extends EventAwareTask {
         
         if (analysisStatus != null) {
             Msg.debug(this, "PollServerStatusTask: Restored analysis status, progress=" 
-                + analysisStatus.getProgress() + ", eta=" + analysisStatus.getEta());
+                + analysisStatus.getProgress());
             publishAnalysisStatus(analysisStatus, fractionalServerRevision);
         } else {
             // Analysis may have completed while program was closed, or state is invalid
@@ -777,7 +693,6 @@ public class PollServerStatusTask extends EventAwareTask {
         
         if (status != null) {
             payload.put("progress", status.getProgress());
-            payload.put("eta", status.getEta());
             payload.put("serverRevision", serverRevision);
         } else {
             // Publish null status to indicate analysis is not active
