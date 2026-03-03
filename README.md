@@ -16,19 +16,19 @@ Zenyard brings AI-powered reverse engineering directly into your workflow. It au
 
 This repository serves as the official distribution hub for the Zenyard Ghidra client.
 
-### 📥 Download & Installation
+## 📥 Download & Installation
 
 You can download the latest extension release (`.zip`) from the **[GitHub Releases](../../releases)** page.
 
 For system requirements and a short setup guide, please refer to:
 * **[Ghidra Setup & Installation Guide](https://zenyard.notion.site/Setting-up-Zenyard-in-Ghidra-30fe2d3032768024ba4cfb1fa0b91d66)**
 
-### 📖 Documentation & Usage
+## 📖 Documentation & Usage
 
 To ensure our guides are always up-to-date, we maintain all of our documentation, workflows, and feature breakdowns in our official user guides:
 * **[The 5-Minute Quick Start Guide](https://zenyard.notion.site/Welcome-to-Zenyard-316e2d30327680edb1aff7092ddd3230)**
 
-### ✉️ Contact & Support
+## ✉️ Contact & Support
 
 Please reach out to us directly via email so we can assist you promptly:
 
