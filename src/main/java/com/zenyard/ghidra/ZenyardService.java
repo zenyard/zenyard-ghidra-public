@@ -46,7 +46,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.HashSet;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
+
+import ghidra.framework.plugintool.PluginTool;
 
 /**
  * Service registry / façade that provides access to Illuminator, Copilot,
@@ -54,12 +57,13 @@ import java.util.concurrent.locks.ReentrantLock;
  * 
  * Similar to IDA's TaskContext and GlobalTaskContext but adapted for Java/Ghidra.
  * 
- * This class is a singleton - use getInstance() to get the current instance,
- * or use static methods like getProgram() to access services.
+ * Each PluginTool (CodeBrowser window) gets its own ZenyardService instance,
+ * stored in a per-tool registry. Use getInstanceForTool(tool) when the tool
+ * is available, or getInstance() as a fallback for contexts without tool access.
  */
 public class ZenyardService {
     
-    private static ZenyardService instance;
+    private static final ConcurrentHashMap<PluginTool, ZenyardService> instances = new ConcurrentHashMap<>();
     
     private final ZenyardGhidraPlugin plugin;
     private final ZenyardOptions options;
@@ -116,8 +120,8 @@ public class ZenyardService {
         this.options = options;
         this.currentProgram = null;
         
-        // Set singleton instance
-        instance = this;
+        // Register this instance for its tool
+        instances.put(plugin.getTool(), this);
         
         // Initialize API client if configured
         if (options.isConfigured()) {
@@ -129,8 +133,8 @@ public class ZenyardService {
         // Initialize event dispatcher first (needed by status bar manager and other components)
         this.eventDispatcher = new EventDispatcher();
         
-        // Initialize status bar manager
-        this.statusBarManager = new StatusBarManager(plugin.getTool());
+        // Initialize status bar manager with a back-reference to this service
+        this.statusBarManager = new StatusBarManager(plugin.getTool(), this);
         // Set event dispatcher so status bar component can subscribe to events
         this.statusBarManager.setEventDispatcher(eventDispatcher);
         this.statusBarManager.setActions(createStatusBarActions());
@@ -292,10 +296,13 @@ public class ZenyardService {
     }
     
     /**
-     * Clear the singleton instance. Should be called when services are disposed.
+     * Unregister the service instance for the given tool.
+     * Should be called when the plugin is disposed.
      */
-    public static void clearInstance() {
-        instance = null;
+    public static void clearInstance(PluginTool tool) {
+        if (tool != null) {
+            instances.remove(tool);
+        }
     }
     
     
@@ -304,11 +311,30 @@ public class ZenyardService {
     }
     
     /**
-     * Get the singleton instance of ZenyardService.
-     * @return The current instance, or null if not initialized
+     * Get the ZenyardService instance for a specific PluginTool.
+     * This is the preferred lookup method when the tool is available.
+     * @param tool The PluginTool to look up the service for
+     * @return The service instance for the tool, or null if not registered
+     */
+    public static ZenyardService getInstanceForTool(PluginTool tool) {
+        if (tool == null) {
+            return null;
+        }
+        return instances.get(tool);
+    }
+    
+    /**
+     * Get any registered ZenyardService instance.
+     * Use getInstanceForTool(tool) when the tool is available; this fallback
+     * returns an arbitrary instance and is only safe for tool-independent
+     * queries (e.g. usage state, server connectivity).
+     * @return An arbitrary instance, or null if none registered
      */
     public static ZenyardService getInstance() {
-        return instance;
+        if (instances.isEmpty()) {
+            return null;
+        }
+        return instances.values().iterator().next();
     }
     
     /**
@@ -317,10 +343,11 @@ public class ZenyardService {
      * @return The current program, or null if no program is loaded or services not initialized
      */
     public static Program getProgram() {
-        if (instance == null) {
+        ZenyardService svc = getInstance();
+        if (svc == null) {
             return null;
         }
-        return instance.getCurrentProgram();
+        return svc.getCurrentProgram();
     }
     
     public ZenyardOptions getOptions() {

@@ -128,9 +128,9 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
             services.getStatusBarManager().dispose();
         }
         
-        // Clear singleton instance when plugin is disposed
+        // Unregister this tool's service instance
         if (services != null) {
-            com.zenyard.ghidra.ZenyardService.clearInstance();
+            com.zenyard.ghidra.ZenyardService.clearInstance(getTool());
         }
         // ProgramManagerListener removed in Ghidra 12.0 - no need to unregister
         super.dispose();
@@ -391,6 +391,10 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
         scheduleBinarySizeGate(program, statusBarManager);
     }
 
+    private static final int SIZE_GATE_INITIAL_BACKOFF_MS = 5_000;
+    private static final int SIZE_GATE_MAX_BACKOFF_MS = 30_000;
+    private static final int SIZE_GATE_MAX_RETRIES = 60;
+
     private void scheduleBinarySizeGate(Program program, StatusBarManager statusBarManager) {
         if (program == null || program.isClosed() || services == null) {
             return;
@@ -404,23 +408,51 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
             @Override
             public void run(TaskMonitor monitor) {
                 try {
-                    BinarySizeLimitGate.CheckResult sizeGateResult =
-                        BinarySizeLimitGate.check(program, services.getUserApi());
+                    BinarySizeLimitGate.CheckResult sizeGateResult = null;
+                    int backoffMs = SIZE_GATE_INITIAL_BACKOFF_MS;
 
-                    // Program may be closed (database disposed) while we are waiting on network.
+                    for (int attempt = 0; attempt <= SIZE_GATE_MAX_RETRIES; attempt++) {
+                        sizeGateResult =
+                            BinarySizeLimitGate.check(program, services.getUserApi());
+
+                        if (sizeGateResult.isPassed() || sizeGateResult.isBlocked()) {
+                            break;
+                        }
+
+                        if (program.isClosed() || monitor.isCancelled()) {
+                            return;
+                        }
+
+                        if (attempt < SIZE_GATE_MAX_RETRIES) {
+                            Msg.info(ZenyardGhidraPlugin.this,
+                                "Binary size gate not verified (attempt " + (attempt + 1)
+                                    + "), retrying in " + backoffMs + "ms: "
+                                    + sizeGateResult.getMessage());
+                            try {
+                                Thread.sleep(backoffMs);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                return;
+                            }
+                            backoffMs = Math.min(backoffMs * 2, SIZE_GATE_MAX_BACKOFF_MS);
+                        } else {
+                            Msg.warn(ZenyardGhidraPlugin.this,
+                                "Binary size gate could not be verified after retries, proceeding");
+                        }
+                    }
+
                     if (program.isClosed()) {
                         return;
                     }
+
+                    final BinarySizeLimitGate.CheckResult finalResult = sizeGateResult;
                     try {
-                        BinarySizeLimitGate.persistResult(program, sizeGateResult);
+                        BinarySizeLimitGate.persistResult(program, finalResult);
                     } catch (IllegalStateException e) {
-                        // Ghidra can dispose the underlying DB handle during close; avoid surfacing
-                        // noisy errors from a best-effort status check.
                         Msg.debug(ZenyardGhidraPlugin.this,
                             "Binary size gate: program DB closed before persisting result");
                         return;
                     } catch (RuntimeException e) {
-                        // Same rationale: don't crash background worker if program is closing.
                         Msg.debug(ZenyardGhidraPlugin.this,
                             "Binary size gate: failed to persist result: " + e.getMessage());
                         return;
@@ -430,13 +462,13 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
                         if (program.isClosed() || program != currentProgram) {
                             return;
                         }
-                        if (!sizeGateResult.isPassed()) {
+                        if (finalResult != null && finalResult.isBlocked()) {
                             if (statusBarManager != null) {
                                 statusBarManager.refreshDisplayNow();
                             }
                             Msg.warn(ZenyardGhidraPlugin.this,
-                                "Skipping Zenyard task startup: binary size gate did not pass: "
-                                    + sizeGateResult.getMessage());
+                                "Skipping Zenyard task startup: binary size gate blocked: "
+                                    + finalResult.getMessage());
                             return;
                         }
                         activateAfterBinarySizeGate(program, statusBarManager);

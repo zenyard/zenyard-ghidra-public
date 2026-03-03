@@ -1,234 +1,145 @@
-# Zenyard Ghidra Plugin
+# Zenyard for Ghidra
 
-A Ghidra plugin that provides AI-powered reverse engineering assistance through the Zenyard service.
+**In-depth binary understanding with a purpose-built AI agent that helps you get straight to the meaningful parts and understand them faster.**
+
+Zenyard is a Ghidra extension that brings AI-powered reverse engineering directly into your workflow. It automatically analyzes binaries, renames functions and variables with meaningful identifiers, infers types and structures, and provides an interactive AI copilot that understands your binary at a deep level.
 
 ## Features
 
-### Illuminator
-- Function highlighting and renaming
-- Variable highlighting and renaming
-- Function overview descriptions in disassembly/decompile views
-- Execute tools for static analysis
+### Illuminator — Automated Binary Understanding
 
-### CoPilot Module
-- Copilot window for LLM-assisted interaction (chat)
+The Illuminator is Zenyard's analysis engine. When you open a binary, it works in the background to transform raw decompiled code into something you can actually read.
 
-### Misc
-- Status bar UI for displaying analysis progress, errors, and other indications
-- External (remote) API interactions with Zenyard API server
-- License configuration screen
+**Function and Variable Renaming**
+Zenyard infers meaningful names for functions, local variables, parameters, and global data labels — replacing cryptic defaults like `FUN_00401000`, `uVar1`, and `DAT_00405000` with descriptive identifiers. Renamed symbols are visually highlighted throughout Ghidra's listing, decompiler, function list, and symbol tree so you can instantly tell what's been analyzed.
+
+**Type and Structure Recovery**
+Beyond names, the Illuminator infers parameter types, return types, and reconstructs struct definitions. Recovered structures are created in Ghidra's data type manager and propagated through the decompiler output, giving you a clearer picture of how data flows through the binary.
+
+**Function Overviews**
+Each analyzed function receives a natural-language summary added as a plate comment at its entry point. These overviews appear in both the listing and decompiler views, giving you a quick read on what a function does without having to trace through the code.
+
+**Incremental Analysis**
+Zenyard tracks changes you make to the program and can re-analyze affected functions when you're ready. The status bar indicates when updates are available, and you can trigger re-analysis with a single click.
+
+### CoPilot — Interactive AI Assistant
+
+The CoPilot is a conversational AI assistant embedded directly in Ghidra. It has full access to your binary's context and can reason across functions, data, and control flow to answer your questions.
+
+**Deep Binary Context**
+The CoPilot doesn't just see the function you're looking at — it can decompile any function, trace cross-references, inspect strings, examine imports and exports, read memory, and navigate the full symbol table. It builds understanding by actively exploring the binary as it works through your questions.
+
+**Multi-Step Reasoning**
+Powered by an AI agent architecture, the CoPilot plans and executes multi-step analysis workflows. It can decompose complex questions, delegate to specialized sub-agents, and synthesize findings — going well beyond simple Q&A to perform actual investigative work.
+
+**Function References**
+Use `@` mentions in the chat to reference specific functions by name. The CoPilot resolves these to their addresses and can immediately pull up decompilation, cross-references, or other relevant context.
+
+**Tool Access**
+The CoPilot has access to over 30 built-in tools spanning decompilation, cross-reference analysis, string search, symbol lookup, stack frame inspection, basic block enumeration, and more. On systems with PyGhidra, it can also write and execute Python scripts for custom analysis.
+
+**Open the CoPilot:** `Zenyard → Copilot` or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> (<kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> on macOS).
+
+### Status Bar
+
+The integrated status bar keeps you informed at a glance:
+
+- **Analysis progress** — See what Zenyard is currently doing (uploading, analyzing, applying results) with a live progress indicator.
+- **Usage tracking** — Monitor your plan usage directly from the status bar. Click it for detailed plan and quota information.
+- **Connectivity status** — Warnings appear automatically if the Zenyard service is unreachable, with automatic reconnection.
+- **Action prompts** — Contextual prompts appear when actions are available, such as initial analysis or re-analysis after edits.
 
 ## Requirements
 
-- Ghidra 12.x (desktop)
+- Ghidra 12.x
 - Java 21 or later
-- Network access to Zenyard API server
+- Network access to the Zenyard API
 
 ## Installation
 
-### Prerequisites
+### From a Release
 
-Before building, you need to set the Ghidra installation directory. You can do this in one of three ways:
+1. Download the extension ZIP for your platform from the [releases page](https://github.com/zenyard/decompai-ghidra/releases).
+2. In Ghidra, go to `File → Install Extensions` and select the ZIP file. Alternatively, extract it into `$GHIDRA_INSTALL_DIR/Ghidra/Extensions/`.
+3. Restart Ghidra.
 
-1. **Environment variable** (recommended for one-time builds):
-   ```bash
-   export GHIDRA_INSTALL_DIR=/path/to/ghidra
-   ```
-
-2. **Gradle properties** (recommended for persistent configuration):
-   Edit `gradle.properties` and uncomment/add:
-   ```properties
-   GHIDRA_INSTALL_DIR=/path/to/ghidra
-   ```
-
-3. **Command line** (for one-time builds):
-   ```bash
-   ./gradlew -PGHIDRA_INSTALL_DIR=/path/to/ghidra buildExtension
-   ```
-
-**Note**: The path should point to the directory containing the `Ghidra` folder. For example:
-- If Ghidra is at `/Applications/ghidra_11.2/Ghidra/`, use `/Applications/ghidra_11.2`
-- If Ghidra is at `/opt/ghidra/Ghidra/`, use `/opt/ghidra`
-
-The build script will attempt to auto-detect common installation locations if `GHIDRA_INSTALL_DIR` is not set.
-
-### Building
-
-The extension embeds JavaFX (WebView) and ships platform-specific native libraries.
-Each build produces a ZIP containing JavaFX JARs for **one** target platform.
-
-**Default (build for your current OS/arch):**
+### Building from Source
 
 ```bash
+export GHIDRA_INSTALL_DIR=/path/to/ghidra
 ./gradlew buildExtension
 ```
 
-The build auto-detects your OS and architecture (e.g. `mac-aarch64` on Apple Silicon, `linux` on Linux x64).
+The output ZIP is placed in `dist/`. Platform-specific builds (Linux, Windows, macOS Intel/ARM) are supported — see [docs/DEVELOPER.md](docs/DEVELOPER.md) for cross-compilation details.
 
-**Cross-build for a specific platform:**
+### Activating the Plugin
 
-```bash
-./gradlew -PjavafxPlatform=linux buildExtension    # Linux x64
-./gradlew -PjavafxPlatform=win buildExtension      # Windows x64
-./gradlew -PjavafxPlatform=mac buildExtension      # macOS Intel
-./gradlew -PjavafxPlatform=mac-aarch64 buildExtension  # macOS Apple Silicon
-./gradlew -PjavafxPlatform=linux-aarch64 buildExtension # Linux ARM64
-```
+After installation, if the plugin doesn't appear automatically:
 
-The `linux-aarch64` platform uses pre-extracted JARs from `third-party/javafx/linux-aarch64/`
-(already committed to the repo) since OpenJFX does not publish this classifier to Maven Central.
+1. Open the **CodeBrowser** tool.
+2. Go to `File → Configure → Miscellaneous`.
+3. Enable **ZenyardGhidraPlugin**.
 
-The output ZIP is in `dist/`.
+## Getting Started
 
-### Installing
+### First Launch
 
-1. Copy the built extension ZIP to `$GHIDRA_INSTALL_DIR/Ghidra/Extensions`, or use Ghidra's extension manager.
-2. Open Ghidra, go to `Edit -> Tool Options -> Zenyard`.
-3. Enter your API key and server URL, then click "Test Connection" to verify.
+On first use, Zenyard walks you through a short onboarding:
 
-## Troubleshooting
+1. **Terms of Use** — Review and accept the terms.
+2. **Configuration** — Enter your API key and server URL, then verify the connection.
 
-### Plugin not available after installation
+### Analyzing a Binary
 
-In some cases, Ghidra installs the extension but does not automatically activate the plugin in the current tool.
+1. Open a binary in Ghidra and let Ghidra's auto-analysis complete.
+2. Zenyard prompts you to start analysis. Optionally, provide context about the binary (its origin, purpose, or known structure) to improve results.
+3. Analysis runs in the background — the status bar shows progress in real time.
+4. As results arrive, functions and variables are renamed, types are inferred, and overviews are added directly in the listing and decompiler views.
 
-To activate it manually:
+Renamed functions are highlighted with a distinct background color in the function list and symbol tree, making it easy to see analysis coverage at a glance.
 
-1. Open the **CodeBrowser** tool window.
-2. Go to `File -> Config -> Misc`.
-3. Check `ZenyardGhidraPlugin`.
-4. Apply/OK the changes (restart the tool if prompted).
+### Using the CoPilot
+
+Open the CoPilot panel and start asking questions:
+
+- *"What does this binary do at a high level?"*
+- *"Trace the authentication flow starting from main."*
+- *"What data structures are used in the network handler?"*
+- *"Explain what happens when this function receives a null pointer."*
+
+Use `@functionName` to direct the CoPilot's attention to specific functions. The CoPilot tracks tasks and progress visually, so you can follow along as it works through complex analysis.
 
 ## Configuration
 
-The plugin requires:
-- **API Key**: Your Zenyard API key
-- **Server URL**: The base URL of the Zenyard API server (default: `https://api.zenyard.com`)
+Configuration is stored in `~/.ghidra/zenyard.json` and persists across sessions.
 
-Configuration is stored in Ghidra's tool options and persists across sessions.
+| Setting | Description |
+|---------|-------------|
+| **API Key** | Your Zenyard API key |
+| **Server URL** | Zenyard API endpoint (default: `https://api.zenyard.ai`) |
+| **SSL Verification** | Toggle SSL/TLS certificate verification |
+| **Log Level** | Logging verbosity (DEBUG, INFO, WARN, ERROR) |
 
-## Usage
+Access configuration at any time via `Zenyard → Configuration`.
 
-### Initial Analysis
+## Platform Support
 
-When you open a binary in Ghidra:
-1. Wait for Ghidra's initial auto-analysis to complete
-2. A dialog will appear asking if you want to start Zenyard analysis
-3. Choose your preferences (auto-apply results, allow preprocessing)
-4. The plugin will upload the binary and begin analysis in the background
+The extension includes platform-specific JavaFX WebView libraries. Pre-built packages are available for:
 
-### Manual Analysis
+| Platform | Architecture |
+|----------|-------------|
+| macOS | Intel (x64), Apple Silicon (ARM64) |
+| Linux | x64, ARM64 |
+| Windows | x64 |
 
-You can also trigger analysis manually:
-- Right-click on a function in the listing → "Analyze with Zenyard"
-- Use the toolbar button "Analyze Function with Zenyard"
-- Use the menu: `Zenyard → Analyze Current Function`
+## Usage Plans
 
-### Copilot
+Zenyard offers both free and paid plans. Your current usage is always visible in the status bar. When a plan limit is reached, analysis pauses automatically — the CoPilot and previously applied results remain available. Click the usage indicator for plan details or to upgrade.
 
-Open the Copilot window:
-- Menu: `Window → Zenyard Copilot`
-- Or use the toolbar button
-
-The Copilot window allows you to ask questions about the current function, selection, or binary.
-
-## Logging
-
-Logs are written to:
-- `<project_dir>/<binary_name>.log` (per-project)
-- Or `<ghidra_user_dir>/logs/zenyard/<project_name>.log`
-
-Logs include:
-- Analysis steps
-- API calls
-- Errors
-- User actions
-
-## Development
-
-### OpenAPI Client Generation
-
-The project uses OpenAPI Generator to create the Java client from the API specification. The `openapi.json` file must be present in the project root directory.
-
-#### Obtaining openapi.json
-
-**Option 1: Download from local cluster (recommended for development)**
-
-If you have the Zenyard service running locally, you can download the latest OpenAPI spec:
-
-```bash
-# Download from default local cluster URL (http://localhost:32304/openapi.json)
-./gradlew downloadOpenApiSpecFromCluster
-
-# Or specify a custom URL
-OPENAPI_JSON_URL=http://localhost:32304/openapi.json ./gradlew downloadOpenApiSpecFromCluster
-```
-
-**Option 2: Manual download**
-
-Download the `openapi.json` file from your running Zenyard service:
-
-```bash
-# Using curl
-curl http://localhost:32304/openapi.json -o openapi.json
-
-# Or using wget
-wget http://localhost:32304/openapi.json -O openapi.json
-```
-
-**Option 3: Copy from zenyard service**
-
-If you have access to the zenyard service repository, you can copy the generated OpenAPI spec from there.
-
-#### Generating the Java Client
-
-Once `openapi.json` is in the project root, the Java client is automatically generated during the build:
-
-```bash
-# Generate OpenAPI client only
-./gradlew openApiGenerate
-
-# Or build the extension (which includes client generation)
-./gradlew buildExtension
-```
-
-The generated client code will be in `build/generated/src/main/java/com/zenyard/ghidra/api/generated/`.
-
-**Note:** The `downloadOpenApiSpecFromCluster` task is optional and not part of the default build flow. It's useful for keeping the client in sync with a running local development server.
-
-### Building (Development)
-
-```bash
-./gradlew buildExtension
-```
-
-See [Building](#building) above for cross-platform build options.
-
-### Project Structure
-
-```
-zenyard-ghidra/
-├── src/main/java/com/zenyard/ghidra/
-│   ├── ZenyardGhidraPlugin.java      # Main plugin entry point
-│   ├── ZenyardService.java            # Service registry
-│   ├── api/                            # API client
-│   ├── illum/                          # Illuminator features
-│   ├── copilot/                        # Copilot module
-│   ├── status/                         # Status bar integration
-│   ├── config/                         # Configuration UI
-│   ├── storage/                        # Data storage
-│   ├── initialization/                 # Initial analysis flow
-│   └── util/                           # Utilities
-├── resources/
-│   └── icons/                          # Plugin icons
-└── build.gradle                        # Build configuration
-```
-
-## License
-
-[To be determined]
+Binary size limits may apply depending on your plan. If a binary exceeds your plan's limit, a prompt will guide you to the appropriate plan.
 
 ## Support
 
-For issues and questions, please contact [support information].
+- **Email:** [access@zenyard.ai](mailto:access@zenyard.ai)
+- **Issues:** [GitHub Issues](https://github.com/zenyard/decompai-ghidra-public/issues)
 

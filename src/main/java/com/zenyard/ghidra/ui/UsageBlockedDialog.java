@@ -58,9 +58,9 @@ public final class UsageBlockedDialog {
         panel.setOpaque(false);
         if (UsageState.isContactEmailSupported()) {
             panel.add(createContactLinkLabel());
-            panel.add(new JLabel(" "));
+        } else {
+            panel.add(new JLabel(UsageState.getContactSupportText()));
         }
-        panel.add(new JLabel(UsageState.getContactSupportText()));
         return panel;
     }
 

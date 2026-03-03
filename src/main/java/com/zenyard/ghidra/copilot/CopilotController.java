@@ -619,7 +619,7 @@ public class CopilotController {
     }
     
     public void sendMessage(String message) {
-        ZenyardService services = ZenyardService.getInstance();
+        ZenyardService services = ZenyardService.getInstanceForTool(tool);
         if (services != null) {
             if (!services.isServerConnected()) {
                 return;

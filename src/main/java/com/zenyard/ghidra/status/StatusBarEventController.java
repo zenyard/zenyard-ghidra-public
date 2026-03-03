@@ -15,9 +15,11 @@ import ghidra.program.model.listing.Program;
  */
 public class StatusBarEventController implements EventConsumer {
     private final StatusBarViewModel viewModel;
+    private final StatusBarManager statusBarManager;
 
-    public StatusBarEventController(StatusBarViewModel viewModel) {
+    public StatusBarEventController(StatusBarViewModel viewModel, StatusBarManager statusBarManager) {
         this.viewModel = viewModel;
+        this.statusBarManager = statusBarManager;
     }
 
     @Override
@@ -40,12 +42,7 @@ public class StatusBarEventController implements EventConsumer {
             StatusBarState current = viewModel.getStateSnapshot();
             viewModel.updateState(current.withShowWarningIcon(!connected));
 
-            // Ask the manager to recompute the visible status text so it can include
-            // a "Server unreachable" message when disconnected.
-            ZenyardService services = ZenyardService.getInstance();
-            if (services != null && services.getStatusBarManager() != null) {
-                services.getStatusBarManager().refreshDisplayNow();
-            }
+            statusBarManager.refreshDisplayNow();
             return;
         }
 
@@ -66,10 +63,7 @@ public class StatusBarEventController implements EventConsumer {
         }
 
         if (event.getType() == ZenyardEvent.EventType.BINARY_PAUSED_UPDATED) {
-            ZenyardService services = ZenyardService.getInstance();
-            if (services != null && services.getStatusBarManager() != null) {
-                services.getStatusBarManager().refreshDisplayNow();
-            }
+            statusBarManager.refreshDisplayNow();
             return;
         }
 
@@ -86,15 +80,15 @@ public class StatusBarEventController implements EventConsumer {
     }
 
     private boolean canShowRerun() {
-        ZenyardService services = ZenyardService.getInstance();
-        if (services == null || services.getTrackChangesTaskManager() == null) {
+        ZenyardService svc = statusBarManager.getService();
+        if (svc == null || svc.getTrackChangesTaskManager() == null) {
             return false;
         }
-        if (!services.getTrackChangesTaskManager().shouldProcessEvents()) {
+        if (!svc.getTrackChangesTaskManager().shouldProcessEvents()) {
             return false;
         }
 
-        Program program = services.getCurrentProgram();
+        Program program = svc.getCurrentProgram();
         return QueueableObjectsDetector.hasQueueableObjects(program);
     }
 }

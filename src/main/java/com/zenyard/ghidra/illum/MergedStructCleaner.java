@@ -1,7 +1,6 @@
 package com.zenyard.ghidra.illum;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -19,35 +18,31 @@ import com.zenyard.ghidra.util.TransactionUtils;
 
 import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.DataTypeManager;
-import ghidra.program.model.listing.Data;
-import ghidra.program.model.listing.DataIterator;
-import ghidra.program.model.listing.Function;
-import ghidra.program.model.listing.FunctionIterator;
-import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.listing.Program;
-import ghidra.program.model.listing.Variable;
 import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
 
 /**
- * Removes inferred structs that have been superseded by backend merging
- * and are no longer referenced anywhere in the program.
+ * Replaces inferred structs that have been superseded by backend merging.
  *
- * A struct is eligible for deletion only when:
+ * When the backend merges multiple struct IDs into a single canonical struct,
+ * this cleaner replaces all program references to the old (merged-from) structs
+ * with the new merged-into struct via {@code DataTypeManager.replaceDataType},
+ * then prunes stored metadata for the old IDs.
+ *
+ * A struct is eligible for replacement only when:
  * <ol>
  *   <li>Its UUID appears in some other struct's {@code merged_from} list</li>
  *   <li>Its UUID is not referenced by any inference in the current batch
  *       or the deferred-type-inference queue</li>
- *   <li>Its resolved Ghidra DataType has no remaining program usage
- *       (function signatures, locals, defined data, parent composites)</li>
  * </ol>
+ *
+ * Using {@code replaceDataType} instead of {@code remove} ensures that all
+ * derived references (pointer wrappers, function signatures, local variables,
+ * composite fields) are atomically rewritten to the merged-into struct,
+ * eliminating the stale-pointer-blocker problem that prevented deletion.
  */
 public class MergedStructCleaner {
-
-    // TEMP_DEBUG_LOGGING: keep until merged-struct retention diagnosis is complete,
-    // then delete these constants + associated logs (search for "TEMP_DEBUG").
-    private static final boolean TEMP_DEBUG_LOG_BLOCKERS = true;
-    private static final int TEMP_DEBUG_MAX_BLOCKER_LOGS_PER_RUN = 8;
 
     private final InferenceStorage inferenceStorage;
     private final StructInferenceApplier structInferenceApplier;
@@ -58,35 +53,9 @@ public class MergedStructCleaner {
         this.structInferenceApplier = structInferenceApplier;
     }
 
-    private static final class UsedTypeIndex {
-        final Set<DataType> usedTypes;
-        final Map<DataType, String> sampleByType;
-
-        UsedTypeIndex(Set<DataType> usedTypes, Map<DataType, String> sampleByType) {
-            this.usedTypes = usedTypes;
-            this.sampleByType = sampleByType;
-        }
-
-        String getSample(DataType type) {
-            return sampleByType != null ? sampleByType.get(type) : null;
-        }
-    }
-
-    private static final class UsageBlocker {
-        final String relation;
-        final DataType usedType;
-        final String sample;
-
-        UsageBlocker(String relation, DataType usedType, String sample) {
-            this.relation = relation;
-            this.usedType = usedType;
-            this.sample = sample;
-        }
-    }
-
     /**
-     * Run the full cleanup: identify merged candidates, prove they are unused,
-     * then delete the data type and prune stored metadata.
+     * Run the full cleanup: identify merged candidates, replace their program
+     * references with the merged-into struct, then prune stored metadata.
      *
      * @param program    the current program
      * @param inferences the inference batch that was just applied (used to
@@ -100,108 +69,75 @@ public class MergedStructCleaner {
             return;
         }
 
-        Set<UUID> candidates = computeCandidates(inferences);
+        Map<UUID, UUID> childToParent = buildMergedFromMapping();
+        Set<UUID> candidates = computeCandidates(inferences, childToParent);
         if (candidates.isEmpty()) {
             return;
         }
 
-        UsedTypeIndex usedIndex = collectUsedDataTypes(program, monitor);
-        if (monitor != null && monitor.isCancelled()) {
-            return;
-        }
-
         DataTypeManager dtm = program.getDataTypeManager();
-        List<DataType> toDelete = new ArrayList<>();
-        // Keep IDs aligned with toDelete (same index).
-        List<UUID> toDeleteIds = new ArrayList<>();
-        // Metadata to prune even if we couldn't resolve a DataType (stale properties).
-        List<UUID> metaOnlyPruneIds = new ArrayList<>();
-        int skippedUsed = 0;
-        int skippedParent = 0;
-        int resolvedMissingDataType = 0;
-        int debugLoggedBlockers = 0;
+        List<UUID> pruneIds = new ArrayList<>();
+        int replaced = 0;
+        int missingOldType = 0;
+        int missingNewType = 0;
+        int replaceFailed = 0;
+
+        List<UUID> replaceIds = new ArrayList<>();
+        List<DataType> replaceOldTypes = new ArrayList<>();
+        List<DataType> replaceNewTypes = new ArrayList<>();
 
         for (UUID candidateId : candidates) {
             if (monitor != null && monitor.isCancelled()) {
                 return;
             }
-            DataType dt = resolveStructDataType(program, candidateId);
-            if (dt == null) {
-                // No type to remove from DTM; prune our metadata so we don't keep retrying.
-                metaOnlyPruneIds.add(candidateId);
-                resolvedMissingDataType++;
+
+            DataType oldDt = resolveStructDataType(program, candidateId);
+            if (oldDt == null) {
+                pruneIds.add(candidateId);
+                missingOldType++;
                 continue;
             }
 
-            UsageBlocker blocker = findUsageBlocker(dt, usedIndex, candidates, program);
-            if (blocker != null) {
-                skippedUsed++;
-                if (TEMP_DEBUG_LOG_BLOCKERS && debugLoggedBlockers < TEMP_DEBUG_MAX_BLOCKER_LOGS_PER_RUN) {
-                    debugLoggedBlockers++;
-                    Msg.info(this, "TEMP_DEBUG[MergedStructCleaner] not deleting merged-from struct id=" + candidateId
-                        + " dt=" + dt.getPathName()
-                        + " because relation=" + blocker.relation
-                        + " usedType=" + (blocker.usedType != null ? blocker.usedType.getPathName() : "null")
-                        + (blocker.sample != null ? " sample=" + blocker.sample : ""));
-                }
+            UUID parentId = childToParent.get(candidateId);
+            if (parentId == null) {
+                replaceFailed++;
                 continue;
             }
 
-            Collection<DataType> parents = dt.getParents();
-            DataType nonCandidateParent = findNonCandidateParent(parents, candidates, program);
-            if (nonCandidateParent != null) {
-                skippedParent++;
-                if (TEMP_DEBUG_LOG_BLOCKERS && debugLoggedBlockers < TEMP_DEBUG_MAX_BLOCKER_LOGS_PER_RUN) {
-                    debugLoggedBlockers++;
-                    Msg.info(this, "TEMP_DEBUG[MergedStructCleaner] not deleting merged-from struct id=" + candidateId
-                        + " dt=" + dt.getPathName()
-                        + " because nonCandidateParent=" + nonCandidateParent.getPathName());
-                }
+            DataType newDt = resolveStructDataType(program, parentId);
+            if (newDt == null) {
+                missingNewType++;
+                Msg.warn(this, "Cannot replace merged struct '" + oldDt.getName()
+                    + "' (id=" + candidateId + "): merged-into struct id=" + parentId
+                    + " could not be resolved");
                 continue;
             }
 
-            toDelete.add(dt);
-            toDeleteIds.add(candidateId);
+            replaceIds.add(candidateId);
+            replaceOldTypes.add(oldDt);
+            replaceNewTypes.add(newDt);
         }
 
-        if (toDelete.isEmpty() && metaOnlyPruneIds.isEmpty()) {
-            // TEMP_DEBUG: always emit a summary so "candidates exist but nothing removed"
-            // doesn't look like a silent no-op.
-            Msg.info(this,
-                "Merged-struct cleanup: candidates=" + candidates.size()
-                    + ", removed=0"
-                    + ", skippedUsed=" + skippedUsed
-                    + ", skippedParent=" + skippedParent
-                    + ", missingDataType=" + resolvedMissingDataType
-                    + ", removeFailed=0"
-                    + ", metadataPrunedOk=0"
-                    + ", metadataPrunedFailed=0");
-            return;
-        }
-
-        List<UUID> removedIds = new ArrayList<>();
-        List<UUID> failedRemoveIds = new ArrayList<>();
-        if (!toDelete.isEmpty()) {
-            TransactionUtils.runInTransaction(program, "Zenyard: Remove merged orphan structs", () -> {
-                for (int i = 0; i < toDelete.size(); i++) {
-                    DataType dt = toDelete.get(i);
-                    UUID id = toDeleteIds.get(i);
+        if (!replaceOldTypes.isEmpty()) {
+            final int[] successCount = {0};
+            TransactionUtils.runInTransaction(program, "Zenyard: Replace merged structs", () -> {
+                for (int i = 0; i < replaceOldTypes.size(); i++) {
+                    DataType oldDt = replaceOldTypes.get(i);
+                    DataType newDt = replaceNewTypes.get(i);
+                    UUID id = replaceIds.get(i);
                     try {
-                        dtm.remove(dt);
-                        removedIds.add(id);
+                        dtm.replaceDataType(oldDt, newDt, false);
+                        pruneIds.add(id);
+                        successCount[0]++;
                     } catch (Exception e) {
-                        failedRemoveIds.add(id);
-                        Msg.warn(this, "Failed to remove merged struct '" + dt.getName()
-                            + "' (id=" + id + "): " + e.getMessage());
+                        Msg.warn(this, "Failed to replace merged struct '"
+                            + oldDt.getName() + "' (id=" + id + ") with '"
+                            + newDt.getName() + "': " + e.getMessage());
                     }
                 }
             });
+            replaced = successCount[0];
         }
-
-        // Only prune metadata for successful removals (plus meta-only removals).
-        List<UUID> pruneIds = new ArrayList<>(removedIds.size() + metaOnlyPruneIds.size());
-        pruneIds.addAll(removedIds);
-        pruneIds.addAll(metaOnlyPruneIds);
 
         int prunedOk = 0;
         int prunedFailed = 0;
@@ -216,39 +152,54 @@ public class MergedStructCleaner {
             }
         }
 
+        if (!pruneIds.isEmpty()) {
+            try {
+                inferenceStorage.scrubMergedFromReferences(new HashSet<>(pruneIds));
+            } catch (Exception e) {
+                Msg.warn(this, "Failed to scrub merged_from references: " + e.getMessage());
+            }
+        }
+
         Msg.info(this,
             "Merged-struct cleanup: candidates=" + candidates.size()
-                + ", removed=" + removedIds.size()
-                + ", skippedUsed=" + skippedUsed
-                + ", skippedParent=" + skippedParent
-                + ", missingDataType=" + resolvedMissingDataType
-                + ", removeFailed=" + failedRemoveIds.size()
+                + ", replaced=" + replaced
+                + ", missingOldType=" + missingOldType
+                + ", missingNewType=" + missingNewType
+                + ", replaceFailed=" + replaceFailed
                 + ", metadataPrunedOk=" + prunedOk
                 + ", metadataPrunedFailed=" + prunedFailed);
     }
 
     // ------------------------------------------------------------------
-    // Step 1: Identify deletion candidates
+    // Step 1: Build merged-from -> merged-into mapping
     // ------------------------------------------------------------------
 
-    Set<UUID> computeCandidates(List<Inference> currentBatch) {
+    private Map<UUID, UUID> buildMergedFromMapping() {
         Map<UUID, StructDefinition> registry =
             inferenceStorage.getStructRegistryDefinitions();
-
-        Set<UUID> mergedChildren = new HashSet<>();
-        for (StructDefinition def : registry.values()) {
-            List<UUID> mf = def.getMergedFrom();
+        Map<UUID, UUID> childToParent = new HashMap<>();
+        for (Map.Entry<UUID, StructDefinition> entry : registry.entrySet()) {
+            List<UUID> mf = entry.getValue().getMergedFrom();
             if (mf != null) {
-                mergedChildren.addAll(mf);
+                for (UUID childId : mf) {
+                    childToParent.put(childId, entry.getKey());
+                }
             }
         }
+        return childToParent;
+    }
+
+    // ------------------------------------------------------------------
+    // Step 2: Identify replacement candidates
+    // ------------------------------------------------------------------
+
+    Set<UUID> computeCandidates(List<Inference> currentBatch,
+                                Map<UUID, UUID> childToParent) {
+        Set<UUID> mergedChildren = new HashSet<>(childToParent.keySet());
         if (mergedChildren.isEmpty()) {
             return Set.of();
         }
 
-        // Only protect IDs referenced by the current batch + deferred type inference queue.
-        // Do NOT treat "everything in the registry" as referenced, otherwise merged children
-        // become permanent non-candidates and cleanup never runs.
         Set<UUID> referenced = collectReferencedStructIds(currentBatch);
         int mergedChildrenCount = mergedChildren.size();
         mergedChildren.removeAll(referenced);
@@ -303,110 +254,6 @@ public class MergedStructCleaner {
         }
 
         return referenced;
-    }
-
-    // ------------------------------------------------------------------
-    // Step 2: Prove "unused in program"
-    // ------------------------------------------------------------------
-
-    private UsedTypeIndex collectUsedDataTypes(Program program, TaskMonitor monitor) {
-        Set<DataType> used = new HashSet<>();
-        Map<DataType, String> samples = TEMP_DEBUG_LOG_BLOCKERS ? new HashMap<>() : null;
-        FunctionIterator functions =
-            program.getFunctionManager().getFunctions(true);
-
-        while (functions.hasNext()) {
-            if (monitor != null && monitor.isCancelled()) {
-                return new UsedTypeIndex(used, samples);
-            }
-            Function function = functions.next();
-            DataType retType = function.getReturnType();
-            if (retType != null) {
-                if (used.add(retType) && samples != null) {
-                    samples.put(retType, "function=" + function.getEntryPoint() + " return_type");
-                }
-            }
-            for (Parameter param : function.getParameters()) {
-                DataType pType = param.getDataType();
-                if (pType != null) {
-                    if (used.add(pType) && samples != null) {
-                        samples.put(pType, "function=" + function.getEntryPoint()
-                            + " param name=" + param.getName());
-                    }
-                }
-            }
-            for (Variable local : function.getLocalVariables()) {
-                DataType lType = local.getDataType();
-                if (lType != null) {
-                    if (used.add(lType) && samples != null) {
-                        samples.put(lType, "function=" + function.getEntryPoint()
-                            + " local name=" + local.getName());
-                    }
-                }
-            }
-        }
-
-        DataIterator dataIterator =
-            program.getListing().getDefinedData(true);
-        while (dataIterator.hasNext()) {
-            if (monitor != null && monitor.isCancelled()) {
-                return new UsedTypeIndex(used, samples);
-            }
-            Data data = dataIterator.next();
-            DataType dType = data.getDataType();
-            if (dType != null) {
-                if (used.add(dType) && samples != null) {
-                    samples.put(dType, "defined_data=" + data.getAddress());
-                }
-            }
-        }
-
-        return new UsedTypeIndex(used, samples);
-    }
-
-    private UsageBlocker findUsageBlocker(
-            DataType candidate,
-            UsedTypeIndex usedIndex,
-            Set<UUID> candidateIds,
-            Program program) {
-        for (DataType used : usedIndex.usedTypes) {
-            if (used.equals(candidate)) {
-                return new UsageBlocker("direct", used, usedIndex.getSample(used));
-            }
-            if (used.dependsOn(candidate)) {
-                if (!isUsedTypeAlsoCandidate(used, candidateIds, program)) {
-                    return new UsageBlocker("dependsOn", used, usedIndex.getSample(used));
-                }
-            }
-        }
-        return null;
-    }
-
-    private boolean isUsedTypeAlsoCandidate(DataType usedType,
-                                            Set<UUID> candidateIds,
-                                            Program program) {
-        for (UUID cid : candidateIds) {
-            DataType cdt = resolveStructDataType(program, cid);
-            if (cdt != null && cdt.equals(usedType)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private DataType findNonCandidateParent(
-            Collection<DataType> parents,
-            Set<UUID> candidateIds,
-            Program program) {
-        if (parents == null || parents.isEmpty()) {
-            return null;
-        }
-        for (DataType parent : parents) {
-            if (!isUsedTypeAlsoCandidate(parent, candidateIds, program)) {
-                return parent;
-            }
-        }
-        return null;
     }
 
     // ------------------------------------------------------------------

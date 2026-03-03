@@ -103,12 +103,16 @@ public class UsageDetailsDialog extends ZenyardDialogComponentProvider {
             return panel;
         }
         if (!UsageState.isContactEmailSupported()) {
-            panel.add(new JLabel(text.replace(clickableText, UsageState.getContactSupportText())));
+            String display = text.contains(UsageState.CONTACT_EMAIL)
+                ? text
+                : text.replace(clickableText, UsageState.getContactSupportText());
+            panel.add(new JLabel(display));
             return panel;
         }
 
         String before = text.substring(0, clickableIndex);
-        String after = text.substring(clickableIndex + clickableText.length());
+        String after = text.substring(clickableIndex + clickableText.length())
+            .replace(": " + UsageState.CONTACT_EMAIL, "");
 
         if (!before.isEmpty()) {
             panel.add(new JLabel(before));

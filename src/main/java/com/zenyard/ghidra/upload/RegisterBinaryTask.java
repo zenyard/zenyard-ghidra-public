@@ -291,7 +291,7 @@ public class RegisterBinaryTask extends StatusBarAwareTask {
     }
 
     private boolean isUsageBlocked() {
-        ZenyardService services = ZenyardService.getInstance();
+        ZenyardService services = ZenyardService.getInstanceForTool(tool);
         if (services == null) {
             return false;
         }
@@ -303,24 +303,56 @@ public class RegisterBinaryTask extends StatusBarAwareTask {
         return false;
     }
 
+    private static final int SIZE_GATE_INITIAL_BACKOFF_MS = 5_000;
+    private static final int SIZE_GATE_MAX_BACKOFF_MS = 30_000;
+    private static final int SIZE_GATE_MAX_RETRIES = 60;
+
     private boolean isBinarySizeBlocked() {
-        ZenyardService services = ZenyardService.getInstance();
+        ZenyardService services = ZenyardService.getInstanceForTool(tool);
         UserApi userApi = services != null ? services.getUserApi() : null;
-        BinarySizeLimitGate.CheckResult result = BinarySizeLimitGate.check(program, userApi);
-        BinarySizeLimitGate.persistResult(program, result);
-        if (result.isPassed()) {
-            return false;
+
+        int backoffMs = SIZE_GATE_INITIAL_BACKOFF_MS;
+
+        for (int attempt = 0; attempt <= SIZE_GATE_MAX_RETRIES; attempt++) {
+            BinarySizeLimitGate.CheckResult result = BinarySizeLimitGate.check(program, userApi);
+
+            if (result.isPassed()) {
+                BinarySizeLimitGate.persistResult(program, result);
+                return false;
+            }
+
+            if (result.isBlocked()) {
+                BinarySizeLimitGate.persistResult(program, result);
+                StatusBarManager statusBarManager = getStatusBarManager();
+                if (statusBarManager != null) {
+                    statusBarManager.refreshDisplayNow();
+                }
+                if (result.getMaxBinarySizeMb() != null) {
+                    BinarySizeLimitDialog.showDialogIfNeeded(tool, program, result.getMaxBinarySizeMb());
+                }
+                Msg.warn(this, "Binary size gate did not pass: " + result.getMessage());
+                return true;
+            }
+
+            if (shouldStop || program.isClosed()) {
+                return true;
+            }
+
+            if (attempt < SIZE_GATE_MAX_RETRIES) {
+                Msg.info(this, "Binary size gate not verified (attempt " + (attempt + 1)
+                    + "), retrying in " + backoffMs + "ms: " + result.getMessage());
+                try {
+                    Thread.sleep(backoffMs);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return true;
+                }
+                backoffMs = Math.min(backoffMs * 2, SIZE_GATE_MAX_BACKOFF_MS);
+            }
         }
 
-        StatusBarManager statusBarManager = getStatusBarManager();
-        if (statusBarManager != null) {
-            statusBarManager.refreshDisplayNow();
-        }
-        if (result.isBlocked() && result.getMaxBinarySizeMb() != null) {
-            BinarySizeLimitDialog.showDialogIfNeeded(tool, program, result.getMaxBinarySizeMb());
-        }
-        Msg.warn(this, "Binary size gate did not pass: " + result.getMessage());
-        return true;
+        Msg.warn(this, "Binary size gate could not be verified after retries, proceeding optimistically");
+        return false;
     }
     
     /**

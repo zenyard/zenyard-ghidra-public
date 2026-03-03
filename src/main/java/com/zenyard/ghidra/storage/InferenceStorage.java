@@ -644,6 +644,29 @@ public class InferenceStorage {
     }
 
     /**
+     * Remove a set of child struct UUIDs from all {@code merged_from} lists
+     * in the struct registry. Call this after successfully replacing/pruning
+     * merged-from structs to prevent the cleaner from re-processing them on
+     * every subsequent cycle.
+     */
+    public void scrubMergedFromReferences(java.util.Set<java.util.UUID> removedIds) {
+        if (removedIds == null || removedIds.isEmpty()) {
+            return;
+        }
+        Map<UUID, StructDefinition> registry = getStructRegistryDefinitions();
+        boolean changed = false;
+        for (StructDefinition def : registry.values()) {
+            java.util.List<java.util.UUID> mf = def.getMergedFrom();
+            if (mf != null && mf.removeAll(removedIds)) {
+                changed = true;
+            }
+        }
+        if (changed) {
+            saveStructRegistryDefinitions(registry);
+        }
+    }
+
+    /**
      * Remove all stored metadata for a struct UUID: registry entry, name, path,
      * effective name, fingerprint, and the global inference record.
      */

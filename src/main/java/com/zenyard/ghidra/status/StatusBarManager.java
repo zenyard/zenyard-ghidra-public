@@ -50,6 +50,7 @@ public class StatusBarManager {
     }
     
     private final PluginTool tool;
+    private final ZenyardService service;
     private StatusBarComponent statusBarComponent;
     private ZenyardStatusBarProvider statusBarProvider;
     private EventDispatcher eventDispatcher;
@@ -62,8 +63,9 @@ public class StatusBarManager {
     // Map of active tasks by taskId
     private final Map<String, TaskStatus> activeTasks = new ConcurrentHashMap<>();
     
-    public StatusBarManager(PluginTool tool) {
+    public StatusBarManager(PluginTool tool, ZenyardService service) {
         this.tool = tool;
+        this.service = service;
         this.statusBarComponent = null;
         this.statusBarProvider = null;
         this.eventDispatcher = null;
@@ -114,7 +116,7 @@ public class StatusBarManager {
                 statusBarProvider = new ZenyardStatusBarProvider(tool, statusBarComponent);
                 
                 // Wire event controller after component is created
-                eventController = new StatusBarEventController(viewModel);
+                eventController = new StatusBarEventController(viewModel, StatusBarManager.this);
                 if (eventDispatcher != null) {
                     eventDispatcher.subscribe(eventController);
                 }
@@ -214,8 +216,7 @@ public class StatusBarManager {
         Optional<TaskStatus> activeTask = getActiveTask();
         StatusBarState state;
         StatusBarState current = viewModel.getStateSnapshot();
-        ZenyardService services = ZenyardService.getInstance();
-        boolean disconnected = services != null && !services.isServerConnected();
+        boolean disconnected = service != null && !service.isServerConnected();
         if (isEulaRejected()) {
             state = StatusBarState.empty()
                 .withShowReviewTerms(true)
@@ -317,11 +318,10 @@ public class StatusBarManager {
 
     private Program getCurrentProgramSafely() {
         try {
-            ZenyardService services = ZenyardService.getInstance();
-            if (services == null) {
+            if (service == null) {
                 return null;
             }
-            Program program = services.getCurrentProgram();
+            Program program = service.getCurrentProgram();
             if (program == null || program.isClosed()) {
                 return null;
             }
@@ -332,11 +332,10 @@ public class StatusBarManager {
     }
 
     private boolean canShowRerun() {
-        ZenyardService services = ZenyardService.getInstance();
-        if (services == null || services.getTrackChangesTaskManager() == null) {
+        if (service == null || service.getTrackChangesTaskManager() == null) {
             return false;
         }
-        return services.getTrackChangesTaskManager().shouldProcessEvents();
+        return service.getTrackChangesTaskManager().shouldProcessEvents();
     }
 
     private boolean hasQueueableObjects() {
@@ -344,11 +343,10 @@ public class StatusBarManager {
     }
 
     private boolean isEulaRejected() {
-        ZenyardService services = ZenyardService.getInstance();
-        if (services == null) {
+        if (service == null) {
             return false;
         }
-        ZenyardOptions options = services.getOptions();
+        ZenyardOptions options = service.getOptions();
         if (options == null) {
             return false;
         }
@@ -411,6 +409,10 @@ public class StatusBarManager {
     
     public StatusBarViewModel getViewModel() {
         return viewModel;
+    }
+    
+    ZenyardService getService() {
+        return service;
     }
 
     public InferenceCountTracker getInferenceCountTracker() {

@@ -1,12 +1,10 @@
 package com.zenyard.ghidra.ui;
 
-import java.awt.Desktop;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Cursor;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
-import java.net.URI;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -16,6 +14,7 @@ import javax.swing.SwingUtilities;
 import javax.swing.JTextArea;
 import javax.swing.border.EmptyBorder;
 
+import com.zenyard.ghidra.usage.UsageState;
 import ghidra.framework.model.DomainFile;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
@@ -25,8 +24,6 @@ import ghidra.program.model.listing.Program;
  */
 public class BinarySizeLimitDialog extends ZenyardDialogComponentProvider {
     private static final Set<String> SHOWN_PROGRAM_KEYS = ConcurrentHashMap.newKeySet();
-    private static final String CONTACT_EMAIL = "access@zenyard.ai";
-
     private final int maxSizeMb;
 
     public BinarySizeLimitDialog(int maxSizeMb) {
@@ -71,35 +68,19 @@ public class BinarySizeLimitDialog extends ZenyardDialogComponentProvider {
     }
 
     private JLabel createContactLabel() {
-        JLabel contactLabel = new JLabel("Contact us");
+        if (!UsageState.isContactEmailSupported()) {
+            return new JLabel(UsageState.getContactSupportText());
+        }
+        JLabel contactLabel = new JLabel("<html><u>Contact us</u></html>");
         contactLabel.setForeground(new Color(0, 102, 204));
         contactLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         contactLabel.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent event) {
-                openContactEmail();
+                UsageState.openContactEmail();
             }
         });
         return contactLabel;
-    }
-
-    private void openContactEmail() {
-        if (!Desktop.isDesktopSupported()) {
-            return;
-        }
-        try {
-            URI emailUri = new URI("mailto:" + CONTACT_EMAIL);
-            Desktop desktop = Desktop.getDesktop();
-            if (desktop.isSupported(Desktop.Action.MAIL)) {
-                desktop.mail(emailUri);
-            }
-            else if (desktop.isSupported(Desktop.Action.BROWSE)) {
-                desktop.browse(emailUri);
-            }
-        }
-        catch (Exception ignored) {
-            // Best-effort link behavior only.
-        }
     }
 
     public static void showDialogIfNeeded(PluginTool tool, Program program, int maxSizeMb) {

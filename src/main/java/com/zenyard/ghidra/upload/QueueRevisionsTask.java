@@ -197,7 +197,7 @@ public class QueueRevisionsTask extends EventAwareTask {
     }
 
     private boolean isUsageBlocked() {
-        ZenyardService services = ZenyardService.getInstance();
+        ZenyardService services = ZenyardService.getInstanceForTool(tool);
         if (services == null) {
             return false;
         }
