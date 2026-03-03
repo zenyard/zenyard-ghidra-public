@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://zenyard.ai">zenyard.ai</a>
   &nbsp;&nbsp;&middot;&nbsp;&nbsp;
-  <a href="https://zenyard.notion.site/Setting-up-Zenyard-in-Ghidra-30fe2d3032768024ba4cfb1fa0b91d66">User Guide</a>
+  <a href="https://zenyard.notion.site/Setting-up-Zenyard-in-Ghidra-30fe2d3032768024ba4cfb1fa0b91d66">Setup Guide</a>
 </p>
 
 # Zenyard for Ghidra
