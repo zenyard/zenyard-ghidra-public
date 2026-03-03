@@ -74,7 +74,7 @@ public class InitialQuestionsDialog extends ZenyardDialogComponentProvider {
     
     private void buildPanel() {
         JPanel contentPanel = new JPanel(new BorderLayout());
-        JPanel titlePanel = createTitlePanel("Run Zenyard on This Binary˜");
+        JPanel titlePanel = createTitlePanel("Run Zenyard on This Binary");
         contentPanel.add(titlePanel, BorderLayout.NORTH);
 
         JPanel mainPanel = new JPanel(new GridBagLayout());
