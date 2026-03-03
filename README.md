@@ -37,13 +37,13 @@ Please reach out to us directly via email so we can assist you promptly:
 * **Full Version Access & On-Prem Deployment:** [access@zenyard.ai](mailto:access@zenyard.ai)
 * **General Inquiries:** [contact@zenyard.ai](mailto:contact@zenyard.ai)
 
-## Usage Plans
+## 💳 Usage Plans
 
 Zenyard offers both free and paid plans. Your current usage is always visible in the status bar. When a plan limit is reached, analysis pauses automatically — the Copilot and previously applied results remain available. Click the usage indicator for plan details or to upgrade.
 
 Binary size limits may apply depending on your plan. If a binary exceeds your plan's limit, a prompt will guide you to the appropriate plan.
 
-## License
+## ⚖️ License
 
 This project is licensed under the **GNU Affero General Public License v3.0 only**.
 
