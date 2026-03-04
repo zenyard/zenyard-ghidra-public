@@ -217,6 +217,11 @@ public class RegisterBinaryTask extends StatusBarAwareTask {
                     details.setOsVersion(osVersion);
                 }
 
+                String inputFileSha256 = program.getExecutableSHA256();
+                if (inputFileSha256 != null && !inputFileSha256.isEmpty()) {
+                    details.setInputFileSha256(inputFileSha256);
+                }
+
                 // Create binary
                 PostBinaryBody body = new PostBinaryBody();
                 body.setName(binaryName);

@@ -20,6 +20,9 @@ public class BinaryDetails {
     @SerializedName("os_version")
     private String osVersion;
     
+    @SerializedName("input_file_sha256")
+    private String inputFileSha256;
+    
     public BinaryDetails() {
         // Default constructor for Gson
     }
@@ -62,6 +65,14 @@ public class BinaryDetails {
     
     public void setOsVersion(String osVersion) {
         this.osVersion = osVersion;
+    }
+    
+    public String getInputFileSha256() {
+        return inputFileSha256;
+    }
+    
+    public void setInputFileSha256(String inputFileSha256) {
+        this.inputFileSha256 = inputFileSha256;
     }
 }
 

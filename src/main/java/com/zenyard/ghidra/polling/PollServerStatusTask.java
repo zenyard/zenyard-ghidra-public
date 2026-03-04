@@ -253,8 +253,19 @@ public class PollServerStatusTask extends EventAwareTask {
                                 setAnalysisInProgress(false);
                                 Msg.debug(this, "PollServerStatusTask: Analysis completed while program was closed, clearing flag");
                             }
+                            int prevLocalRevision = localRevision;
                             waitForClientAhead(monitor, localRevision);
                             localRevision = getLocalRevision();
+
+                            if (localRevision != prevLocalRevision) {
+                                // Local revision advanced during wait — the server
+                                // revision from this poll cycle is stale and must not
+                                // be used for progress calculation.  Re-poll immediately
+                                // so the next iteration works with fresh server data.
+                                consecutiveConnectionFailures = 0;
+                                updateConnectivity(true);
+                                continue;
+                            }
                         }
                         
                         AnalysisStatus analysisStatus = calculateAnalysisStatus(localRevision, fractionalServerRevision);
@@ -262,9 +273,11 @@ public class PollServerStatusTask extends EventAwareTask {
                             Msg.debug(this, "PollServerStatusTask: Publishing ANALYSIS_STATUS_UPDATED, progress=" 
                                 + analysisStatus.getProgress());
                             publishAnalysisStatus(analysisStatus, fractionalServerRevision);
-                        } else if (clientInSync && hadAnalysisStats) {
-                            Msg.debug(this, "PollServerStatusTask: Client in sync, signaling completion");
-                            setRemoteAnalysisCompletedOnce();
+                        } else if (clientInSync) {
+                            if (hadAnalysisStats) {
+                                Msg.debug(this, "PollServerStatusTask: Client in sync, signaling completion");
+                                setRemoteAnalysisCompletedOnce();
+                            }
                             publishAnalysisStatus(null, fractionalServerRevision);
                         } else {
                             Msg.debug(this, "PollServerStatusTask: No analysis status to publish");

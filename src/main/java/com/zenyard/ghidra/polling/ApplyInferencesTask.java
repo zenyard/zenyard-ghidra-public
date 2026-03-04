@@ -217,6 +217,7 @@ public class ApplyInferencesTask extends StatusBarAwareTask {
                                 if (shouldStop || monitor.isCancelled()
                                     || program == null || program.isClosed()
                                     || String.valueOf(e.getMessage()).contains("Database is closed")
+                                    || String.valueOf(e.getMessage()).contains("Transaction has not been started")
                                     || String.valueOf(e.getMessage()).contains("Transaction has been terminated")
                                     || String.valueOf(e.getMessage()).contains("Attempted to end Transaction")) {
                                     shouldStop = true;

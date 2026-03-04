@@ -179,7 +179,9 @@ public class InferenceApplier {
         if (monitor != null && monitor.isCancelled()) {
             return;
         }
-        retryDeferredTypeInferences(program, monitor);
+        TransactionUtils.runInTransaction(program, "Zenyard: Retry deferred type inferences", () -> {
+            retryDeferredTypeInferences(program, monitor);
+        });
 
         // Catch-up: propagate return types to returned local variables for functions
         // whose return_type was applied in a previous session but local propagation
