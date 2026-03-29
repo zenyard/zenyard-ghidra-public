@@ -66,7 +66,31 @@ public class ZenyardEvent {
         QUEUE_POSITION_UPDATED,
 
         /** Binary paused state changed (payload: paused = Boolean) */
-        BINARY_PAUSED_UPDATED
+        BINARY_PAUSED_UPDATED,
+
+        /** A binary database was opened (payload: file_name(String), file_size(Long)) */
+        DATABASE_OPENED,
+
+        /** The initial questions dialog was dismissed without accepting */
+        INITIAL_DIALOG_DISMISSED,
+
+        /** User requested analysis re-run (payload: binary_id(String, nullable)) */
+        ANALYSIS_RERUN_REQUESTED,
+
+        /** Copilot panel was opened */
+        COPILOT_OPENED,
+
+        /** User sent a message to Copilot (payload: input_length_chars(Integer), thread_id(String), message_index(Integer)) */
+        COPILOT_MESSAGE_SENT,
+
+        /** User requested clearing the Copilot conversation */
+        COPILOT_CLEAR_REQUESTED,
+
+        /** User requested stopping the current Copilot operation */
+        COPILOT_STOP_REQUESTED,
+
+        /** Quota exhausted dialog was shown to the user */
+        QUOTA_EXHAUSTED_DIALOG_SHOWN
     }
     
     private final EventType type;

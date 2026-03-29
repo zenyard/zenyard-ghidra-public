@@ -42,6 +42,7 @@ import com.zenyard.ghidra.config.ZenyardConfigFile;
 import com.zenyard.ghidra.copilot.tools.ToolUtils;
 import com.zenyard.ghidra.copilot.tools.ToolExecutionListener;
 import com.zenyard.ghidra.ZenyardService;
+import com.zenyard.ghidra.events.ZenyardEvent;
 import com.zenyard.ghidra.usage.UsageState;
 import org.bsc.langgraph4j.NodeOutput;
 
@@ -88,6 +89,7 @@ public class CopilotController {
     private String persistedSessionNotes;
     private CopilotCancellationMonitor cancellationMonitor;
     private volatile CompletableFuture<?> currentRunFuture;
+    private int messageCount;
     
     public CopilotController(CopilotProvider provider, ApiClient apiClient, BinariesApi binariesApi, UserApi userApi, PluginTool tool) {
         this.provider = provider;
@@ -293,6 +295,11 @@ public class CopilotController {
      */
     public void clearConversation() {
         Msg.info(this, "Clearing conversation");
+        ZenyardService clearSvc = ZenyardService.getInstanceForTool(tool);
+        if (clearSvc != null) {
+            clearSvc.getEventDispatcher().publish(
+                new ZenyardEvent(ZenyardEvent.EventType.COPILOT_CLEAR_REQUESTED, "CopilotController"));
+        }
         if (memory != null) {
             memory.clear();
         }
@@ -314,6 +321,11 @@ public class CopilotController {
      * the stream handler (stops UI token forwarding), and the running future.
      */
     public void stop() {
+        ZenyardService stopSvc = ZenyardService.getInstanceForTool(tool);
+        if (stopSvc != null) {
+            stopSvc.getEventDispatcher().publish(
+                new ZenyardEvent(ZenyardEvent.EventType.COPILOT_STOP_REQUESTED, "CopilotController"));
+        }
         if (cancellationMonitor != null) {
             cancellationMonitor.cancel();
         }
@@ -628,6 +640,12 @@ public class CopilotController {
             if (usageState != null && usageState.isBlocked()) {
                 return;
             }
+            services.getEventDispatcher().publish(
+                ZenyardEvent.builder(ZenyardEvent.EventType.COPILOT_MESSAGE_SENT, "CopilotController")
+                    .withPayload("input_length_chars", message.length())
+                    .withPayload("thread_id", COPILOT_THREAD_ID)
+                    .withPayload("message_index", messageCount++)
+                    .build());
         }
         currentRunSendStartNs = System.nanoTime();
         currentRunLastTodoDoneNs = 0L;

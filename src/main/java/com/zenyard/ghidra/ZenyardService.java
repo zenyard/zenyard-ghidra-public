@@ -3,9 +3,13 @@ package com.zenyard.ghidra;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 
+import com.zenyard.ghidra.api.generated.model.QuotaExhaustedDialogShownReason;
+import com.zenyard.ghidra.api.generated.model.PausedDialgBoxUserResponse;
+import com.zenyard.ghidra.analytics.AnalyticsEventConsumer;
 import com.zenyard.ghidra.api.ZenyardApiClientFactory;
 import com.zenyard.ghidra.api.generated.ApiClient;
 import com.zenyard.ghidra.api.generated.ApiException;
+import com.zenyard.ghidra.api.generated.api.AnalyticsApi;
 import com.zenyard.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.ghidra.api.generated.api.UserApi;
 import com.zenyard.ghidra.copilot.CopilotConfig;
@@ -170,23 +174,40 @@ public class ZenyardService {
         }
         plugin.getTool().addComponentProvider(copilotProvider, false);
         plugin.getTool().getWindowManager().showComponentHeader(copilotProvider, false);
-        
+
+        // Initialize analytics consumer if API client is available
+        if (apiClient != null) {
+            AnalyticsEventConsumer analyticsConsumer =
+                new AnalyticsEventConsumer(new AnalyticsApi(apiClient), options.getConfiguration());
+            eventDispatcher.subscribe(analyticsConsumer);
+            analyticsConsumer.trackPluginLoaded();
+        }
+
         // Illuminator will be initialized when program is activated
     }
 
     public void onProgramActivated(Program program) {
         this.currentProgram = program;
-        
+
         // Configure logging for this program
         LoggerUtil.configureForProgram(program.getName(), options.getLogLevel());
-        
+
         // Initialize API client if not already initialized
         if (apiClient == null && options.isConfigured()) {
             apiClient = ZenyardApiClientFactory.createApiClient(options);
             binariesApi = new BinariesApi(apiClient);
             userApi = new UserApi(apiClient);
             fetchUserConfigAsync(false);
+            AnalyticsEventConsumer analyticsConsumer =
+                new AnalyticsEventConsumer(new AnalyticsApi(apiClient), options.getConfiguration());
+            eventDispatcher.subscribe(analyticsConsumer);
+            analyticsConsumer.trackPluginLoaded();
         }
+
+        eventDispatcher.publish(ZenyardEvent.builder(ZenyardEvent.EventType.DATABASE_OPENED, "ZenyardService")
+            .withPayload("file_name", program.getName())
+            .withPayload("file_size", program.getMemory().getSize())
+            .build());
         
         // Initialize Illuminator
         if (apiClient != null) {
@@ -427,7 +448,8 @@ public class ZenyardService {
                     return;
                 }
                 if (isUsageBlocked()) {
-                    showUsageBlockedDialog();
+                    showUsageBlockedDialog(
+                        QuotaExhaustedDialogShownReason.AUTOMATIC);
                     return;
                 }
                 if (isBinaryPaused()) {
@@ -438,6 +460,12 @@ public class ZenyardService {
                     Msg.warn(this, "Status bar rerun ignored: missing dependencies");
                     return;
                 }
+                ZenyardProgramProperties rerunProps = new ZenyardProgramProperties(program);
+                eventDispatcher.publish(ZenyardEvent.builder(
+                    ZenyardEvent.EventType.ANALYSIS_RERUN_REQUESTED, "StatusBar")
+                    .withPayload("binary_id", rerunProps.getString("binary_id"))
+                    .build());
+
                 QueueRevisionsTask queueRevisionsTask = new QueueRevisionsTask(
                     plugin.getTool(), program, statusBarManager, eventDispatcher, true);
                 ZenyardGhidraPlugin.executeBackgroundTask(queueRevisionsTask);
@@ -469,7 +497,8 @@ public class ZenyardService {
                     return;
                 }
                 if (isUsageBlocked()) {
-                    showUsageBlockedDialog();
+                    showUsageBlockedDialog(
+                        QuotaExhaustedDialogShownReason.AUTOMATIC);
                     return;
                 }
                 if (isBinaryPaused()) {
@@ -484,6 +513,8 @@ public class ZenyardService {
                 InitialQuestionsDialog.InitialQuestionsResult result =
                     InitialQuestionsDialog.showDialog(plugin.getTool(), options, program, true);
                 if (result == null || !result.isAccepted()) {
+                    eventDispatcher.publish(new ZenyardEvent(
+                        ZenyardEvent.EventType.INITIAL_DIALOG_DISMISSED, "StatusBar"));
                     statusBarManager.refreshDisplayNow();
                     return;
                 }
@@ -497,8 +528,13 @@ public class ZenyardService {
                 props.setString("ready_for_analysis", "true");
                 props.setString("initial_questions_deferred", "false");
 
-                eventDispatcher.publish(new ZenyardEvent(
-                    ZenyardEvent.EventType.INITIAL_DIALOG_CONFIRMED, "StatusBar"));
+                eventDispatcher.publish(ZenyardEvent.builder(
+                    ZenyardEvent.EventType.INITIAL_DIALOG_CONFIRMED, "StatusBar")
+                    .withPayload("start_source", "New File Open")
+                    .withPayload("analysis_type", "Initial Analysis")
+                    .withPayload("user_prompt", result.getBinaryInstructions() != null
+                        && !result.getBinaryInstructions().isBlank())
+                    .build());
 
                 statusBarManager.refreshDisplayNow();
             }
@@ -527,6 +563,11 @@ public class ZenyardService {
 
             @Override
             public void onUsageDetails() {
+                if (isUsageBlocked()) {
+                    showUsageBlockedDialog(
+                        QuotaExhaustedDialogShownReason.USAGE_LABEL_CLICKED);
+                    return;
+                }
                 UsageDetailsDialog.showDialog(plugin.getTool(), getUsageState());
             }
         };
@@ -537,7 +578,14 @@ public class ZenyardService {
         return state != null && state.isBlocked();
     }
 
-    private void showUsageBlockedDialog() {
+    private void showUsageBlockedDialog(
+            QuotaExhaustedDialogShownReason reason) {
+        eventDispatcher.publish(ZenyardEvent.builder(
+                ZenyardEvent.EventType.QUOTA_EXHAUSTED_DIALOG_SHOWN, "ZenyardService")
+            .withPayload("show_reason", reason.getValue())
+            .withPayload("user_response",
+                PausedDialgBoxUserResponse.CANCEL.getValue())
+            .build());
         UsageState.showBlockedDialog(plugin.getTool().getActiveWindow(), usageState);
     }
 

@@ -49,6 +49,12 @@ public class PluginConfiguration {
     @SerializedName("langsmith_project")
     private final String langsmithProject;
 
+    @SerializedName("install_id")
+    private final String installId;
+
+    @SerializedName("analytics_enabled")
+    private final Boolean analyticsEnabled;
+
     // Default values matching IDA plugin
     private static final String DEFAULT_SERVER_URL = "https://api.zenyard.ai";
     private static final String DEFAULT_LOG_LEVEL = "INFO";
@@ -58,6 +64,7 @@ public class PluginConfiguration {
     private static final boolean DEFAULT_VERIFY_SSL = true;
     private static final boolean DEFAULT_SHOW_PYTHON_UNAVAILABLE_POPUP = true;
     private static final int DEFAULT_ACCEPTED_EULA_VERSION = 0;
+    private static final boolean DEFAULT_ANALYTICS_ENABLED = true;
     
     // Constructor for Gson deserialization
     // Note: @SerializedName annotations are on fields, not constructor parameters
@@ -72,7 +79,7 @@ public class PluginConfiguration {
             Integer acceptedEulaVersion) {
         this(apiUrl, apiKey, logLevel, showInitialUploadMessage,
                 requestBinaryInstructions, requireConfirmationPerDb,
-                verifySsl, acceptedEulaVersion, null, null, null, null);
+                verifySsl, acceptedEulaVersion, null, null, null, null, null, null);
     }
 
     public PluginConfiguration(
@@ -88,6 +95,28 @@ public class PluginConfiguration {
             String langsmithEndpoint,
             String langsmithProject,
             Boolean showPythonUnavailablePopup) {
+        this(apiUrl, apiKey, logLevel, showInitialUploadMessage,
+                requestBinaryInstructions, requireConfirmationPerDb,
+                verifySsl, acceptedEulaVersion,
+                langsmithApiKey, langsmithEndpoint, langsmithProject,
+                showPythonUnavailablePopup, null, null);
+    }
+
+    public PluginConfiguration(
+            String apiUrl,
+            String apiKey,
+            String logLevel,
+            Boolean showInitialUploadMessage,
+            Boolean requestBinaryInstructions,
+            Boolean requireConfirmationPerDb,
+            Boolean verifySsl,
+            Integer acceptedEulaVersion,
+            String langsmithApiKey,
+            String langsmithEndpoint,
+            String langsmithProject,
+            Boolean showPythonUnavailablePopup,
+            String installId,
+            Boolean analyticsEnabled) {
         this.apiUrl = apiUrl != null ? apiUrl : DEFAULT_SERVER_URL;
         this.apiKey = apiKey != null ? apiKey : "";
         this.logLevel = logLevel != null ? logLevel : DEFAULT_LOG_LEVEL;
@@ -100,6 +129,8 @@ public class PluginConfiguration {
         this.langsmithEndpoint = langsmithEndpoint;
         this.langsmithProject = langsmithProject;
         this.showPythonUnavailablePopup = showPythonUnavailablePopup != null ? showPythonUnavailablePopup : DEFAULT_SHOW_PYTHON_UNAVAILABLE_POPUP;
+        this.installId = installId;
+        this.analyticsEnabled = analyticsEnabled != null ? analyticsEnabled : DEFAULT_ANALYTICS_ENABLED;
 
         validate();
     }
@@ -120,7 +151,9 @@ public class PluginConfiguration {
             null,
             null,
             null,
-            DEFAULT_SHOW_PYTHON_UNAVAILABLE_POPUP
+            DEFAULT_SHOW_PYTHON_UNAVAILABLE_POPUP,
+            null,
+            DEFAULT_ANALYTICS_ENABLED
         );
     }
     
@@ -141,7 +174,9 @@ public class PluginConfiguration {
             this.langsmithApiKey,
             this.langsmithEndpoint,
             this.langsmithProject,
-            this.showPythonUnavailablePopup
+            this.showPythonUnavailablePopup,
+            this.installId,
+            this.analyticsEnabled
         );
     }
     
@@ -184,6 +219,10 @@ public class PluginConfiguration {
             ? (String) updates.get("langsmith_project") : this.langsmithProject;
         Boolean newShowPythonUnavailablePopup = updates.containsKey("show_python_unavailable_popup")
             ? (Boolean) updates.get("show_python_unavailable_popup") : this.showPythonUnavailablePopup;
+        String newInstallId = updates.containsKey("install_id")
+            ? (String) updates.get("install_id") : this.installId;
+        Boolean newAnalyticsEnabled = updates.containsKey("analytics_enabled")
+            ? (Boolean) updates.get("analytics_enabled") : this.analyticsEnabled;
 
         return new PluginConfiguration(
             newApiUrl,
@@ -197,7 +236,9 @@ public class PluginConfiguration {
             newLangsmithApiKey,
             newLangsmithEndpoint,
             newLangsmithProject,
-            newShowPythonUnavailablePopup
+            newShowPythonUnavailablePopup,
+            newInstallId,
+            newAnalyticsEnabled
         );
     }
     
@@ -281,6 +322,14 @@ public class PluginConfiguration {
 
     public boolean isConfigured() {
         return apiKey != null && !apiKey.trim().isEmpty();
+    }
+
+    public String getInstallId() {
+        return installId;
+    }
+
+    public boolean isAnalyticsEnabled() {
+        return analyticsEnabled != null ? analyticsEnabled : DEFAULT_ANALYTICS_ENABLED;
     }
 }
 

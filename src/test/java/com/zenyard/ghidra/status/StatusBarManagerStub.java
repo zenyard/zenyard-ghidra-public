@@ -8,7 +8,7 @@ package com.zenyard.ghidra.status;
 class StatusBarManagerStub extends StatusBarManager {
 
     StatusBarManagerStub() {
-        super(null);
+        super(null, null);
     }
 
     @Override

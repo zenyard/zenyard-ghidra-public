@@ -60,6 +60,7 @@ import com.zenyard.ghidra.upload.UploadRevisionsTask;
 import com.zenyard.ghidra.tracking.TrackChangesTaskManager;
 import com.zenyard.ghidra.util.BinarySizeLimitGate;
 import com.zenyard.ghidra.copilot.tools.RunPythonScriptTool;
+import com.zenyard.ghidra.tasks.BackgroundTaskUtil;
 import ghidra.util.task.Task;
 import ghidra.util.task.TaskMonitor;
 import java.util.Collections;
@@ -862,19 +863,6 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
      * This is used for background tasks that should only show status in the status bar.
      */
     public static void executeBackgroundTask(Task task) {
-        // Create a simple TaskMonitor that doesn't show a dialog
-        TaskMonitor monitor = TaskMonitor.DUMMY;
-        
-        String threadName = "Background Task - " + task.getTaskTitle();
-        Thread taskThread = new Thread(() -> {
-            Thread.currentThread().setName(threadName);
-            try {
-                task.monitoredRun(monitor);
-            } catch (Exception e) {
-                Msg.error(ZenyardGhidraPlugin.class, "Error executing background task: " + task.getTaskTitle(), e);
-            }
-        });
-        taskThread.setDaemon(true);
-        taskThread.start();
+        BackgroundTaskUtil.execute(task);
     }
 }

@@ -2,6 +2,7 @@ package com.zenyard.ghidra.config;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.UUID;
 
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.util.Msg;
@@ -21,6 +22,7 @@ public class ZenyardOptions {
     public ZenyardOptions(PluginTool tool) {
         this.tool = tool;
         loadConfiguration();
+        ensureInstallId();
     }
     
     /**
@@ -171,7 +173,35 @@ public class ZenyardOptions {
     public boolean isConfigured() {
         return config.isConfigured();
     }
-    
+
+    /**
+     * Returns the persistent install ID, generating one if not yet set.
+     */
+    public String getInstallId() {
+        return config.getInstallId();
+    }
+
+    public boolean isAnalyticsEnabled() {
+        return config.isAnalyticsEnabled();
+    }
+
+    /**
+     * Ensures that a persistent install ID exists in the configuration file.
+     * Generates a new UUID and persists it if none is present.
+     */
+    private void ensureInstallId() {
+        String existing = config.getInstallId();
+        if (existing != null && !existing.isBlank()) {
+            return;
+        }
+        String newId = UUID.randomUUID().toString();
+        try {
+            updateConfiguration(Map.of("install_id", newId));
+        } catch (IOException e) {
+            Msg.warn(this, "Zenyard: Failed to persist install_id: " + e.getMessage());
+        }
+    }
+
     /**
      * Update configuration (writes to file).
      */

@@ -13,6 +13,9 @@ import docking.WindowPosition;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.util.Msg;
 
+import com.zenyard.ghidra.ZenyardService;
+import com.zenyard.ghidra.events.ZenyardEvent;
+
 /**
  * A ComponentProvider dockable window implementing the Copilot chat UI.
  * 
@@ -110,6 +113,11 @@ public class CopilotProvider extends ComponentProvider {
     @Override
     public void componentShown() {
         installKeyHandlers();
+        ZenyardService svc = ZenyardService.getInstanceForTool((PluginTool) getTool());
+        if (svc != null) {
+            svc.getEventDispatcher().publish(
+                new ZenyardEvent(ZenyardEvent.EventType.COPILOT_OPENED, "CopilotProvider"));
+        }
     }
     
     @Override

@@ -168,7 +168,12 @@ public class ShowInitialQuestionsTask extends EventAwareTask {
             
             // Publish INITIAL_DIALOG_CONFIRMED event
             Msg.info(this, "Publishing INITIAL_DIALOG_CONFIRMED event");
-            publishEvent(new ZenyardEvent(ZenyardEvent.EventType.INITIAL_DIALOG_CONFIRMED, getTaskTitle()));
+            publishEvent(ZenyardEvent.builder(ZenyardEvent.EventType.INITIAL_DIALOG_CONFIRMED, getTaskTitle())
+                .withPayload("start_source", "New File Open")
+                .withPayload("analysis_type", "Initial Analysis")
+                .withPayload("user_prompt", result.getBinaryInstructions() != null
+                    && !result.getBinaryInstructions().isBlank())
+                .build());
             
         } catch (Exception e) {
             Msg.showError(this, tool.getActiveWindow(), "Show Initial Questions Error",
