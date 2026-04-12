@@ -98,7 +98,7 @@ public class ToolNode implements AsyncNodeActionWithConfig<CopilotDeepState> {
         int repeatCount = toolBatchSignature.equals(previousSignature)
             ? state.sameToolBatchCount() + 1
             : 1;
-        boolean repeatedTodosOnly = "write_todos".equals(toolCategorySignature) && repeatCount >= 2;
+        boolean repeatedTodosOnly = toolNames.contains("write_todos") && repeatCount >= 2;
         boolean repeatedToolBatch = repeatCount >= REPEATED_TOOL_BATCH_LIMIT;
         int pivotCount = state.loopGuardPivotCount();
 

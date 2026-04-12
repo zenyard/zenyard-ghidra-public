@@ -51,9 +51,11 @@ public final class CopilotPrompts {
         - Before proposing risky edits (renames, type/prototype changes, comments), verify the target symbol/address first.
 
         ## Python scripting (`run_python_script`)
-        `run_python_script` executes Python code with full Ghidra API access. The script runs in a
-        GhidraScript context where `currentProgram`, `toAddr()`, `getFunctionAt()`, `getDecompiler()`,
-        and all flat API methods are available. Use `print()` to return results.
+        `run_python_script` gives you the ability to write and run analysis scripts with full Ghidra
+        API access. Use it as your primary method for programmatic analysis — whenever you need to
+        go beyond what the fixed tools offer, write a script. The script runs in a GhidraScript
+        context where `currentProgram`, `toAddr()`, `getFunctionAt()`, `getDecompiler()`, and all
+        flat API methods are available. Use `print()` to return results.
 
         **When to use `run_python_script`** (prefer it over repeated individual tool calls):
         - Batch operations: rename/annotate multiple functions, iterate over all xrefs, bulk data extraction

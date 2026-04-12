@@ -281,10 +281,12 @@ public final class PythonScriptSandbox {
             _sb_builtins.__import__ = _sb_safe_import
             """);
 
-        // Restricted open()
+        // Restricted open() and CWD set to allowed base so artifact-relative paths (e.g. "tools/strings-*.txt") resolve correctly
         if (fsEnabled) {
             sb.append("_sb_allowed_base = _sb_os.path.realpath('").append(escapedPath).append("')\n");
             sb.append("""
+                if _sb_os.path.isdir(_sb_allowed_base):
+                    _sb_os.chdir(_sb_allowed_base)
                 _sb_orig_open = _sb_builtins.open
                 def _sb_safe_open(file, mode='r', *a, **kw):
                     _resolved = _sb_os.path.realpath(str(file))

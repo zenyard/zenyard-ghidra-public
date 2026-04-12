@@ -131,6 +131,20 @@ public class CopilotStreamHandler implements StreamingChatResponseHandler {
     }
 
     /**
+     * Append a one-line status update in the thinking area.
+     */
+    public void appendStatusLine(String statusLine) {
+        if (cancelled || statusLine == null || statusLine.isBlank()) {
+            return;
+        }
+        SwingUtilities.invokeLater(() -> {
+            if (!cancelled) {
+                viewModel.appendThinkingStatusLine(statusLine);
+            }
+        });
+    }
+
+    /**
      * Legacy method for compatibility - maps to onPartialResponse
      */
     public void onNext(String token) {

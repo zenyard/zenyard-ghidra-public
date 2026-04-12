@@ -26,11 +26,13 @@ import com.zenyard.ghidra.util.ObjectGraph;
 import com.zenyard.ghidra.util.ObjectGraph.Symbol;
 import com.zenyard.ghidra.util.ObjectHasher;
 import com.zenyard.ghidra.util.ObjectReader;
+import com.zenyard.ghidra.util.SectionSerializer;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.mem.MemoryBlock;
 import ghidra.util.Msg;
 import ghidra.util.task.Task;
 import ghidra.util.task.TaskLauncher;
@@ -259,23 +261,29 @@ public class QueueRevisionsTask extends EventAwareTask {
         Optional<SyncStatus> syncStatus = syncStatusStorage.getSyncStatus(address);
         SyncStatus status = syncStatus.orElse(new SyncStatus());
 
-        // Read object (function or global variable)
+        // Read object (function, global variable, or section)
         ModelObject obj;
         try {
             FunctionManager funcManager = program.getFunctionManager();
             Function function = funcManager.getFunctionAt(address);
             
             if (function != null) {
-                // It's a function
                 com.zenyard.ghidra.api.generated.model.Function apiFunction = 
                     FunctionSerializer.serializeFunction(program, function, 0);
                 obj = new ModelObject();
                 obj.setActualInstance(apiFunction);
             } else {
-                // It's a global variable
-                GlobalVariable gv = GlobalVariableSerializer.serializeGlobalVariable(program, address, 0);
-                obj = new ModelObject();
-                obj.setActualInstance(gv);
+                MemoryBlock block = program.getMemory().getBlock(address);
+                if (block != null && block.getStart().equals(address)) {
+                    com.zenyard.ghidra.api.generated.model.Section section =
+                        SectionSerializer.serializeBlock(block);
+                    obj = new ModelObject();
+                    obj.setActualInstance(section);
+                } else {
+                    GlobalVariable gv = GlobalVariableSerializer.serializeGlobalVariable(program, address, 0);
+                    obj = new ModelObject();
+                    obj.setActualInstance(gv);
+                }
             }
         } catch (Exception e) {
             Msg.warn(this, "Can't read object at " + address + ": " + e.getMessage());

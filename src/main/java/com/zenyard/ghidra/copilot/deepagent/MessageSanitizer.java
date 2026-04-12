@@ -142,6 +142,9 @@ public final class MessageSanitizer {
      */
     public static String extractToolExecutionId(ChatMessage message) {
         Object value = tryInvoke(message, "toolExecutionId");
+        if (value == null) {
+            value = tryInvoke(message, "id");
+        }
         return value != null ? String.valueOf(value) : "";
     }
 

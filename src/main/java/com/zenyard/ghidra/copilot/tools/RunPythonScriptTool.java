@@ -32,6 +32,7 @@ import java.util.Map;
 public class RunPythonScriptTool {
 
     private static final int MAX_OUTPUT_LENGTH = 8000;
+    private static final String PYTHON_EXCEPTION_PREFIX = "PYTHON_SCRIPT_EXCEPTION:";
 
     private final CopilotToolContext context;
 
@@ -105,6 +106,14 @@ public class RunPythonScriptTool {
                     String stdoutText = outputWriter.toString().stripTrailing();
                     String stderrText = errorOutputWriter.toString().stripTrailing();
 
+                    if (!stderrText.isEmpty()) {
+                        String sandboxError = extractSandboxError(stderrText);
+                        if (sandboxError != null) {
+                            throw new ToolExecutionException("Python script failed inside sandbox:\n"
+                                + sandboxError);
+                        }
+                    }
+
                     StringBuilder result = new StringBuilder();
                     if (!stdoutText.isEmpty()) {
                         result.append(stdoutText);
@@ -166,11 +175,14 @@ public class RunPythonScriptTool {
      */
     static String wrapCode(String userCode, String allowedBasePath) {
         String sandboxPreamble = PythonScriptSandbox.generateSandboxPreamble(allowedBasePath);
-
-        String indented = userCode.replace("\n", "\n    ");
+        String normalizedCode = userCode == null ? "" : userCode.stripTrailing();
+        if (normalizedCode.isBlank()) {
+            normalizedCode = "pass";
+        }
+        String indented = indentPythonBlock(normalizedCode, 8);
 
         return sandboxPreamble
-             + "import sys as _copilot_sys, io as _copilot_io\n"
+             + "import sys as _copilot_sys, io as _copilot_io, traceback as _copilot_tb\n"
              + "_copilot_stdout = _copilot_io.StringIO()\n"
              + "_copilot_stderr = _copilot_io.StringIO()\n"
              + "_copilot_old_stdout = _copilot_sys.stdout\n"
@@ -178,7 +190,11 @@ public class RunPythonScriptTool {
              + "_copilot_sys.stdout = _copilot_stdout\n"
              + "_copilot_sys.stderr = _copilot_stderr\n"
              + "try:\n"
-             + "    " + indented + "\n"
+             + "    try:\n"
+             + indented + "\n"
+             + "    except Exception:\n"
+             + "        _copilot_stderr.write('" + PYTHON_EXCEPTION_PREFIX + "\\n')\n"
+             + "        _copilot_stderr.write(_copilot_tb.format_exc())\n"
              + "finally:\n"
              + "    _copilot_sys.stdout = _copilot_old_stdout\n"
              + "    _copilot_sys.stderr = _copilot_old_stderr\n"
@@ -187,7 +203,40 @@ public class RunPythonScriptTool {
              + "if _copilot_out:\n"
              + "    println(_copilot_out.rstrip())\n"
              + "if _copilot_err:\n"
-             + "    println('STDERR: ' + _copilot_err.rstrip())\n";
+             + "    println('STDERR: ' + _copilot_err.rstrip())\n"
+             + "if _copilot_err and 'Sandbox' in _copilot_err:\n"
+             + "    _copilot_sys.exit(1)\n";
+    }
+
+    private static String indentPythonBlock(String code, int spaces) {
+        String indent = " ".repeat(Math.max(0, spaces));
+        String[] lines = code.split("\n", -1);
+        StringBuilder builder = new StringBuilder(code.length() + lines.length * spaces);
+        for (int i = 0; i < lines.length; i++) {
+            builder.append(indent).append(lines[i]);
+            if (i < lines.length - 1) {
+                builder.append('\n');
+            }
+        }
+        return builder.toString();
+    }
+
+    private static String extractSandboxError(String stderrText) {
+        int markerIndex = stderrText.indexOf(PYTHON_EXCEPTION_PREFIX);
+        if (markerIndex < 0) {
+            return null;
+        }
+
+        String details = stderrText.substring(markerIndex + PYTHON_EXCEPTION_PREFIX.length()).strip();
+        if (details.isEmpty()) {
+            return "Python script raised an exception with no traceback.";
+        }
+        if (details.length() > MAX_OUTPUT_LENGTH) {
+            return details.substring(0, MAX_OUTPUT_LENGTH)
+                + "\n... (traceback truncated at " + MAX_OUTPUT_LENGTH
+                + " chars, total: " + details.length() + ")";
+        }
+        return details;
     }
 
     private static volatile Boolean pythonAvailableCache;

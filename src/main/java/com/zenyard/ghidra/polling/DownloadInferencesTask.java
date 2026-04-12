@@ -1,10 +1,13 @@
 package com.zenyard.ghidra.polling;
 
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.function.Consumer;
 
 import com.zenyard.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.ghidra.api.generated.model.GetInferencesResponse;
@@ -243,11 +246,12 @@ public class DownloadInferencesTask extends StatusBarAwareTask {
                 // Process inferences from response
                 boolean inferencesAdded = false;
                 if (response.getInferences() != null) {
-                    for (MaybeUnknownInference inference : response.getInferences()) {
-                        if (inference != null && inference.getInference() != null) {
-                            inferenceQueue.enqueue(inference.getInference());
-                            inferencesAdded = true;
-                        }
+                    List<Inference> known = filterKnownInferences(
+                        response.getInferences(),
+                        unknown -> Msg.warn(this, "Skipping unknown inference type: " + unknown));
+                    for (Inference inference : known) {
+                        inferenceQueue.enqueue(inference);
+                        inferencesAdded = true;
                     }
                 }
                 
@@ -430,6 +434,29 @@ public class DownloadInferencesTask extends StatusBarAwareTask {
             getTaskTitle(), payload));
     }
     
+    /**
+     * Separates known {@link Inference} instances from unknown/future variants in a
+     * raw {@link MaybeUnknownInference} list. Each unrecognised entry is forwarded to
+     * {@code onUnknown} so the caller can log or handle it without coupling this
+     * method to Ghidra's {@code Msg} class.
+     */
+    static List<Inference> filterKnownInferences(
+            List<MaybeUnknownInference> raw, Consumer<Object> onUnknown) {
+        List<Inference> result = new ArrayList<>();
+        for (MaybeUnknownInference maybeInference : raw) {
+            if (maybeInference == null) {
+                continue;
+            }
+            Object actualInstance = maybeInference.getActualInstance();
+            if (!(actualInstance instanceof Inference)) {
+                onUnknown.accept(actualInstance);
+                continue;
+            }
+            result.add((Inference) actualInstance);
+        }
+        return result;
+    }
+
     /**
      * Simple queue for inferences.
      */

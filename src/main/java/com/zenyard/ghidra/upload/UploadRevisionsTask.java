@@ -19,6 +19,7 @@ import com.zenyard.ghidra.api.generated.model.Function;
 import com.zenyard.ghidra.api.generated.model.GlobalVariable;
 import com.zenyard.ghidra.api.generated.model.ModelObject;
 import com.zenyard.ghidra.api.generated.model.Range;
+import com.zenyard.ghidra.api.generated.model.Section;
 import com.zenyard.ghidra.events.ZenyardEvent;
 import com.zenyard.ghidra.events.EventDispatcher;
 import com.zenyard.ghidra.tasks.StatusBarAwareTask;
@@ -616,6 +617,10 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
                 if (actualInstance instanceof GlobalVariable) {
                     return validateGlobalVariable((GlobalVariable) actualInstance);
                 }
+            } else if (className.contains("Section")) {
+                if (actualInstance instanceof Section) {
+                    return validateSection((Section) actualInstance);
+                }
             }
             
             // Unknown object type - reject for safety
@@ -636,6 +641,17 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
             return false;
         }
         return !gv.getAddress().isEmpty() && !gv.getName().isEmpty();
+    }
+    
+    /**
+     * Validate section object before uploading.
+     */
+    private boolean validateSection(Section section) {
+        if (section == null) {
+            return false;
+        }
+        return section.getAddress() != null && !section.getAddress().isEmpty()
+            && section.getName() != null && !section.getName().isEmpty();
     }
     
     /**
@@ -703,6 +719,10 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
             } else if (actualInstance instanceof GlobalVariable) {
                 GlobalVariable gv = (GlobalVariable) actualInstance;
                 String address = gv.getAddress();
+                return address != null ? address : "unknown";
+            } else if (actualInstance instanceof Section) {
+                Section section = (Section) actualInstance;
+                String address = section.getAddress();
                 return address != null ? address : "unknown";
             }
             return "unknown";

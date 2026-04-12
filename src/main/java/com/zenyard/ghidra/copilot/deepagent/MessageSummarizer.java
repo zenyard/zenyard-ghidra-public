@@ -3,8 +3,10 @@ package com.zenyard.ghidra.copilot.deepagent;
 import java.util.ArrayList;
 import java.util.List;
 
+import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
 
 /**
@@ -22,6 +24,26 @@ public final class MessageSummarizer {
         int totalChars = 0;
         for (ChatMessage message : messages) {
             totalChars += messageCharCount(message);
+        }
+        return totalChars / 4;
+    }
+
+    public static int estimateTextTokens(String text) {
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
+        return text.length() / 4;
+    }
+
+    public static int estimateToolSpecificationTokens(List<ToolSpecification> toolSpecifications) {
+        if (toolSpecifications == null || toolSpecifications.isEmpty()) {
+            return 0;
+        }
+        int totalChars = 0;
+        for (ToolSpecification specification : toolSpecifications) {
+            if (specification != null) {
+                totalChars += specification.toString().length();
+            }
         }
         return totalChars / 4;
     }
@@ -46,12 +68,28 @@ public final class MessageSummarizer {
             double triggerFraction,
             int keepMessages,
             int toolArgTruncateThreshold) {
+        return maybeTruncate(
+            messages,
+            contextWindowTokens,
+            triggerFraction,
+            keepMessages,
+            toolArgTruncateThreshold,
+            0);
+    }
+
+    public static List<ChatMessage> maybeTruncate(
+            List<ChatMessage> messages,
+            int contextWindowTokens,
+            double triggerFraction,
+            int keepMessages,
+            int toolArgTruncateThreshold,
+            int reservedTokens) {
         if (messages == null || messages.isEmpty()) {
             return messages;
         }
 
         int estimatedTokens = estimateTokens(messages);
-        int threshold = (int) (contextWindowTokens * triggerFraction);
+        int threshold = Math.max(1, (int) (contextWindowTokens * triggerFraction) - Math.max(0, reservedTokens));
 
         if (estimatedTokens < threshold) {
             return messages;
@@ -59,7 +97,9 @@ public final class MessageSummarizer {
 
         ghidra.util.Msg.debug(MessageSummarizer.class,
             "MessageSummarizer triggered: estimatedTokens=" + estimatedTokens
-            + " threshold=" + threshold + " messageCount=" + messages.size());
+            + " threshold=" + threshold
+            + " reservedTokens=" + Math.max(0, reservedTokens)
+            + " messageCount=" + messages.size());
 
         // Separate system message (if first) from conversation messages
         ChatMessage firstMessage = messages.get(0);
@@ -109,7 +149,7 @@ public final class MessageSummarizer {
         return result;
     }
 
-    private static List<ChatMessage> truncateToolArgsInList(List<ChatMessage> messages, int threshold) {
+    public static List<ChatMessage> truncateToolArgsInList(List<ChatMessage> messages, int threshold) {
         List<ChatMessage> result = new ArrayList<>(messages.size());
         for (ChatMessage message : messages) {
             result.add(maybeTruncateToolArg(message, threshold));
@@ -132,12 +172,19 @@ public final class MessageSummarizer {
         String toolName = MessageSanitizer.extractToolName(message);
         String truncated = content.substring(0, threshold)
             + "\n...[truncated, len=" + content.length() + "]";
+        if (message instanceof ToolExecutionResultMessage resultMessage) {
+            String id = resultMessage.id() != null ? resultMessage.id() : "";
+            String name = !toolName.isEmpty() ? toolName : resultMessage.toolName();
+            if (!id.isEmpty()) {
+                return new ToolExecutionResultMessage(id, name, truncated);
+            }
+            return message;
+        }
         String toolId = MessageSanitizer.extractToolExecutionId(message);
         if (!toolId.isEmpty()) {
-            return new dev.langchain4j.data.message.ToolExecutionResultMessage(
-                toolId, toolName, truncated);
+            return new ToolExecutionResultMessage(toolId, toolName, truncated);
         }
-        return UserMessage.from("Tool result (" + toolName + "):\n" + truncated);
+        return message;
     }
 
     private static int messageCharCount(ChatMessage message) {

@@ -113,7 +113,7 @@ public class CopilotProvider extends ComponentProvider {
     @Override
     public void componentShown() {
         installKeyHandlers();
-        ZenyardService svc = ZenyardService.getInstanceForTool((PluginTool) getTool());
+        ZenyardService svc = ZenyardService.getInstance();
         if (svc != null) {
             svc.getEventDispatcher().publish(
                 new ZenyardEvent(ZenyardEvent.EventType.COPILOT_OPENED, "CopilotProvider"));

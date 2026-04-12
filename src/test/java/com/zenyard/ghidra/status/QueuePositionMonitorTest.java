@@ -25,7 +25,11 @@ class QueuePositionMonitorTest {
     /** Lightweight recording of StatusBarManager calls. */
     private static final class RecordingStatusBarManager extends StatusBarManagerStub {
         final List<String> calls = new ArrayList<>();
-        boolean taskRegistered = false;
+        private boolean taskRegistered = false;
+
+        boolean isTaskRegistered() {
+            return taskRegistered;
+        }
 
         @Override
         public void registerTask(String taskId, int priority) {
@@ -79,7 +83,7 @@ class QueuePositionMonitorTest {
         assertEquals(2, recorder.calls.size(), "expect register + update");
         assertEquals("register:" + QueuePositionMonitor.TASK_ID + ":38", recorder.calls.get(0));
         assertTrue(recorder.calls.get(1).contains("In queue (3 remaining)"));
-        assertTrue(recorder.taskRegistered);
+        assertTrue(recorder.isTaskRegistered());
     }
 
     @Test
@@ -91,7 +95,7 @@ class QueuePositionMonitorTest {
 
         assertEquals(1, recorder.calls.size(), "only update, no re-register");
         assertTrue(recorder.calls.get(0).contains("In queue (2 remaining)"));
-        assertTrue(recorder.taskRegistered);
+        assertTrue(recorder.isTaskRegistered());
     }
 
     @Test
@@ -103,7 +107,7 @@ class QueuePositionMonitorTest {
 
         assertEquals(1, recorder.calls.size());
         assertEquals("unregister:" + QueuePositionMonitor.TASK_ID, recorder.calls.get(0));
-        assertFalse(recorder.taskRegistered);
+        assertFalse(recorder.isTaskRegistered());
     }
 
     @Test
@@ -111,7 +115,7 @@ class QueuePositionMonitorTest {
         publishQueuePosition(0);
 
         assertTrue(recorder.calls.isEmpty(), "zero should not register");
-        assertFalse(recorder.taskRegistered);
+        assertFalse(recorder.isTaskRegistered());
     }
 
     @Test
@@ -119,7 +123,7 @@ class QueuePositionMonitorTest {
         publishQueuePosition(-1);
 
         assertTrue(recorder.calls.isEmpty());
-        assertFalse(recorder.taskRegistered);
+        assertFalse(recorder.isTaskRegistered());
     }
 
     @Test
@@ -131,7 +135,7 @@ class QueuePositionMonitorTest {
 
         assertEquals(1, recorder.calls.size());
         assertEquals("unregister:" + QueuePositionMonitor.TASK_ID, recorder.calls.get(0));
-        assertFalse(recorder.taskRegistered);
+        assertFalse(recorder.isTaskRegistered());
     }
 
     @Test

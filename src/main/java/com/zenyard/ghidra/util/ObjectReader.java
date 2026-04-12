@@ -50,6 +50,11 @@ public class ObjectReader {
         // 2. Named global variables (excluding auto-generated string literals)
         symbols.addAll(getGlobalVariableSymbols(program));
         
+        // Get all memory block sections
+        for (MemoryBlock block : program.getMemory().getBlocks()) {
+            symbols.add(new Symbol(block.getStart(), "section"));
+        }
+        
         return symbols;
     }
 
@@ -71,6 +76,12 @@ public class ObjectReader {
         Address globalVarAddress = getGlobalVariableAddress(program, address);
         if (globalVarAddress != null) {
             return Optional.of(new Symbol(globalVarAddress, "global_variable"));
+        }
+
+        for (MemoryBlock block : program.getMemory().getBlocks()) {
+            if (block.getStart().equals(address)) {
+                return Optional.of(new Symbol(address, "section"));
+            }
         }
 
         return Optional.empty();

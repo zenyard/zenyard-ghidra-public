@@ -1260,22 +1260,61 @@
     }
   }
 
+  /**
+   * Normalize API error payloads so the copilot error UI never shows raw JSON.
+   * Returns a short, user-friendly message for known API error shapes.
+   */
+  function normalizeErrorForDisplay(error) {
+    if (error == null || typeof error !== "string") {
+      return error ? String(error) : null;
+    }
+    const s = String(error).trim();
+    if (!s) {
+      return null;
+    }
+    // Prompt / context too long (e.g. Vertex "prompt is too long: 200089 tokens > 200000 maximum")
+    if (/prompt\s+is\s+too\s+long|tokens\s*>\s*\d+\s*maximum|token\s+limit|context\s+length/i.test(s)) {
+      return "The conversation or context is too long for the model. Try starting a new chat or reducing the amount of code referenced.";
+    }
+    // Bad request / invalid_request_error (400)
+    if (/badrequesterror|invalid_request_error|"code"\s*:\s*["']?400["']?/i.test(s)) {
+      return "The request was rejected by the AI provider. Try shortening your message or starting a new chat.";
+    }
+    // Try to extract a nested "message" from JSON-like error (e.g. litellm / Vertex wrapper)
+    try {
+      const prefix = "Error: ";
+      const jsonStr = s.startsWith(prefix) ? s.slice(prefix.length) : s;
+      const parsed = JSON.parse(jsonStr);
+      const msg = parsed?.error?.message ?? parsed?.message ?? parsed?.error;
+      if (typeof msg === "string" && msg.length > 0 && msg.length < 500) {
+        return normalizeErrorForDisplay(msg);
+      }
+    } catch (_) {
+      // not JSON or unparseable — fall through
+    }
+    // If it looks like raw API/JSON dump, show a generic message instead of the raw string
+    if (s.length > 200 && (s.includes('"error"') || s.includes('"message"') || s.includes("request_id"))) {
+      return "An API error occurred. Try again or start a new chat. If it persists, contact support.";
+    }
+    return s;
+  }
+
   function renderError(error) {
     const existing = document.getElementById("floatingError");
     if (!error) {
       if (existing) {
-        existing.classList.remove("is-visible");
+        existing.remove();
       }
       return;
     }
 
     // Render error as a floating toast inside the dialog instead of a banner
-    // that consumes layout space at the top of the chat feed.
+    // that consumes layout space at the top of the chat feed. Never show raw API/JSON in the bubble.
     const banner = existing || document.createElement("div");
     banner.id = "floatingError";
     banner.className = "error-banner is-visible";
     banner.classList.remove("interactive");
-    const errorText = String(error);
+    const errorText = normalizeErrorForDisplay(String(error));
     const contactLabel = "Contact us";
     const contactIndex = errorText.indexOf(contactLabel);
     if (contactIndex >= 0) {
@@ -1737,6 +1776,8 @@
     userScrolledUp = false;
     thinkingUserCollapsed = false;
     resetTaskProgressUiState();
+    state.error = null;
+    renderError(null);
     renderTodos(state);
     renderTools(state);
     renderSubAgent(state);
@@ -1761,6 +1802,8 @@
   if (clearBtn) {
     clearBtn.addEventListener("click", () => {
       resetTaskProgressUiState();
+      state.error = null;
+      renderError(null);
       renderTodos(state);
       renderTools(state);
       renderSubAgent(state);

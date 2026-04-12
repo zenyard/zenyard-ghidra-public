@@ -26,6 +26,9 @@ public record CopilotDeepAgentConfig(
         double summarizationTriggerFraction,
         int summarizationKeepMessages,
         int toolArgTruncateThreshold,
+        int requestTokenReserveTokens,
+        int promptTooLongRetryExtraReserveTokens,
+        boolean promptTooLongCompactionRetryEnabled,
         long subAgentTimeoutMs,
         int subAgentRecursionLimit,
         long toolCallTimeoutMs) {
@@ -57,6 +60,12 @@ public record CopilotDeepAgentConfig(
         if (toolArgTruncateThreshold <= 0) {
             toolArgTruncateThreshold = 5000;
         }
+        if (requestTokenReserveTokens <= 0) {
+            requestTokenReserveTokens = 4000;
+        }
+        if (promptTooLongRetryExtraReserveTokens <= 0) {
+            promptTooLongRetryExtraReserveTokens = 12000;
+        }
         if (subAgentTimeoutMs <= 0) {
             subAgentTimeoutMs = 540_000L;
         }
@@ -87,6 +96,9 @@ public record CopilotDeepAgentConfig(
             0.8,
             20,
             5000,
+            4000,
+            12000,
+            true,
             540_000L,
             50,
             60_000L

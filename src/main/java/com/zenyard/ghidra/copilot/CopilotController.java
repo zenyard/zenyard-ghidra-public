@@ -253,13 +253,14 @@ public class CopilotController {
             List<Object> tools = toolRegistry.getAllTools();
             refreshPythonAvailabilityWarning(tools);
             
-            // Create deep agent graphs
+            // Create deep agent graph once; reused for all messages in this session (no per-message or retry-loop recreation).
             deepAgent = new CopilotDeepAgent(
                 planningModel,
                 streamingModel,
                 tools,
                 streamHandler,
                 deepAgentMemoryAdapter,
+                summarizer,
                 null,
                 systemPrompt,
                 shouldSanitizeToolMessages(copilotConfig),
@@ -295,7 +296,7 @@ public class CopilotController {
      */
     public void clearConversation() {
         Msg.info(this, "Clearing conversation");
-        ZenyardService clearSvc = ZenyardService.getInstanceForTool(tool);
+        ZenyardService clearSvc = ZenyardService.getInstance();
         if (clearSvc != null) {
             clearSvc.getEventDispatcher().publish(
                 new ZenyardEvent(ZenyardEvent.EventType.COPILOT_CLEAR_REQUESTED, "CopilotController"));
@@ -311,6 +312,7 @@ public class CopilotController {
             viewModel.clearTodos();
             viewModel.clearToolHistory();
             viewModel.clearSubAgentStreaming();
+            viewModel.clearError();
         }
         lastObservedToolBatchSignature = "";
     }
@@ -321,7 +323,7 @@ public class CopilotController {
      * the stream handler (stops UI token forwarding), and the running future.
      */
     public void stop() {
-        ZenyardService stopSvc = ZenyardService.getInstanceForTool(tool);
+        ZenyardService stopSvc = ZenyardService.getInstance();
         if (stopSvc != null) {
             stopSvc.getEventDispatcher().publish(
                 new ZenyardEvent(ZenyardEvent.EventType.COPILOT_STOP_REQUESTED, "CopilotController"));
@@ -658,6 +660,7 @@ public class CopilotController {
         }
         // Use view-model if available, otherwise update provider directly
         if (viewModel != null) {
+            viewModel.clearError();
             // Reset task-progress state at the start of every prompt so each run starts fresh.
             viewModel.syncTodoState(
                 Collections.emptyList(),
@@ -843,7 +846,8 @@ public class CopilotController {
                 viewModel.setThinking(false, null);
                 viewModel.setTodoMinimized(true);
                 viewModel.setError(finalErrorMsg);
-                viewModel.addMessage(finalErrorMsg, false);
+                // Do not add error as a chat message — show only in the dedicated error banner.
+                viewModel.removeLastMessageIfEmptyAssistant();
             } else {
                 provider.appendMessage(finalErrorMsg);
                 if (throwable != null) {
@@ -868,6 +872,15 @@ public class CopilotController {
                 + "Wait a minute and try again, or request a quota increase in Google Cloud Vertex AI.";
         }
 
+        if (isPromptTooLongError(throwable)) {
+            return "The conversation or context is too long for the model (token limit exceeded). "
+                + "Try starting a new chat (Clear) or reducing the amount of code or context you reference.";
+        }
+
+        if (isBadRequestError(throwable)) {
+            return "The request was rejected by the AI provider. Try shortening your message or starting a new chat.";
+        }
+
         if (rootCause instanceof ApiException apiException) {
             if (apiException.getCode() == 401) {
                 return "Authentication failed: your Zenyard API key is invalid or expired. "
@@ -890,6 +903,27 @@ public class CopilotController {
             return "Error: " + rootCause.getMessage();
         }
         return fallbackErrorMsg;
+    }
+
+    private boolean isPromptTooLongError(Throwable throwable) {
+        return exceptionChainMatches(throwable, lowerMessage ->
+            containsAny(lowerMessage,
+                "prompt is too long",
+                "tokens >",
+                "maximum",
+                "token limit",
+                "context length",
+                "input is too long"));
+    }
+
+    private boolean isBadRequestError(Throwable throwable) {
+        return exceptionChainMatches(throwable, lowerMessage ->
+            containsAny(lowerMessage,
+                "badrequesterror",
+                "invalid_request_error",
+                "\"code\":\"400\"",
+                "\"code\": 400",
+                "code\":400"));
     }
 
     private void refreshPythonAvailabilityWarning() {
@@ -1035,10 +1069,22 @@ public class CopilotController {
 
         int contextWindowTokens = getIntParam(
             config, 200_000, "deepagent_context_window_tokens", "deepAgentContextWindowTokens");
+        double summarizationTriggerFraction = getDoubleParam(
+            config, 0.8, "deepagent_summarization_trigger_fraction", "deepAgentSummarizationTriggerFraction");
         int summarizationKeepMessages = getIntParam(
             config, 20, "deepagent_summarization_keep_messages", "deepAgentSummarizationKeepMessages");
         int toolArgTruncateThreshold = getIntParam(
             config, 5000, "deepagent_tool_arg_truncate_threshold", "deepAgentToolArgTruncateThreshold");
+        int requestTokenReserveTokens = getIntParam(
+            config, 4000, "deepagent_request_token_reserve", "deepAgentRequestTokenReserve");
+        int promptTooLongRetryExtraReserveTokens = getIntParam(
+            config, 12000,
+            "deepagent_prompt_too_long_retry_extra_reserve",
+            "deepAgentPromptTooLongRetryExtraReserve");
+        boolean promptTooLongCompactionRetryEnabled = getBooleanParam(
+            config, true,
+            "deepagent_prompt_too_long_retry",
+            "deepAgentPromptTooLongRetry");
         long subAgentTimeoutMs = (long) getIntParam(
             config, 540_000, "deepagent_subagent_timeout_ms", "deepAgentSubAgentTimeoutMs");
         int subAgentRecursionLimit = getIntParam(
@@ -1061,9 +1107,12 @@ public class CopilotController {
             interruptBeforeEdge,
             graphId,
             contextWindowTokens,
-            0.8,
+            summarizationTriggerFraction,
             summarizationKeepMessages,
             toolArgTruncateThreshold,
+            requestTokenReserveTokens,
+            promptTooLongRetryExtraReserveTokens,
+            promptTooLongCompactionRetryEnabled,
             subAgentTimeoutMs,
             subAgentRecursionLimit,
             toolCallTimeoutMs
@@ -1109,6 +1158,18 @@ public class CopilotController {
             return defaultValue;
         }
         return Boolean.parseBoolean(text);
+    }
+
+    private Double getDoubleParam(CopilotConfig config, double defaultValue, String... keys) {
+        String text = getStringParam(config, keys);
+        if (text == null) {
+            return defaultValue;
+        }
+        try {
+            return Double.parseDouble(text);
+        } catch (NumberFormatException ex) {
+            return defaultValue;
+        }
     }
 
     private java.util.Set<String> getStringSetParam(CopilotConfig config, String... keys) {

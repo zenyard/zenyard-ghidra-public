@@ -13,7 +13,7 @@ import com.zenyard.ghidra.copilot.CopilotConfig;
 class SkillsSourceResolverTest {
 
     @Test
-    void resolve_listParam_returnsAllSources() {
+    void resolveListParamReturnsAllSources() {
         CopilotConfig config = new CopilotConfig(
             "gpt",
             "openai",
@@ -27,7 +27,7 @@ class SkillsSourceResolverTest {
     }
 
     @Test
-    void resolve_csvParam_parsesAndNormalizes() {
+    void resolveCsvParamParsesAndNormalizes() {
         CopilotConfig config = new CopilotConfig(
             "gpt",
             "openai",

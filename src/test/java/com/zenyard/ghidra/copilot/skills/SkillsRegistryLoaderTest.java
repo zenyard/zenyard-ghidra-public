@@ -15,10 +15,10 @@ import org.junit.jupiter.api.io.TempDir;
 class SkillsRegistryLoaderTest {
 
     @TempDir
-    Path tempDir;
+    private Path tempDir;
 
     @Test
-    void load_lastSourceWinsForDuplicateNames() throws IOException {
+    void loadLastSourceWinsForDuplicateNames() throws IOException {
         Path source1 = tempDir.resolve("source1");
         Path source2 = tempDir.resolve("source2");
         Files.createDirectories(source1.resolve("reverse-workflow"));
@@ -49,7 +49,7 @@ class SkillsRegistryLoaderTest {
     }
 
     @Test
-    void load_missingSkillFile_isIgnored() throws IOException {
+    void loadMissingSkillFileIsIgnored() throws IOException {
         Path source = tempDir.resolve("source");
         Files.createDirectories(source.resolve("has-skill"));
         Files.createDirectories(source.resolve("no-skill"));

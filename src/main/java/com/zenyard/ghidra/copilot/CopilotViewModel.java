@@ -220,6 +220,21 @@ public class CopilotViewModel {
         messages.clear();
         notifyListeners();
     }
+
+    /**
+     * Remove the last message if it is an assistant message with empty or blank text.
+     * Used when an error occurs so the empty streaming placeholder is not shown as a bubble.
+     */
+    public void removeLastMessageIfEmptyAssistant() {
+        if (messages.isEmpty()) {
+            return;
+        }
+        Message last = messages.get(messages.size() - 1);
+        if (!last.isFromUser() && (last.getText() == null || last.getText().isBlank())) {
+            messages.remove(messages.size() - 1);
+            notifyListeners();
+        }
+    }
     
     /**
      * Set loading state.

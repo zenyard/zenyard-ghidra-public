@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Test;
 class SkillFrontmatterParserTest {
 
     @Test
-    void parse_validFrontmatter_returnsMetadata() {
+    void parseValidFrontmatterReturnsMetadata() {
         String content = """
             ---
             name: reverse-workflow
@@ -44,7 +44,7 @@ class SkillFrontmatterParserTest {
     }
 
     @Test
-    void parse_missingFrontmatter_returnsEmpty() {
+    void parseMissingFrontmatterReturnsEmpty() {
         Optional<SkillMetadata> parsed = SkillFrontmatterParser.parse(
             "# no frontmatter",
             "/skills/invalid/SKILL.md",
@@ -54,7 +54,7 @@ class SkillFrontmatterParserTest {
     }
 
     @Test
-    void parse_longDescription_isTruncated() {
+    void parseLongDescriptionIsTruncated() {
         String longDescription = "a".repeat(1200);
         String content = """
             ---

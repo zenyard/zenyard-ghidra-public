@@ -3,13 +3,10 @@ package com.zenyard.ghidra;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 
-import com.zenyard.ghidra.api.generated.model.QuotaExhaustedDialogShownReason;
-import com.zenyard.ghidra.api.generated.model.PausedDialgBoxUserResponse;
 import com.zenyard.ghidra.analytics.AnalyticsEventConsumer;
 import com.zenyard.ghidra.api.ZenyardApiClientFactory;
 import com.zenyard.ghidra.api.generated.ApiClient;
 import com.zenyard.ghidra.api.generated.ApiException;
-import com.zenyard.ghidra.api.generated.api.AnalyticsApi;
 import com.zenyard.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.ghidra.api.generated.api.UserApi;
 import com.zenyard.ghidra.copilot.CopilotConfig;
@@ -178,7 +175,7 @@ public class ZenyardService {
         // Initialize analytics consumer if API client is available
         if (apiClient != null) {
             AnalyticsEventConsumer analyticsConsumer =
-                new AnalyticsEventConsumer(new AnalyticsApi(apiClient), options.getConfiguration());
+                new AnalyticsEventConsumer(apiClient, options.getConfiguration());
             eventDispatcher.subscribe(analyticsConsumer);
             analyticsConsumer.trackPluginLoaded();
         }
@@ -199,7 +196,7 @@ public class ZenyardService {
             userApi = new UserApi(apiClient);
             fetchUserConfigAsync(false);
             AnalyticsEventConsumer analyticsConsumer =
-                new AnalyticsEventConsumer(new AnalyticsApi(apiClient), options.getConfiguration());
+                new AnalyticsEventConsumer(apiClient, options.getConfiguration());
             eventDispatcher.subscribe(analyticsConsumer);
             analyticsConsumer.trackPluginLoaded();
         }
@@ -216,6 +213,13 @@ public class ZenyardService {
         
         if (copilotController != null) {
             copilotController.setCurrentProgram(program);
+        }
+
+        // Refresh status bar so persisted state (e.g. initial_questions_deferred) is shown
+        // after Ghidra restart. Without this, the first refresh can run before currentProgram
+        // is set and "Ready" is shown instead of "Click to analyze with Zenyard".
+        if (statusBarManager != null) {
+            statusBarManager.refreshDisplayNow();
         }
     }
     
@@ -448,8 +452,7 @@ public class ZenyardService {
                     return;
                 }
                 if (isUsageBlocked()) {
-                    showUsageBlockedDialog(
-                        QuotaExhaustedDialogShownReason.AUTOMATIC);
+                    showUsageBlockedDialog();
                     return;
                 }
                 if (isBinaryPaused()) {
@@ -497,8 +500,7 @@ public class ZenyardService {
                     return;
                 }
                 if (isUsageBlocked()) {
-                    showUsageBlockedDialog(
-                        QuotaExhaustedDialogShownReason.AUTOMATIC);
+                    showUsageBlockedDialog();
                     return;
                 }
                 if (isBinaryPaused()) {
@@ -563,11 +565,6 @@ public class ZenyardService {
 
             @Override
             public void onUsageDetails() {
-                if (isUsageBlocked()) {
-                    showUsageBlockedDialog(
-                        QuotaExhaustedDialogShownReason.USAGE_LABEL_CLICKED);
-                    return;
-                }
                 UsageDetailsDialog.showDialog(plugin.getTool(), getUsageState());
             }
         };
@@ -578,14 +575,9 @@ public class ZenyardService {
         return state != null && state.isBlocked();
     }
 
-    private void showUsageBlockedDialog(
-            QuotaExhaustedDialogShownReason reason) {
-        eventDispatcher.publish(ZenyardEvent.builder(
-                ZenyardEvent.EventType.QUOTA_EXHAUSTED_DIALOG_SHOWN, "ZenyardService")
-            .withPayload("show_reason", reason.getValue())
-            .withPayload("user_response",
-                PausedDialgBoxUserResponse.CANCEL.getValue())
-            .build());
+    private void showUsageBlockedDialog() {
+        eventDispatcher.publish(new ZenyardEvent(
+            ZenyardEvent.EventType.QUOTA_EXHAUSTED_DIALOG_SHOWN, "ZenyardService"));
         UsageState.showBlockedDialog(plugin.getTool().getActiveWindow(), usageState);
     }
 

@@ -11,6 +11,7 @@ import org.bsc.langgraph4j.NodeOutput;
 import org.bsc.langgraph4j.RunnableConfig;
 import org.bsc.langgraph4j.langchain4j.tool.LC4jToolService;
 
+import com.zenyard.ghidra.copilot.CopilotSummarizer;
 import com.zenyard.ghidra.copilot.CopilotStreamHandler;
 import com.zenyard.ghidra.copilot.skills.SkillsService;
 
@@ -35,6 +36,7 @@ public class CopilotDeepAgent {
             List<Object> tools,
             CopilotStreamHandler streamHandler,
             DeepAgentMemoryAdapter memoryAdapter,
+            CopilotSummarizer summarizer,
             String systemPrompt,
             boolean sanitizeToolMessages) throws GraphStateException {
         this(
@@ -43,6 +45,7 @@ public class CopilotDeepAgent {
             tools,
             streamHandler,
             memoryAdapter,
+            summarizer,
             null,
             systemPrompt,
             sanitizeToolMessages,
@@ -56,6 +59,7 @@ public class CopilotDeepAgent {
             List<Object> tools,
             CopilotStreamHandler streamHandler,
             DeepAgentMemoryAdapter memoryAdapter,
+            CopilotSummarizer summarizer,
             String systemPrompt,
             boolean sanitizeToolMessages,
             CopilotDeepAgentConfig config) throws GraphStateException {
@@ -65,6 +69,7 @@ public class CopilotDeepAgent {
             tools,
             streamHandler,
             memoryAdapter,
+            summarizer,
             null,
             systemPrompt,
             sanitizeToolMessages,
@@ -78,12 +83,13 @@ public class CopilotDeepAgent {
             List<Object> tools,
             CopilotStreamHandler streamHandler,
             DeepAgentMemoryAdapter memoryAdapter,
+            CopilotSummarizer summarizer,
             SkillsService skillsService,
             String systemPrompt,
             boolean sanitizeToolMessages,
             CopilotDeepAgentConfig config) throws GraphStateException {
         this(planningModel, streamingChatModel, tools, streamHandler,
-                memoryAdapter, skillsService, systemPrompt,
+                memoryAdapter, summarizer, skillsService, systemPrompt,
                 sanitizeToolMessages, config, null);
     }
 
@@ -93,6 +99,7 @@ public class CopilotDeepAgent {
             List<Object> tools,
             CopilotStreamHandler streamHandler,
             DeepAgentMemoryAdapter memoryAdapter,
+            CopilotSummarizer summarizer,
             SkillsService skillsService,
             String systemPrompt,
             boolean sanitizeToolMessages,
@@ -113,6 +120,8 @@ public class CopilotDeepAgent {
             toolService.toolSpecifications(),
             systemPrompt,
             sanitizeToolMessages,
+            summarizer,
+            resolvedConfig,
             tracer
         );
         ToolNode toolNode = new ToolNode(
@@ -130,7 +139,13 @@ public class CopilotDeepAgent {
             List.of(),
             systemPrompt,
             sanitizeToolMessages,
+            summarizer,
+            resolvedConfig,
             resolvedConfig.responseStreamingTimeoutMs(),
+            resolvedConfig.contextWindowTokens(),
+            resolvedConfig.summarizationTriggerFraction(),
+            resolvedConfig.summarizationKeepMessages(),
+            resolvedConfig.toolArgTruncateThreshold(),
             tracer);
 
         this.responseNode = responseNode;

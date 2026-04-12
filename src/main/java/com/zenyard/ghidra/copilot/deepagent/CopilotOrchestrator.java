@@ -72,7 +72,7 @@ public class CopilotOrchestrator {
             CopilotDeepState.SCHEMA,
             new LC4jStateSerializer<>(CopilotDeepState::new))
             .addNode(BEFORE_AGENT_NODE, node_async(new BeforeAgentNode(skillsService)))
-            .addNode(BEFORE_MODEL_NODE, node_async(new BeforeModelNode(deepAgentConfig)))
+            .addNode(BEFORE_MODEL_NODE, node_async(new BeforeModelNode()))
             .addNode(MODEL_NODE, planNode)
             .addNode(AFTER_MODEL_NODE, node_async(new AfterModelNode()))
             .addNode(TOOLS_NODE, toolNode)
@@ -151,32 +151,11 @@ public class CopilotOrchestrator {
     }
 
     private static final class BeforeModelNode implements NodeAction<CopilotDeepState> {
-        private final CopilotDeepAgentConfig config;
-
-        BeforeModelNode(CopilotDeepAgentConfig config) {
-            this.config = config;
-        }
-
         @Override
         public Map<String, Object> apply(CopilotDeepState state) {
             Map<String, Object> update = new HashMap<>();
             update.put(CopilotDeepState.JUMP_TO, "");
             update.put(CopilotDeepState.RETURN_DIRECT, Boolean.FALSE);
-
-            // Run context window management on messages
-            if (config != null) {
-                var messages = state.messages();
-                var truncated = MessageSummarizer.maybeTruncate(
-                    messages,
-                    config.contextWindowTokens(),
-                    config.summarizationTriggerFraction(),
-                    config.summarizationKeepMessages(),
-                    config.toolArgTruncateThreshold()
-                );
-                if (truncated.size() != messages.size()) {
-                    update.put(CopilotDeepState.MESSAGES, truncated);
-                }
-            }
 
             return update;
         }

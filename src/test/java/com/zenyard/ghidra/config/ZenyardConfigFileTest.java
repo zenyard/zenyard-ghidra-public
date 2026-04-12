@@ -16,7 +16,7 @@ import org.junit.jupiter.api.io.TempDir;
 class ZenyardConfigFileTest {
 
     @TempDir
-    Path tempDir;
+    private Path tempDir;
 
     private String originalUserHome;
 
@@ -34,7 +34,7 @@ class ZenyardConfigFileTest {
     }
 
     @Test
-    void createDefaultConfiguration_createsFileWithDefaults() throws IOException {
+    void createDefaultConfigurationCreatesFileWithDefaults() throws IOException {
         Path configPath = ZenyardConfigFile.getConfigPath();
         assertFalse(Files.exists(configPath));
 

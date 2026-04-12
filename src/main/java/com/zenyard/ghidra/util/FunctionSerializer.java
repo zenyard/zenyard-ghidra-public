@@ -1,18 +1,26 @@
 package com.zenyard.ghidra.util;
 
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.regex.Pattern;
 
+import com.zenyard.ghidra.api.generated.model.AddressDetail;
 import com.zenyard.ghidra.api.generated.model.DecompilerNote;
 import com.zenyard.ghidra.api.generated.model.Function;
 import com.zenyard.ghidra.api.generated.model.GlobalVariable;
 import com.zenyard.ghidra.api.generated.model.LineRange;
+import com.zenyard.ghidra.api.generated.model.LVarDetail;
 import com.zenyard.ghidra.api.generated.model.Range;
+import com.zenyard.ghidra.api.generated.model.RangeDetail;
 import com.zenyard.ghidra.api.generated.model.Thunk;
+import ghidra.app.decompiler.ClangToken;
+import ghidra.app.decompiler.ClangTokenGroup;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
+import ghidra.program.model.pcode.HighParam;
+import ghidra.program.model.pcode.HighVariable;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.listing.FunctionManager;
@@ -101,10 +109,17 @@ public class FunctionSerializer {
                         + (results.getErrorMessage() != null ? results.getErrorMessage() : "Unknown error"));
                 }
                 
-                decompiledCode = results.getDecompiledFunction().getC();
-                
-                // Extract ranges from decompiled code
-                ranges = extractRanges(program, function, results);
+                CodeAndRanges car = extractCodeAndRanges(results);
+                decompiledCode = car.code();
+                ranges = car.ranges();
+
+                long lvarCount = ranges.stream()
+                    .filter(r -> r.getDetail() != null && r.getDetail().getActualInstance() instanceof LVarDetail)
+                    .count();
+                long addrCount = ranges.size() - lvarCount;
+                ghidra.util.Msg.debug(FunctionSerializer.class,
+                    "Ranges for " + apiAddress + ": " + ranges.size()
+                    + " [lvar=" + lvarCount + " addr=" + addrCount + "]");
                 
                 // Extract line ranges (simplified - one range per line)
                 lineRanges = extractLineRanges(decompiledCode);
@@ -235,23 +250,71 @@ public class FunctionSerializer {
         return MANGLED_NAME_CLEANUP_REGEX.matcher(name).replaceAll("");
     }
     
-    /**
-     * Extract ranges from decompiled code.
-     * This is a simplified version - in a full implementation, we'd parse the HighFunction
-     * to get accurate ranges for addresses and local variables.
-     */
-    private static List<Range> extractRanges(Program program, ghidra.program.model.listing.Function function,
-                                            DecompileResults results) {
-        List<Range> ranges = new ArrayList<>();
-        
-        // For now, we'll create a basic implementation that finds addresses in the code
-        // A full implementation would use HighFunction to get accurate ranges
-        // This is a placeholder - real implementation would use HighFunction.getLocalSymbolMap()
-        // and HighFunction.getGlobalSymbolMap() to get accurate ranges
-        
-        return ranges;
+    record CodeAndRanges(String code, List<Range> ranges) {}
+
+    record TokenData(String text, RangeDetail detail) {}
+
+    private static CodeAndRanges extractCodeAndRanges(DecompileResults results) {
+        ClangTokenGroup markup = results.getCCodeMarkup();
+        List<TokenData> tokenData = new ArrayList<>();
+
+        Iterator<ClangToken> it = markup.tokenIterator(true);
+        while (it.hasNext()) {
+            ClangToken token = it.next();
+            tokenData.add(new TokenData(token.getText(), buildRangeDetail(token)));
+        }
+
+        return buildCodeAndRanges(tokenData);
     }
-    
+
+    static CodeAndRanges buildCodeAndRanges(List<TokenData> tokens) {
+        StringBuilder code = new StringBuilder();
+        List<Range> ranges = new ArrayList<>();
+
+        for (TokenData token : tokens) {
+            String text = token.text();
+            if (text == null || text.isEmpty()) continue;
+
+            int start = code.length();
+            code.append(text);
+
+            if (token.detail() != null) {
+                Range range = new Range();
+                range.setStart(start);
+                range.setLength(text.length());
+                range.setDetail(token.detail());
+                ranges.add(range);
+            }
+        }
+
+        return new CodeAndRanges(code.toString(), ranges);
+    }
+
+    private static RangeDetail buildRangeDetail(ClangToken token) {
+        HighVariable highVar = token.getHighVariable();
+        if (highVar != null) {
+            String name = highVar.getName();
+            if (name == null || name.isEmpty()) return null;
+            LVarDetail lvar = new LVarDetail();
+            lvar.setName(name);
+            lvar.setIsArg(highVar instanceof HighParam);
+            RangeDetail detail = new RangeDetail();
+            detail.setActualInstance(lvar);
+            return detail;
+        }
+
+        ghidra.program.model.address.Address addr = token.getMinAddress();
+        if (addr != null) {
+            AddressDetail addrDetail = new AddressDetail();
+            addrDetail.setAddress(com.zenyard.ghidra.api.AddressHelper.fromAddress(addr));
+            RangeDetail detail = new RangeDetail();
+            detail.setActualInstance(addrDetail);
+            return detail;
+        }
+
+        return null;
+    }
+
     /**
      * Extract line ranges from decompiled code.
      */

@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.bsc.langgraph4j.action.AsyncNodeActionWithConfig;
 
+import com.zenyard.ghidra.copilot.CopilotSummarizer;
 import com.zenyard.ghidra.copilot.CopilotStreamHandler;
 
 import dev.langchain4j.data.message.AiMessage;
@@ -39,8 +40,16 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
     private final String systemPrompt;
     private final boolean sanitizeToolMessages;
     private final long streamingTimeoutMs;
+    private final CopilotSummarizer summarizer;
+    private final CopilotDeepAgentConfig deepAgentConfig;
     private final LangSmithTracer tracer;
     private final List<ToolSpecification> toolSpecifications;
+    private final int contextWindowTokens;
+    private final double summarizationTriggerFraction;
+    private final int summarizationKeepMessages;
+    private final int toolArgTruncateThreshold;
+    private static final String FINAL_RESPONSE_INSTRUCTION =
+        "Provide your final answer now. Do not call any tools.";
 
     public ResponseNode(
             ChatModel chatModel,
@@ -50,7 +59,12 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
             boolean sanitizeToolMessages,
             long streamingTimeoutMs) {
         this(chatModel, streamingChatModel, streamHandler, List.of(), systemPrompt,
-                sanitizeToolMessages, streamingTimeoutMs, null);
+                sanitizeToolMessages, null, null, streamingTimeoutMs,
+                CopilotDeepAgentConfig.defaults().contextWindowTokens(),
+                CopilotDeepAgentConfig.defaults().summarizationTriggerFraction(),
+                CopilotDeepAgentConfig.defaults().summarizationKeepMessages(),
+                CopilotDeepAgentConfig.defaults().toolArgTruncateThreshold(),
+                null);
     }
 
     public ResponseNode(
@@ -62,7 +76,12 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
             long streamingTimeoutMs,
             LangSmithTracer tracer) {
         this(chatModel, streamingChatModel, streamHandler, List.of(), systemPrompt,
-            sanitizeToolMessages, streamingTimeoutMs, tracer);
+            sanitizeToolMessages, null, null, streamingTimeoutMs,
+            CopilotDeepAgentConfig.defaults().contextWindowTokens(),
+            CopilotDeepAgentConfig.defaults().summarizationTriggerFraction(),
+            CopilotDeepAgentConfig.defaults().summarizationKeepMessages(),
+            CopilotDeepAgentConfig.defaults().toolArgTruncateThreshold(),
+            tracer);
     }
 
     public ResponseNode(
@@ -72,7 +91,13 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
             List<ToolSpecification> toolSpecifications,
             String systemPrompt,
             boolean sanitizeToolMessages,
+            CopilotSummarizer summarizer,
+            CopilotDeepAgentConfig deepAgentConfig,
             long streamingTimeoutMs,
+            int contextWindowTokens,
+            double summarizationTriggerFraction,
+            int summarizationKeepMessages,
+            int toolArgTruncateThreshold,
             LangSmithTracer tracer) {
         this.chatModel = chatModel;
         this.streamingChatModel = streamingChatModel;
@@ -80,7 +105,13 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
         this.toolSpecifications = toolSpecifications != null ? toolSpecifications : List.of();
         this.systemPrompt = systemPrompt;
         this.sanitizeToolMessages = sanitizeToolMessages;
+        this.summarizer = summarizer;
+        this.deepAgentConfig = deepAgentConfig != null ? deepAgentConfig : CopilotDeepAgentConfig.defaults();
         this.streamingTimeoutMs = streamingTimeoutMs > 0 ? streamingTimeoutMs : 120_000L;
+        this.contextWindowTokens = contextWindowTokens;
+        this.summarizationTriggerFraction = summarizationTriggerFraction;
+        this.summarizationKeepMessages = summarizationKeepMessages;
+        this.toolArgTruncateThreshold = toolArgTruncateThreshold;
         this.tracer = tracer;
     }
 
@@ -107,16 +138,23 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
         rawMessages.addAll(state.messages());
         List<ChatMessage> patched = MessageSanitizer.patchDanglingToolCalls(rawMessages);
         MessageSanitizer.SanitizeResult sanitizeResult = MessageSanitizer.sanitizeMessages(patched, sanitizeToolMessages);
-        List<ChatMessage> messages = new ArrayList<>(sanitizeResult.messages());
-        state.loopGuardMessage().ifPresent(hint -> messages.add(UserMessage.from(hint)));
-        messages.add(UserMessage.from(
-            "Provide your final answer now as plain text. Do not call any tools."));
-        ghidra.util.Msg.debug(this, "ResponseNode input messages=" + messages.size());
+        List<ChatMessage> baseMessages = new ArrayList<>(sanitizeResult.messages());
+        state.loopGuardMessage().ifPresent(hint -> baseMessages.add(UserMessage.from(hint)));
+        baseMessages.add(UserMessage.from(FINAL_RESPONSE_INSTRUCTION));
+        ghidra.util.Msg.debug(this, "ResponseNode input messages=" + baseMessages.size());
+
+        int responseReserveTokens = MessageSummarizer.estimateTextTokens(systemPrompt)
+            + MessageSummarizer.estimateTextTokens(FINAL_RESPONSE_INSTRUCTION)
+            + MessageSummarizer.estimateTextTokens(state.loopGuardMessage().orElse(""))
+            + (shouldAttachToolSpecifications(baseMessages)
+                ? MessageSummarizer.estimateToolSpecificationTokens(toolSpecifications)
+                : 0);
 
         if (streamHandler != null) {
             streamHandler.prepareForFinalResponse();
         }
 
+        List<ChatMessage> messages = compactMessagesForRequest(baseMessages, false, responseReserveTokens);
         RunTree traceRun = beginResponseTrace(messages);
 
         if (streamingChatModel != null && streamHandler != null) {
@@ -130,6 +168,13 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
                 endResponseTraceWithError(traceRun, ce);
                 throw ce;
             } catch (RuntimeException ex) {
+                if (shouldRetryPromptTooLong(ex)) {
+                    List<ChatMessage> retryMessages = compactMessagesForRequest(baseMessages, true, responseReserveTokens);
+                    traceRun = beginResponseTrace(retryMessages);
+                    Map<String, Object> update = syncResponse(retryMessages);
+                    endResponseTrace(traceRun, update);
+                    return update;
+                }
                 ghidra.util.Msg.warn(this, "Streaming response failed, falling back to sync: " + ex.getMessage());
                 endResponseTraceWithError(traceRun, ex);
                 traceRun = beginResponseTrace(messages);
@@ -140,7 +185,17 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
                 return update;
             }
         }
-        Map<String, Object> update = syncResponse(messages);
+        Map<String, Object> update;
+        try {
+            update = syncResponse(messages);
+        } catch (RuntimeException ex) {
+            if (!shouldRetryPromptTooLong(ex)) {
+                throw ex;
+            }
+            List<ChatMessage> retryMessages = compactMessagesForRequest(baseMessages, true, responseReserveTokens);
+            traceRun = beginResponseTrace(retryMessages);
+            update = syncResponse(retryMessages);
+        }
         long elapsedMs = Math.max(0L, (System.nanoTime() - startNs) / 1_000_000L);
         ghidra.util.Msg.info(this, "ResponseNode sync-only elapsedMs=" + elapsedMs);
         endResponseTrace(traceRun, update);
@@ -292,11 +347,19 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
             List<ChatMessage> textOnlyHistory = MessageSanitizer
                 .sanitizeMessages(patched, true)
                 .messages();
-            List<ChatMessage> promptMessages = new ArrayList<>(textOnlyHistory);
-            promptMessages.add(UserMessage.from(
-                "Provide the final answer now. Return plain text only and do not call any tools. "
+            String textOnlyInstruction = "Provide the final answer now. Do not call any tools. "
                 + "Summarize what was investigated, what was found, and recommend the next concrete step "
-                + "using a different approach if the current one has not made progress."));
+                + "using a different approach if the current one has not made progress.";
+            int reservedTokens = MessageSummarizer.estimateTextTokens(textOnlyInstruction);
+            List<ChatMessage> compactedHistory = MessageSummarizer.maybeTruncate(
+                textOnlyHistory,
+                contextWindowTokens,
+                summarizationTriggerFraction,
+                summarizationKeepMessages,
+                toolArgTruncateThreshold,
+                reservedTokens);
+            List<ChatMessage> promptMessages = new ArrayList<>(compactedHistory);
+            promptMessages.add(UserMessage.from(textOnlyInstruction));
             ChatRequest textOnlyRequest = ChatRequest.builder()
                 .messages(promptMessages)
                 .build();
@@ -347,6 +410,74 @@ public class ResponseNode implements AsyncNodeActionWithConfig<CopilotDeepState>
                     && !aiMessage.toolExecutionRequests().isEmpty()) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    private List<ChatMessage> compactMessagesForRequest(
+            List<ChatMessage> messages,
+            boolean aggressiveRetry,
+            int extraReserveTokens) {
+        if (summarizer == null) {
+            return MessageSummarizer.truncateToolArgsInList(
+                messages,
+                deepAgentConfig.toolArgTruncateThreshold());
+        }
+        int reserveTokens = deepAgentConfig.requestTokenReserveTokens()
+            + (shouldAttachToolSpecifications(messages)
+                ? MessageSummarizer.estimateToolSpecificationTokens(toolSpecifications)
+                : 0)
+            + Math.max(0, extraReserveTokens)
+            + (aggressiveRetry ? deepAgentConfig.promptTooLongRetryExtraReserveTokens() : 0);
+        CopilotSummarizer.CompactionResult result = summarizer.compactMessages(
+            messages,
+            new CopilotSummarizer.CompactionRequest(
+                deepAgentConfig.contextWindowTokens(),
+                deepAgentConfig.summarizationTriggerFraction(),
+                deepAgentConfig.summarizationKeepMessages(),
+                deepAgentConfig.toolArgTruncateThreshold(),
+                reserveTokens,
+                aggressiveRetry,
+                aggressiveRetry ? 3 : 2
+            ),
+            this::showCompactionStatus
+        );
+        ghidra.util.Msg.info(this,
+            "ResponseNode compaction: aggressiveRetry=" + aggressiveRetry
+                + " compacted=" + result.compacted()
+                + " beforeTokens=" + result.estimatedTokensBefore()
+                + " afterTokens=" + result.estimatedTokensAfter()
+                + " budgetTokens=" + result.budgetTokens()
+                + " passes=" + result.passes());
+        return result.messages();
+    }
+
+    private void showCompactionStatus(String status) {
+        if (streamHandler != null) {
+            streamHandler.appendStatusLine(status);
+        }
+    }
+
+    private boolean shouldRetryPromptTooLong(Throwable throwable) {
+        return deepAgentConfig.promptTooLongCompactionRetryEnabled()
+            && isPromptTooLongError(throwable);
+    }
+
+    private boolean isPromptTooLongError(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null) {
+                String lower = message.toLowerCase(java.util.Locale.ROOT);
+                if (lower.contains("prompt is too long")
+                        || lower.contains("token limit")
+                        || lower.contains("context length")
+                        || lower.contains("input is too long")
+                        || lower.contains("tokens >")) {
+                    return true;
+                }
+            }
+            current = current.getCause();
         }
         return false;
     }

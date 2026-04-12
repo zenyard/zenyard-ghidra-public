@@ -66,11 +66,7 @@ public class CopilotMemory {
      * Returns true when approaching the token limit (at SUMMARIZATION_TRIGGER).
      */
     public boolean shouldSummarize() {
-        // TokenWindowChatMemory handles automatic eviction, but we can check
-        // if we're approaching the limit to trigger custom summarization
-        // For now, we'll let TokenWindowChatMemory handle it automatically
-        // Custom summarization logic can be added in CopilotSummarizer
-        return false; // TokenWindowChatMemory handles eviction automatically
+        return getCurrentTokenCount() >= SUMMARIZATION_TRIGGER;
     }
     
     /**
@@ -149,6 +145,10 @@ public class CopilotMemory {
      */
     public static int getSummarizationTrigger() {
         return SUMMARIZATION_TRIGGER;
+    }
+
+    public static int getMaxTokens() {
+        return MAX_TOKENS;
     }
 }
 

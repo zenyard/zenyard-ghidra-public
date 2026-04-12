@@ -3,6 +3,7 @@ package com.zenyard.ghidra.copilot.tools;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.app.cmd.function.ApplyFunctionSignatureCmd;
+import ghidra.app.cmd.function.FunctionRenameOption;
 import ghidra.app.services.DataTypeQueryService;
 import ghidra.app.util.parser.FunctionSignatureParser;
 import ghidra.program.model.data.ArchiveType;
@@ -44,7 +45,7 @@ public class SetFunctionPrototypeTool {
         this.context = context;
     }
 
-    @Tool("Set a function signature using a C-style prototype. Inputs: `address` (target function location) and `new_prototype` (for example `int foo(int x, char *y);`). Custom types must already exist in the program data type manager.")
+    @Tool("Set a function signature using a C-style prototype. This tool updates return type, parameter types/names, varargs, and preserves the current calling convention/noreturn settings, but it does not rename the function symbol. Inputs: `address` (target function location) and `new_prototype` (for example `int foo(int x, char *y);`). Custom types must already exist in the program data type manager.")
     public String setFunctionPrototype(
             @P("Function address in the current program (hex like `0x401000`).") String address,
             @P("Full C-style function prototype to apply. Include parameter names where possible; trailing semicolon is optional.") String newPrototype) {
@@ -67,12 +68,13 @@ public class SetFunctionPrototypeTool {
                 }
 
                 String prototype = newPrototype.trim();
-                if (!prototype.endsWith(";")) {
-                    prototype += ";";
+                if (prototype.endsWith(";")) {
+                    prototype = prototype.substring(0, prototype.length() - 1).trim();
                 }
 
                 int transactionId = program.startTransaction(
                     "Zenyard: Set function prototype");
+                boolean commit = false;
                 try {
                     DataTypeManager dtm = program.getDataTypeManager();
                     FunctionSignatureParser parser = new FunctionSignatureParser(
@@ -97,10 +99,23 @@ public class SetFunctionPrototypeTool {
                             + " Call getLocalTypes to see all available types.");
                     }
 
+                    // The parser only reconstructs the textual signature fields.
+                    // Preserve attributes edited outside the raw prototype text.
+                    signature.setNoReturn(function.hasNoReturn());
+                    try {
+                        signature.setCallingConvention(function.getCallingConventionName());
+                    } catch (Exception ignored) {
+                        // Leave calling convention unchanged if Ghidra rejects the current value.
+                    }
+
                     ApplyFunctionSignatureCmd cmd = new ApplyFunctionSignatureCmd(
                         function.getEntryPoint(),
                         signature,
-                        SourceType.USER_DEFINED
+                        SourceType.USER_DEFINED,
+                        false,
+                        false,
+                        null,
+                        FunctionRenameOption.NO_CHANGE
                     );
                     boolean success = cmd.applyTo(program);
                     if (!success) {
@@ -109,11 +124,22 @@ public class SetFunctionPrototypeTool {
                             "Failed to apply signature: "
                             + (statusMsg != null ? statusMsg : "unknown error"));
                     }
+                    commit = true;
                 } finally {
-                    program.endTransaction(transactionId, true);
+                    program.endTransaction(transactionId, commit);
+                }
+                String currentFunctionName = function.getName();
+                if (currentFunctionName.equals(signatureNameFromPrototype(prototype))) {
+                    return "Successfully set prototype for function at " + address
+                        + " to: " + prototype
+                        + ". Symbol name was unchanged.";
                 }
                 return "Successfully set prototype for function at " + address
-                    + " to: " + prototype;
+                    + " to: " + prototype
+                    + ". Note: function symbol name remains '" + currentFunctionName
+                    + "'. If you also want to rename it to '"
+                    + signatureNameFromPrototype(prototype)
+                    + "', call renameSymbol separately.";
             } catch (ToolExecutionException e) {
                 throw e;
             } catch (Exception e) {
@@ -265,6 +291,19 @@ public class SetFunctionPrototypeTool {
               .append(String.join(", ", suggestions)).append(".");
         }
         return sb.toString();
+    }
+
+    private String signatureNameFromPrototype(String prototype) {
+        int parenIndex = prototype.indexOf('(');
+        if (parenIndex < 0) {
+            return prototype;
+        }
+        String beforeParen = prototype.substring(0, parenIndex).trim();
+        int lastSpace = beforeParen.lastIndexOf(' ');
+        if (lastSpace < 0) {
+            return beforeParen;
+        }
+        return beforeParen.substring(lastSpace + 1).trim();
     }
 
     private void checkTypeTokens(DataTypeManager dtm, String fragment,

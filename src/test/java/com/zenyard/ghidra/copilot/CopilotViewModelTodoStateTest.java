@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test;
 class CopilotViewModelTodoStateTest {
 
     @Test
-    void todoStatuses_reflectPendingAndInProgress() {
+    void todoStatusesReflectPendingAndInProgress() {
         CopilotViewModel model = new CopilotViewModel();
 
         model.setTodos(List.of("Inspect xrefs", "Rename symbol"));
@@ -22,7 +22,7 @@ class CopilotViewModelTodoStateTest {
     }
 
     @Test
-    void finalizeTodos_marksRemainingAsCompleted() {
+    void finalizeTodosMarksRemainingAsCompleted() {
         CopilotViewModel model = new CopilotViewModel();
 
         model.setTodos(List.of("Step A", "Step B"));
@@ -35,7 +35,7 @@ class CopilotViewModelTodoStateTest {
     }
 
     @Test
-    void markFailedTodos_marksOutstandingAsFailed() {
+    void markFailedTodosMarksOutstandingAsFailed() {
         CopilotViewModel model = new CopilotViewModel();
 
         model.setTodos(List.of("Step A", "Step B"));

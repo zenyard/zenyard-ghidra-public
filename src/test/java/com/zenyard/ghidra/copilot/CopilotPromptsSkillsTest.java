@@ -12,7 +12,7 @@ import com.zenyard.ghidra.copilot.skills.SkillMetadata;
 class CopilotPromptsSkillsTest {
 
     @Test
-    void renderSkillsPrompt_includesLocationsAndSkills() {
+    void renderSkillsPromptIncludesLocationsAndSkills() {
         SkillMetadata skill = new SkillMetadata(
             "reverse-workflow",
             "Structured reverse engineering process",
