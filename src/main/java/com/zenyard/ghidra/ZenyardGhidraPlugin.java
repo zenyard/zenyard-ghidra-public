@@ -675,7 +675,7 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
         
         // UploadRevisionsTask waits for REVISIONS_QUEUED event
         UploadRevisionsTask uploadRevisionsTask = new UploadRevisionsTask(
-            tool, binariesApi, statusBarManager, program, eventDispatcher);
+            binariesApi, statusBarManager, program, eventDispatcher);
         executeBackgroundTask(uploadRevisionsTask);
     }
 

@@ -479,7 +479,7 @@ public class ZenyardService {
                     return;
                 }
                 UploadRevisionsTask uploadRevisionsTask = new UploadRevisionsTask(
-                    plugin.getTool(), api, statusBarManager, program, eventDispatcher);
+                    api, statusBarManager, program, eventDispatcher);
                 ZenyardGhidraPlugin.executeBackgroundTask(uploadRevisionsTask);
 
                 ZenyardProgramProperties props = new ZenyardProgramProperties(program);

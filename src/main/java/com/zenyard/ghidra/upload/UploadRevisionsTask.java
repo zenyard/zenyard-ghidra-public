@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -22,6 +22,7 @@ import com.zenyard.ghidra.api.generated.model.Range;
 import com.zenyard.ghidra.api.generated.model.Section;
 import com.zenyard.ghidra.events.ZenyardEvent;
 import com.zenyard.ghidra.events.EventDispatcher;
+import com.zenyard.ghidra.polling.ConnectionErrorHandler;
 import com.zenyard.ghidra.tasks.StatusBarAwareTask;
 import com.zenyard.ghidra.storage.ZenyardProgramProperties;
 import com.zenyard.ghidra.storage.SyncStatus;
@@ -30,7 +31,6 @@ import com.zenyard.ghidra.status.StatusBarManager;
 import com.zenyard.ghidra.status.StatusBarPriorities;
 import com.zenyard.ghidra.status.StatusBarState;
 import com.zenyard.ghidra.status.StatusBarViewModel;
-import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
@@ -47,9 +47,10 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
     private static final int MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10MB
     private static final String TASK_ID = "upload_revisions";
     private static final int STATUS_BAR_PRIORITY = StatusBarPriorities.UPLOAD_REVISIONS;
+    static final int MAX_RETRIES_FOR_REVISION_REQUEST = 5;
+    static final int RETRY_DELAY_MS = 3000;
     private static final ConcurrentHashMap<Program, AtomicBoolean> RUNNING_UPLOADS = new ConcurrentHashMap<>();
     
-    private final PluginTool tool;
     private final BinariesApi binariesApi;
     private final Program program;
     
@@ -63,10 +64,9 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
     private boolean isInitialUpload = false;
     private volatile boolean binaryIdAvailable = false;
     
-    public UploadRevisionsTask(PluginTool tool, BinariesApi binariesApi,
+    public UploadRevisionsTask(BinariesApi binariesApi,
                                StatusBarManager statusBarManager, Program program, EventDispatcher eventDispatcher) {
         super("Upload Revisions", true, false, false, eventDispatcher, statusBarManager, TASK_ID, STATUS_BAR_PRIORITY);
-        this.tool = tool;
         this.binariesApi = binariesApi;
         this.program = program;
     }
@@ -282,18 +282,6 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
                         statusBarManager.updateTaskStatus(TASK_ID, uploadMessage, uploadProgress, false);
                     }
                 
-                // Create revision
-                CreateRevisionParams createParams = new CreateRevisionParams();
-                createParams.setNumber(currentRevision);
-                CompletableFuture.supplyAsync(() -> {
-                    try {
-                        binariesApi.createRevision(binaryId, createParams);
-                        return null;
-                    } catch (ApiException e) {
-                        throw new RuntimeException(e);
-                    }
-                }).get();
-                
                 // Filter out invalid objects (matches IDA's _drop_invalid_objects)
                 int originalCount = revision.getObjects().size();
                 List<ModelObject> validObjects = dropInvalidObjects(revision.getObjects());
@@ -309,53 +297,7 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
                 
                 // Upload objects in chunks
                 List<List<ModelObject>> chunks = splitIntoChunks(validObjects);
-                
-                for (int i = 0; i < chunks.size(); i++) {
-                    if (monitor.isCancelled()) {
-                        return;
-                    }
-                    
-                    // Calculate progress within current revision (fine-grained progress)
-                    int chunkProgress = uploadProgress;
-                    if (chunks.size() > 1) {
-                        // Add fine-grained progress within revision (up to next revision's start)
-                        int nextRevisionProgress = (totalRevisions > 0 && revIndex + 1 < totalRevisions) 
-                            ? (int)(((revIndex + 1) / (double)totalRevisions) * 100) 
-                            : 100;
-                        int revisionRange = nextRevisionProgress - uploadProgress;
-                        chunkProgress = uploadProgress + (int)((i / (double)chunks.size()) * revisionRange);
-                    }
-                    String chunkMessage = "Uploading chunk " + (i + 1) + "/" + chunks.size() 
-                        + " of revision " + currentRevision + " (" + chunkProgress + "%)";
-                    if (statusBarManager != null) {
-                        statusBarManager.updateTaskStatus(TASK_ID, chunkMessage, chunkProgress, false);
-                    }
-                    
-                    List<ModelObject> chunk = chunks.get(i);
-                    Msg.info(this, "Zenyard: Uploading chunk " + (i + 1) + "/" + chunks.size() 
-                        + " with " + chunk.size() + " objects to revision " + currentRevision);
-                    
-                    AddObjectsToCurrentRevisionParams addParams = new AddObjectsToCurrentRevisionParams();
-                    addParams.setObjects(chunk);
-                    
-                    try {
-                        CompletableFuture.supplyAsync(() -> {
-                            try {
-                                binariesApi.addObjectsToCurrentRevision(binaryId, addParams);
-                                return null;
-                            } catch (ApiException e) {
-                                throw new RuntimeException(e);
-                            }
-                        }).get();
-                        Msg.info(this, "Zenyard: Successfully uploaded chunk " + (i + 1) + " with " + chunk.size() + " objects");
-                    } catch (Exception e) {
-                        Msg.showError(this, tool.getActiveWindow(), "Upload Error",
-                            "Failed to upload chunk " + (i + 1) + " of revision " + currentRevision 
-                            + ": " + e.getMessage(), e);
-                        throw new RuntimeException("Failed to upload chunk " + (i + 1), e);
-                    }
-                }
-                
+
                 // Finish revision (mirrors IDA: analyze_dependents = !is_initial_analysis)
                 boolean analyzeDependents = !revision.isInitialAnalysis();
                 boolean performGlobalAnalysis = revision.isPerformGlobalAnalysis();
@@ -363,7 +305,7 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
                 finishParams.setAnalyzeDependents(analyzeDependents);
                 finishParams.setSwiftOnly(false);
                 finishParams.setPerformGlobalAnalysis(performGlobalAnalysis);
-                
+
                 // Evidence log: only last revision should set performGlobalAnalysis=true.
                 if (performGlobalAnalysis) {
                     Msg.info(this, "Zenyard: Finishing revision " + currentRevision
@@ -373,7 +315,77 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
                         + ", swiftOnly=false)");
                 }
 
-                finishAndAnalyzeWithRetry(binaryId, finishParams, currentRevision, analyzeDependents, performGlobalAnalysis);
+                final int capturedRevision = currentRevision;
+                final List<List<ModelObject>> capturedChunks = chunks;
+                final int capturedUploadProgress = uploadProgress;
+                final int capturedTotalRevisions = totalRevisions;
+                final int capturedRevIndex = revIndex;
+
+                retryRevisionForever(() -> {
+                    // Create revision
+                    CreateRevisionParams createParams = new CreateRevisionParams();
+                    createParams.setNumber(capturedRevision);
+                    retryApiRequest(() -> {
+                        binariesApi.createRevision(binaryId, createParams);
+                        return null;
+                    }, "Create revision " + capturedRevision);
+
+                    // Upload chunks
+                    for (int i = 0; i < capturedChunks.size(); i++) {
+                        if (monitor.isCancelled()) {
+                            return;
+                        }
+
+                        // Calculate progress within current revision (fine-grained progress)
+                        int chunkProgress = capturedUploadProgress;
+                        if (capturedChunks.size() > 1) {
+                            int nextRevisionProgress = (capturedTotalRevisions > 0 && capturedRevIndex + 1 < capturedTotalRevisions)
+                                ? (int)(((capturedRevIndex + 1) / (double)capturedTotalRevisions) * 100)
+                                : 100;
+                            int revisionRange = nextRevisionProgress - capturedUploadProgress;
+                            chunkProgress = capturedUploadProgress + (int)((i / (double)capturedChunks.size()) * revisionRange);
+                        }
+                        String chunkMessage = "Uploading chunk " + (i + 1) + "/" + capturedChunks.size()
+                            + " of revision " + capturedRevision + " (" + chunkProgress + "%)";
+                        if (statusBarManager != null) {
+                            statusBarManager.updateTaskStatus(TASK_ID, chunkMessage, chunkProgress, false);
+                        }
+
+                        List<ModelObject> chunk = capturedChunks.get(i);
+                        Msg.info(this, "Zenyard: Uploading chunk " + (i + 1) + "/" + capturedChunks.size()
+                            + " with " + chunk.size() + " objects to revision " + capturedRevision);
+
+                        AddObjectsToCurrentRevisionParams addParams = new AddObjectsToCurrentRevisionParams();
+                        addParams.setObjects(chunk);
+                        final int chunkIndex = i + 1;
+                        retryApiRequest(() -> {
+                            binariesApi.addObjectsToCurrentRevision(binaryId, addParams);
+                            return null;
+                        }, "Upload chunk " + chunkIndex + "/" + capturedChunks.size() + " of revision " + capturedRevision);
+
+                        Msg.info(this, "Zenyard: Successfully uploaded chunk " + (i + 1) + " with " + chunk.size() + " objects");
+                    }
+
+                    // Finish revision
+                    retryApiRequest(() -> {
+                        String responseBody = null;
+                        try {
+                            binariesApi.finishAndAnalyzeCurrentRevision(binaryId, finishParams);
+                        } catch (ApiException e) {
+                            responseBody = e.getResponseBody();
+                            if (responseBody != null && responseBody.contains("No current edited revision")) {
+                                throw new IllegalStateException("No current edited revision", e);
+                            }
+                            throw e;
+                        }
+                        if (performGlobalAnalysis) {
+                            Msg.info(this, "Zenyard: Finish-and-analyze succeeded for revision " + capturedRevision
+                                + " (performGlobalAnalysis=true, analyzeDependents=" + analyzeDependents
+                                + ", swiftOnly=false)");
+                        }
+                        return null;
+                    }, "Finish revision " + capturedRevision);
+                }, () -> monitor.isCancelled() || shouldStop);
 
                 // Clear dirty list for objects in this revision after successful upload
                 markUploadedObjects(revision, syncStatusStorage);
@@ -403,8 +415,7 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
             }
             });
             } catch (Exception e) {
-                Msg.showError(this, tool.getActiveWindow(), "Upload Error",
-                    "Failed to upload revisions: " + e.getMessage(), e);
+                Msg.error(this, "Failed to upload revisions: " + e.getMessage(), e);
                 throw new RuntimeException("Failed to upload revisions", e);
             }
         } finally {
@@ -414,57 +425,76 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
         }
     }
 
-    private void finishAndAnalyzeWithRetry(
-            UUID binaryId,
-            FinishAndAnalyzeCurrentRevisionBody finishParams,
-            int currentRevision,
-            boolean analyzeDependents,
-            boolean performGlobalAnalysis) {
-        int attempt = 0;
-        int maxAttempts = 3;
-        while (true) {
-            attempt++;
-            try {
-                binariesApi.finishAndAnalyzeCurrentRevision(binaryId, finishParams);
-                if (performGlobalAnalysis) {
-                    Msg.info(this, "Zenyard: Finish-and-analyze succeeded for revision " + currentRevision
-                        + " (performGlobalAnalysis=true, analyzeDependents=" + analyzeDependents
-                        + ", swiftOnly=false)");
-                }
-                return;
-            } catch (ApiException e) {
-                String responseBody = e.getResponseBody();
-                Msg.warn(this, "Finish and analyze failed for revision " + currentRevision
-                    + " (attempt " + attempt + "/" + maxAttempts
-                    + ", code=" + e.getCode()
-                    + ", performGlobalAnalysis=" + performGlobalAnalysis
-                    + ", analyzeDependents=" + analyzeDependents
-                    + ", swiftOnly=false): "
-                    + (responseBody != null ? responseBody : e.getMessage()));
-                if (responseBody != null && responseBody.contains("No current edited revision")) {
-                    throw new RuntimeException(e);
-                }
-                if (attempt >= maxAttempts || e.getCode() < 500) {
-                    throw new RuntimeException(e);
-                }
-            } catch (Exception e) {
-                if (attempt >= maxAttempts) {
-                    throw new RuntimeException(e);
-                }
-                Msg.warn(this, "Finish and analyze error for revision " + currentRevision
-                    + " (attempt " + attempt + "/" + maxAttempts
-                    + ", performGlobalAnalysis=" + performGlobalAnalysis
-                    + ", analyzeDependents=" + analyzeDependents
-                    + ", swiftOnly=false): " + e.getMessage());
-            }
+    @FunctionalInterface
+    interface ThrowingRunnable {
+        void run() throws Exception;
+    }
 
+    /**
+     * Retries a single API call up to MAX_RETRIES_FOR_REVISION_REQUEST times for temporary errors
+     * (5xx / network), re-raising immediately for non-temporary errors (4xx etc.).
+     * Mirrors IDA's _retry_api_request_forever with max_retries=5.
+     */
+    static <T> T retryApiRequest(Callable<T> request, String description) throws Exception {
+        return retryApiRequest(request, description, RETRY_DELAY_MS);
+    }
+
+    static <T> T retryApiRequest(Callable<T> request, String description, int retryDelayMs) throws Exception {
+        int attempts = 0;
+        while (true) {
             try {
-                Thread.sleep(500L * attempt);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException("Interrupted during finish-and-analyze retry", ie);
+                return request.call();
+            } catch (Exception e) {
+                if (isTemporaryError(e)) {
+                    attempts++;
+                    Msg.warn(UploadRevisionsTask.class, "Zenyard: " + description + " failed (attempt " + attempts
+                        + "/" + MAX_RETRIES_FOR_REVISION_REQUEST + "): " + e.getMessage());
+                    if (attempts >= MAX_RETRIES_FOR_REVISION_REQUEST) throw e;
+                    Thread.sleep(retryDelayMs);
+                } else {
+                    throw e;
+                }
             }
         }
+    }
+
+    /**
+     * Retries an entire revision upload sequence (create→add objects→finish) indefinitely for
+     * temporary errors, re-raising immediately for non-temporary errors. Respects cancellation.
+     * Mirrors IDA's outer _retry_api_request_forever with no max_retries.
+     *
+     * @param isStopped supplier that returns true when the loop should exit (cancelled or paused)
+     */
+    static void retryRevisionForever(ThrowingRunnable action,
+            java.util.function.BooleanSupplier isStopped) throws Exception {
+        retryRevisionForever(action, isStopped, RETRY_DELAY_MS);
+    }
+
+    static void retryRevisionForever(ThrowingRunnable action,
+            java.util.function.BooleanSupplier isStopped, int retryDelayMs) throws Exception {
+        while (true) {
+            if (isStopped.getAsBoolean()) return;
+            try {
+                action.run();
+                return;
+            } catch (Exception e) {
+                if (isStopped.getAsBoolean()) return;
+                if (isTemporaryError(e)) {
+                    Msg.warn(UploadRevisionsTask.class, "Zenyard: Revision upload failed, retrying: " + e.getMessage());
+                    Thread.sleep(retryDelayMs);
+                } else {
+                    throw e;
+                }
+            }
+        }
+    }
+
+    /**
+     * Returns true for transient server-side (5xx) and network errors, matching IDA's
+     * is_temporary_error() which returns True for ServiceException and ClientConnectionError.
+     */
+    static boolean isTemporaryError(Exception e) {
+        return ConnectionErrorHandler.isConnectionError(e);
     }
 
     private void markUploadedObjects(QueueRevisionsTask.Revision revision, SyncStatusStorage syncStatusStorage) {

@@ -27,8 +27,10 @@ import com.zenyard.ghidra.api.generated.model.Event;
 import com.zenyard.ghidra.api.generated.model.ExtraDetails;
 import com.zenyard.ghidra.api.generated.model.InitialAnalysisDismissedEvent;
 import com.zenyard.ghidra.api.generated.model.OSEnum;
+import com.zenyard.ghidra.api.generated.model.PausedDialgBoxUserResponse;
 import com.zenyard.ghidra.api.generated.model.PluginLoadedEvent;
 import com.zenyard.ghidra.api.generated.model.QuotaExhaustedDialogShownEvent;
+import com.zenyard.ghidra.api.generated.model.QuotaExhaustedDialogShownReason;
 import com.zenyard.ghidra.api.generated.model.TrackEventRequest;
 import com.zenyard.ghidra.config.PluginConfiguration;
 import com.zenyard.ghidra.events.EventConsumer;
@@ -44,6 +46,7 @@ public class AnalyticsEventConsumer implements EventConsumer {
     private static final Set<EventType> SUBSCRIBED_TYPES = EnumSet.of(
         EventType.DATABASE_OPENED,
         EventType.INITIAL_DIALOG_CONFIRMED,
+        EventType.BINARY_ID_AVAILABLE,
         EventType.INITIAL_DIALOG_DISMISSED,
         EventType.ANALYSIS_RERUN_REQUESTED,
         EventType.COPILOT_OPENED,
@@ -56,9 +59,18 @@ public class AnalyticsEventConsumer implements EventConsumer {
     private final AnalyticsApi analyticsApi;
     private final ExtraDetails environment;
     private final boolean analyticsEnabled;
+    /** Buffered pending event waiting for a binary ID to arrive. */
+    private volatile AnalysisAcceptedEvent pendingAnalysisEvent = null;
 
     public AnalyticsEventConsumer(ApiClient apiClient, PluginConfiguration config) {
         this.analyticsApi = new AnalyticsApi(apiClient);
+        this.analyticsEnabled = config.isAnalyticsEnabled();
+        this.environment = buildEnvironment(config);
+    }
+
+    /** Package-private constructor for tests — allows injecting a stub {@link AnalyticsApi}. */
+    AnalyticsEventConsumer(AnalyticsApi analyticsApi, PluginConfiguration config) {
+        this.analyticsApi = analyticsApi;
         this.analyticsEnabled = config.isAnalyticsEnabled();
         this.environment = buildEnvironment(config);
     }
@@ -136,6 +148,9 @@ public class AnalyticsEventConsumer implements EventConsumer {
             case INITIAL_DIALOG_CONFIRMED:
                 handleInitialDialogConfirmed(event);
                 break;
+            case BINARY_ID_AVAILABLE:
+                handleBinaryIdAvailable(event);
+                break;
             case INITIAL_DIALOG_DISMISSED:
                 send(new Event(new InitialAnalysisDismissedEvent()
                     .timestamp(nowSeconds())));
@@ -159,8 +174,7 @@ public class AnalyticsEventConsumer implements EventConsumer {
                     .timestamp(nowSeconds())));
                 break;
             case QUOTA_EXHAUSTED_DIALOG_SHOWN:
-                send(new Event(new QuotaExhaustedDialogShownEvent()
-                    .timestamp(nowSeconds())));
+                handleQuotaExhaustedDialogShown(event);
                 break;
             default:
                 break;
@@ -207,8 +221,50 @@ public class AnalyticsEventConsumer implements EventConsumer {
         if (binaryIdStr != null && !binaryIdStr.isBlank()) {
             try {
                 apiEvent.binaryId(UUID.fromString(binaryIdStr));
+                send(new Event(apiEvent));
+                return;
             } catch (IllegalArgumentException ignored) {
                 // skip invalid UUID
+            }
+        }
+
+        // No binary ID yet — buffer and wait for BINARY_ID_AVAILABLE
+        pendingAnalysisEvent = apiEvent;
+    }
+
+    private void handleBinaryIdAvailable(ZenyardEvent event) {
+        AnalysisAcceptedEvent pending = pendingAnalysisEvent;
+        if (pending == null) {
+            return;
+        }
+        pendingAnalysisEvent = null;
+
+        UUID binaryId = event.getPayloadValue("binaryId", UUID.class);
+        if (binaryId != null) {
+            pending.binaryId(binaryId);
+        }
+        send(new Event(pending));
+    }
+
+    private void handleQuotaExhaustedDialogShown(ZenyardEvent event) {
+        String showReasonStr = event.getPayloadValue("show_reason", String.class);
+        String userResponseStr = event.getPayloadValue("user_response", String.class);
+
+        QuotaExhaustedDialogShownEvent apiEvent = new QuotaExhaustedDialogShownEvent()
+            .timestamp(nowSeconds());
+
+        if (showReasonStr != null) {
+            try {
+                apiEvent.showReason(QuotaExhaustedDialogShownReason.fromValue(showReasonStr));
+            } catch (IllegalArgumentException ignored) {
+                // skip unknown enum value
+            }
+        }
+        if (userResponseStr != null) {
+            try {
+                apiEvent.userResponse(PausedDialgBoxUserResponse.fromValue(userResponseStr));
+            } catch (IllegalArgumentException ignored) {
+                // skip unknown enum value
             }
         }
         send(new Event(apiEvent));
