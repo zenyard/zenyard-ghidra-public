@@ -113,7 +113,7 @@ public class AnalyticsEventConsumer implements EventConsumer {
     }
 
     private static String readPluginVersion() {
-        try (InputStream is = AnalyticsEventConsumer.class.getResourceAsStream("/extension.properties")) {
+        try (InputStream is = AnalyticsEventConsumer.class.getResourceAsStream("/com/zenyard/ghidra/extension.properties")) {
             if (is == null) {
                 return "unknown";
             }

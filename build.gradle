@@ -371,6 +371,14 @@ sourceSets {
     }
 }
 
+ // Make extension.properties available on the classpath for version reading at runtime
+ processResources {
+     from(projectDir) {
+         include 'extension.properties'
+         into 'com/zenyard/ghidra'
+     }
+ }
+
 // Note: downloadOpenApiSpecFromCluster is available but not part of the default build flow
 // Run it explicitly with: ./gradlew downloadOpenApiSpecFromCluster
 
