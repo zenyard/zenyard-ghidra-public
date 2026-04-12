@@ -3,6 +3,7 @@ package com.zenyard.ghidra.util;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import com.zenyard.ghidra.api.generated.model.AddressDetail;
@@ -14,14 +15,20 @@ import com.zenyard.ghidra.api.generated.model.LVarDetail;
 import com.zenyard.ghidra.api.generated.model.Range;
 import com.zenyard.ghidra.api.generated.model.RangeDetail;
 import com.zenyard.ghidra.api.generated.model.Thunk;
+import ghidra.app.decompiler.ClangFuncNameToken;
 import ghidra.app.decompiler.ClangToken;
 import ghidra.app.decompiler.ClangTokenGroup;
+import ghidra.app.decompiler.ClangVariableToken;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
+import ghidra.program.model.pcode.HighGlobal;
+import ghidra.program.model.pcode.HighLocal;
 import ghidra.program.model.pcode.HighParam;
 import ghidra.program.model.pcode.HighVariable;
+import ghidra.program.model.pcode.Varnode;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressSpace;
 import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Instruction;
@@ -39,6 +46,9 @@ public class FunctionSerializer {
     
     private static final int MAX_INSTRUCTIONS_TO_DECOMPILE = 0x20000;
     private static final Pattern MANGLED_NAME_CLEANUP_REGEX = Pattern.compile("^(?:j_)+|(?:_\\d+)+$");
+    /** Ghidra default labels: DAT_<hex> globals, FUN_<hex> functions — used for addr fallback when min-address is ambiguous. */
+    private static final Pattern GHIDRA_HEX_DAT_LABEL = Pattern.compile("^DAT_([0-9a-fA-F]+)$");
+    private static final Pattern GHIDRA_HEX_FUN_LABEL = Pattern.compile("^FUN_([0-9a-fA-F]+)$");
     
     /**
      * Serialize a function to API Function model.
@@ -109,7 +119,7 @@ public class FunctionSerializer {
                         + (results.getErrorMessage() != null ? results.getErrorMessage() : "Unknown error"));
                 }
                 
-                CodeAndRanges car = extractCodeAndRanges(results);
+                CodeAndRanges car = extractCodeAndRanges(results, program);
                 decompiledCode = car.code();
                 ranges = car.ranges();
 
@@ -254,14 +264,14 @@ public class FunctionSerializer {
 
     record TokenData(String text, RangeDetail detail) {}
 
-    private static CodeAndRanges extractCodeAndRanges(DecompileResults results) {
+    private static CodeAndRanges extractCodeAndRanges(DecompileResults results, Program program) {
         ClangTokenGroup markup = results.getCCodeMarkup();
         List<TokenData> tokenData = new ArrayList<>();
 
         Iterator<ClangToken> it = markup.tokenIterator(true);
         while (it.hasNext()) {
             ClangToken token = it.next();
-            tokenData.add(new TokenData(token.getText(), buildRangeDetail(token)));
+            tokenData.add(new TokenData(token.getText(), buildRangeDetail(token, program)));
         }
 
         return buildCodeAndRanges(tokenData);
@@ -290,11 +300,60 @@ public class FunctionSerializer {
         return new CodeAndRanges(code.toString(), ranges);
     }
 
-    private static RangeDetail buildRangeDetail(ClangToken token) {
+    /**
+     * Resolves {@link RangeDetail} for a decompiler token.
+     * <p>
+     * Mirrors IDA's {@code _detail_from_ctree_item} + {@code _narrow_range} approach:
+     * only <b>variable tokens</b> and <b>function-name tokens</b> produce ranges.
+     * Operators ({@code =}, {@code !=}, {@code *}, {@code +}), keywords
+     * ({@code if}, {@code return}, {@code while}), syntax ({@code (}, {@code ,}),
+     * types, comments, and labels are all silently dropped.
+     * <ul>
+     *   <li>{@link ClangVariableToken} → {@link LVarDetail} for locals/args,
+     *       {@link AddressDetail} for globals ({@link HighGlobal} or {@code DAT_…}).</li>
+     *   <li>{@link ClangFuncNameToken} → {@link AddressDetail} for the callee's entry
+     *       point. Library/external functions are excluded.</li>
+     * </ul>
+     */
+    private static RangeDetail buildRangeDetail(ClangToken token, Program program) {
+        if (token instanceof ClangVariableToken) {
+            return buildVariableTokenRange(token, program);
+        }
+        if (token instanceof ClangFuncNameToken) {
+            return buildFuncCallRange((ClangFuncNameToken) token, program);
+        }
+        return null;
+    }
+
+    /**
+     * Range for a {@link ClangVariableToken}: locals/args → {@link LVarDetail},
+     * globals → {@link AddressDetail}.
+     */
+    private static RangeDetail buildVariableTokenRange(ClangToken token, Program program) {
         HighVariable highVar = token.getHighVariable();
-        if (highVar != null) {
-            String name = highVar.getName();
-            if (name == null || name.isEmpty()) return null;
+        if (highVar == null) {
+            return null;
+        }
+        String name = highVar.getName();
+        if (name == null || name.isEmpty()) {
+            return null;
+        }
+
+        if (highVar instanceof HighGlobal) {
+            Address globalAddr = globalAddressFromHighGlobal((HighGlobal) highVar);
+            if (globalAddr != null) {
+                return buildAddressDetailRange(globalAddr);
+            }
+            return null;
+        }
+
+        if (highVar instanceof HighLocal) {
+            if (isGhidraGlobalDataStyleName(name)) {
+                Address dataAddr = addressFromParsedHexLabel(program, name);
+                if (dataAddr != null) {
+                    return buildAddressDetailRange(dataAddr);
+                }
+            }
             LVarDetail lvar = new LVarDetail();
             lvar.setName(name);
             lvar.setIsArg(highVar instanceof HighParam);
@@ -303,16 +362,107 @@ public class FunctionSerializer {
             return detail;
         }
 
-        ghidra.program.model.address.Address addr = token.getMinAddress();
-        if (addr != null) {
-            AddressDetail addrDetail = new AddressDetail();
-            addrDetail.setAddress(com.zenyard.ghidra.api.AddressHelper.fromAddress(addr));
-            RangeDetail detail = new RangeDetail();
-            detail.setActualInstance(addrDetail);
-            return detail;
+        return null;
+    }
+
+    /**
+     * Range for a {@link ClangFuncNameToken}: resolves the callee's entry point.
+     * Returns {@code null} for library/external functions (thunks to externals)
+     * and for the function's own declaration name (where no pcode CALL op exists).
+     */
+    private static RangeDetail buildFuncCallRange(ClangFuncNameToken token, Program program) {
+        Address minAddr = token.getMinAddress();
+        if (minAddr == null) {
+            return null;
+        }
+        FunctionManager fm = program.getFunctionManager();
+        ReferenceManager rm = program.getReferenceManager();
+
+        Reference[] refs = rm.getReferencesFrom(minAddr);
+        for (Reference ref : refs) {
+            if (ref.getReferenceType().isCall()) {
+                Address to = ref.getToAddress();
+                ghidra.program.model.listing.Function callee = fm.getFunctionAt(to);
+                if (callee == null) {
+                    callee = fm.getFunctionContaining(to);
+                }
+                if (callee != null) {
+                    if (isLibraryFunction(callee)) {
+                        return null;
+                    }
+                    return buildAddressDetailRange(callee.getEntryPoint());
+                }
+            }
+        }
+
+        String text = token.getText();
+        if (text != null) {
+            Matcher m = GHIDRA_HEX_FUN_LABEL.matcher(text.trim());
+            if (m.matches()) {
+                Address funAddr = defaultSpaceAddressFromHex(program, m.group(1));
+                if (funAddr != null) {
+                    ghidra.program.model.listing.Function f = fm.getFunctionAt(funAddr);
+                    if (f != null) {
+                        if (isLibraryFunction(f)) {
+                            return null;
+                        }
+                        return buildAddressDetailRange(f.getEntryPoint());
+                    }
+                }
+            }
         }
 
         return null;
+    }
+
+    private static boolean isLibraryFunction(ghidra.program.model.listing.Function func) {
+        if (func.isExternal()) {
+            return true;
+        }
+        if (func.isThunk()) {
+            ghidra.program.model.listing.Function thunked = func.getThunkedFunction(true);
+            return thunked != null && thunked.isExternal();
+        }
+        return false;
+    }
+
+    private static boolean isGhidraGlobalDataStyleName(String name) {
+        return name.regionMatches(true, 0, "DAT_", 0, 4);
+    }
+
+    private static Address addressFromParsedHexLabel(Program program, String label) {
+        if (label == null) {
+            return null;
+        }
+        String t = label.trim();
+        Matcher m = GHIDRA_HEX_DAT_LABEL.matcher(t);
+        if (m.matches()) {
+            return defaultSpaceAddressFromHex(program, m.group(1));
+        }
+        return null;
+    }
+
+    private static Address defaultSpaceAddressFromHex(Program program, String hexDigits) {
+        try {
+            long offset = Long.parseUnsignedLong(hexDigits, 16);
+            AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
+            return space.getAddress(offset);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static Address globalAddressFromHighGlobal(HighGlobal hg) {
+        Varnode rep = hg.getRepresentative();
+        return rep != null ? rep.getAddress() : null;
+    }
+
+    private static RangeDetail buildAddressDetailRange(Address programAddress) {
+        AddressDetail addrDetail = new AddressDetail();
+        addrDetail.setAddress(com.zenyard.ghidra.api.AddressHelper.fromAddress(programAddress));
+        RangeDetail detail = new RangeDetail();
+        detail.setActualInstance(addrDetail);
+        return detail;
     }
 
     /**
