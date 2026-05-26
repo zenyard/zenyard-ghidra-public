@@ -34,10 +34,11 @@ public final class AppliedInferenceCounts {
     public static AppliedInferenceCounts fromRawCounts(Map<String, Integer> counts) {
         int functionOverview = counts.getOrDefault("FunctionOverview", 0);
         int nameCount = counts.getOrDefault("Name", 0);
+        int globalVariableTypeCount = counts.getOrDefault("GlobalVariableType", 0);
 
         return new AppliedInferenceCounts(
             functionOverview,
-            Math.max(nameCount - functionOverview, 0),
+            Math.max(nameCount - functionOverview, 0) + globalVariableTypeCount,
             counts.getOrDefault("SwiftFunction", 0),
             counts.getOrDefault("ParameterType", 0) + counts.getOrDefault("ReturnType", 0),
             counts.getOrDefault("StructDefinition", 0)

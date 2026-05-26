@@ -97,14 +97,43 @@ public class SyncStatusStorage {
     }
     
     /**
+     * Mark all given addresses dirty in a single transaction.
+     * Replaces the dirty-address list in one write instead of N incremental rewrites.
+     */
+    public void bulkMarkAllDirty(java.util.Collection<Address> addresses) {
+        SyncStatusData template = new SyncStatusData();
+        template.dirty = true;
+        String statusJson = gson.toJson(template);
+
+        Set<String> dirtyStrings = new HashSet<>();
+        java.util.Map<String, String> entries = new java.util.HashMap<>(addresses.size() + 1);
+        for (Address address : addresses) {
+            entries.put(buildKey(address), statusJson);
+            dirtyStrings.add(address.toString());
+        }
+        entries.put(DIRTY_LIST_KEY, gson.toJson(dirtyStrings));
+
+        properties.setStrings(entries);
+    }
+
+    /**
      * Mark an address as dirty.
      */
     public void markDirty(Address address) {
+        markDirty(address, true);
+    }
+
+    /**
+     * Mark an address as dirty, optionally suppressing per-address log lines (e.g. bulk initial sync).
+     */
+    public void markDirty(Address address, boolean logMessage) {
         Optional<SyncStatus> current = getSyncStatus(address);
         SyncStatus updated = current.orElse(new SyncStatus())
             .withDirty(true);
         setSyncStatus(address, updated);
-        Msg.info(this, "Marked address " + address + " as dirty");
+        if (logMessage) {
+            Msg.info(this, "Marked address " + address + " as dirty");
+        }
     }
     
     /**

@@ -11,6 +11,8 @@ import com.zenyard.ghidra.api.generated.ApiException;
 import com.zenyard.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.ghidra.api.generated.api.UserApi;
 import com.zenyard.ghidra.api.generated.model.BinaryDetails;
+import com.zenyard.ghidra.api.generated.model.Decompiler;
+import com.zenyard.ghidra.api.generated.model.DecompilerType;
 import com.zenyard.ghidra.api.generated.model.OriginalLanguages;
 import com.zenyard.ghidra.api.generated.model.PostBinaryBody;
 import com.zenyard.ghidra.api.generated.model.PostBinaryResponse;
@@ -22,8 +24,13 @@ import com.zenyard.ghidra.storage.ZenyardProgramProperties;
 import com.zenyard.ghidra.status.StatusBarManager;
 import com.zenyard.ghidra.status.StatusBarPriorities;
 import com.zenyard.ghidra.util.BinarySizeLimitGate;
+import ghidra.app.util.opinion.MachoLoader;
+import ghidra.framework.Application;
 import ghidra.framework.plugintool.PluginTool;
+import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.mem.Memory;
+import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
 
@@ -222,6 +229,19 @@ public class RegisterBinaryTask extends StatusBarAwareTask {
                     details.setInputFileSha256(inputFileSha256);
                 }
 
+                String ghidraVersion;
+                try {
+                    ghidraVersion = Application.getApplicationVersion();
+                } catch (Exception e) {
+                    ghidraVersion = null;
+                }
+                Decompiler decompiler = new Decompiler();
+                decompiler.setType(DecompilerType.GHIDRA);
+                if (ghidraVersion != null) {
+                    decompiler.setVersion(ghidraVersion);
+                }
+                details.setDecompiler(decompiler);
+
                 // Create binary
                 PostBinaryBody body = new PostBinaryBody();
                 body.setName(binaryName);
@@ -360,20 +380,103 @@ public class RegisterBinaryTask extends StatusBarAwareTask {
         return false;
     }
     
+    // Mach-O constants
+    private static final int LC_BUILD_VERSION = 0x32;
+    private static final int MACHO_MAGIC_LE = 0xFEEDFACF;  // 64-bit little-endian
+    private static final int MACHO_MAGIC_BE = 0xCFFAEDFE;  // 64-bit big-endian
+    private static final Map<Integer, String> MACHO_PLATFORM_MAP = new HashMap<>();
+    static {
+        MACHO_PLATFORM_MAP.put(1, "macos");
+        MACHO_PLATFORM_MAP.put(2, "ios");
+        MACHO_PLATFORM_MAP.put(3, "tvos");
+        MACHO_PLATFORM_MAP.put(4, "watchos");
+        MACHO_PLATFORM_MAP.put(6, "ios");   // iOS simulator
+        MACHO_PLATFORM_MAP.put(7, "tvos");  // tvOS simulator
+        MACHO_PLATFORM_MAP.put(8, "watchos"); // watchOS simulator
+    }
+
     /**
-     * Extract platform from program (simplified).
+     * Returns a two-element array [platform, osVersion] parsed from the Mach-O
+     * LC_BUILD_VERSION load command embedded in the program's memory, or
+     * [null, null] if the data cannot be found or parsed.
+     */
+    private String[] extractMachoPlatformAndOsVersion() {
+        try {
+            if (!MachoLoader.MACH_O_NAME.equals(program.getExecutableFormat())) {
+                return new String[]{null, null};
+            }
+
+            Memory memory = program.getMemory();
+            Address imageBase = program.getImageBase();
+
+            // Read Mach-O magic to determine endianness
+            int magic = memory.getInt(imageBase);
+            boolean littleEndian = (magic == MACHO_MAGIC_LE);
+            if (magic != MACHO_MAGIC_LE && magic != MACHO_MAGIC_BE) {
+                return new String[]{null, null};
+            }
+
+            // Mach-O 64-bit header: magic(4) cputype(4) cpusubtype(4) filetype(4)
+            //                        ncmds(4) sizeofcmds(4) flags(4) reserved(4)
+            int ncmds = readInt(memory, imageBase.add(16), littleEndian);
+            long cmdOffset = 32; // header size for 64-bit Mach-O
+
+            for (int i = 0; i < ncmds; i++) {
+                Address cmdAddr = imageBase.add(cmdOffset);
+                int cmd = readInt(memory, cmdAddr, littleEndian);
+                int cmdsize = readInt(memory, cmdAddr.add(4), littleEndian);
+
+                if (cmd == LC_BUILD_VERSION) {
+                    // LC_BUILD_VERSION layout:
+                    //   cmd(4) cmdsize(4) platform(4) minos(4) sdk(4) ntools(4)
+                    int platformVal = readInt(memory, cmdAddr.add(8), littleEndian);
+                    int minosPacked = readInt(memory, cmdAddr.add(12), littleEndian);
+
+                    String platform = MACHO_PLATFORM_MAP.get(platformVal);
+                    String osVersion = unpackMachoVersion(minosPacked);
+                    return new String[]{platform, osVersion};
+                }
+
+                if (cmdsize <= 0) break;
+                cmdOffset += cmdsize;
+            }
+        } catch (Exception e) {
+            Msg.debug(this, "Could not extract Mach-O platform/os_version: " + e.getMessage());
+        }
+        return new String[]{null, null};
+    }
+
+    private int readInt(Memory memory, Address addr, boolean littleEndian) throws MemoryAccessException {
+        byte[] bytes = new byte[4];
+        memory.getBytes(addr, bytes);
+        if (littleEndian) {
+            return ((bytes[3] & 0xFF) << 24) | ((bytes[2] & 0xFF) << 16)
+                 | ((bytes[1] & 0xFF) << 8)  |  (bytes[0] & 0xFF);
+        } else {
+            return ((bytes[0] & 0xFF) << 24) | ((bytes[1] & 0xFF) << 16)
+                 | ((bytes[2] & 0xFF) << 8)  |  (bytes[3] & 0xFF);
+        }
+    }
+
+    private String unpackMachoVersion(int packed) {
+        int major = (packed >> 16) & 0xFFFF;
+        int minor = (packed >> 8) & 0xFF;
+        int patch = packed & 0xFF;
+        return major + "." + minor + "." + patch;
+    }
+
+    /**
+     * Extract platform from program's Mach-O LC_BUILD_VERSION load command.
      */
     private String extractPlatform() {
-        // TODO: Implement platform extraction (iOS/macOS detection)
-        // For now, return null
-        return null;
+        return extractMachoPlatformAndOsVersion()[0];
     }
-    
+
     /**
-     * Extract OS version from program (simplified).
+     * Extract SDK/OS version from program's Mach-O LC_BUILD_VERSION load command.
      */
     private String extractOsVersion() {
-        return null;
+        return extractMachoPlatformAndOsVersion()[1];
     }
     
     /**

@@ -521,6 +521,14 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
                     StatusBarPriorities.WAITING_FOR_GHIDRA);
                 statusBarManager.updateTaskStatus(WAITING_FOR_GHIDRA_TASK_ID, "Waiting for Ghidra", null, true);
             }
+            // FirstTimeAnalyzedPluginEvent is a one-shot and may be missed if it
+            // fired before this plugin subscribed (cold start / install with an
+            // open program). Mirror IDA's MonitorInitialAnalysisTask: poll
+            // AutoAnalysisManager in the background as an independent completion
+            // path. handleAnalysisComplete() is idempotent so a race with the
+            // PluginEvent path is harmless. Safe to schedule now that
+            // enableTrackingAfterInitialization() no longer blocks the EDT.
+            scheduleInitialAnalysisCompletionMonitor(program);
         } else if (trackChangesTaskManager != null) {
             // Analysis already complete from a previous session.
             // Defer enabling the change tracker until Ghidra's auto-analysis on
@@ -666,7 +674,7 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
         // Start upload tasks - they will wait for events
         // UploadOriginalFilesTask waits for BINARY_REGISTERED event
         UploadOriginalFilesTask uploadFilesTask = new UploadOriginalFilesTask(
-            tool, binariesApi, statusBarManager, program, eventDispatcher);
+            tool, binariesApi, apiClient, statusBarManager, program, eventDispatcher);
         executeBackgroundTask(uploadFilesTask);
         
         QueueRevisionsTask queueRevisionsTask = new QueueRevisionsTask(
@@ -742,10 +750,10 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
         List<com.zenyard.ghidra.util.ObjectGraph.Symbol> symbols = 
             com.zenyard.ghidra.util.ObjectReader.getAllObjectSymbols(program);
         
-        // Mark all as dirty
         for (com.zenyard.ghidra.util.ObjectGraph.Symbol symbol : symbols) {
-            syncStatusStorage.markDirty(symbol.getAddress());
+            syncStatusStorage.markDirty(symbol.getAddress(), false);
         }
+        Msg.info(this, "Marked " + symbols.size() + " object addresses as dirty for initial sync");
         
         // Set database_dirty flag
         ZenyardProgramProperties props = new ZenyardProgramProperties(program);
@@ -781,6 +789,63 @@ public class ZenyardGhidraPlugin extends ProgramPlugin implements EventConsumer 
                     Msg.info(ZenyardGhidraPlugin.this,
                         "Change tracking enabled after auto-analysis completed");
                 }
+            }
+        };
+        executeBackgroundTask(task);
+    }
+
+    /**
+     * Background monitor that completes the initial-analysis flow when Ghidra's
+     * auto-analysis finishes, independent of FirstTimeAnalyzedPluginEvent. The
+     * PluginEvent is a one-shot — if it fires before this plugin's listener is
+     * wired up (cold start, install during open program, etc.) it is lost, and
+     * the status bar's "Waiting for Ghidra" task never gets unregistered.
+     *
+     * Mirrors decompai_ida/monitor_initial_analysis_task.py, which polls
+     * ida_auto.auto_is_ok and sets runtime_status.initial_analysis_complete.
+     *
+     * Thread-safety: runs entirely on a background thread. The final
+     * handleAnalysisComplete() call is dispatched via Swing.runLater, which is
+     * safe now that enableTrackingAfterInitialization() moves its
+     * Program.flushEvents() to a background thread internally.
+     */
+    private void scheduleInitialAnalysisCompletionMonitor(Program program) {
+        Task task = new Task("Zenyard Initial Analysis Monitor", false, false, false) {
+            @Override
+            public void run(TaskMonitor monitor) {
+                try {
+                    AutoAnalysisManager analysisManager =
+                        AutoAnalysisManager.getAnalysisManager(program);
+                    // waitForAnalysis returns immediately when no analysis is in
+                    // progress, so loop until Ghidra has actually marked the
+                    // program analyzed. Bounded sleep gives the program time to
+                    // close cleanly and lets the monitor observe cancellation.
+                    while (!program.isClosed() && !monitor.isCancelled()) {
+                        analysisManager.waitForAnalysis(60_000, monitor);
+                        if (program.isClosed() || monitor.isCancelled()) {
+                            return;
+                        }
+                        if (GhidraProgramUtilities.isAnalyzed(program)) {
+                            break;
+                        }
+                        try {
+                            Thread.sleep(500);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            return;
+                        }
+                    }
+                } catch (Exception e) {
+                    Msg.warn(ZenyardGhidraPlugin.this,
+                        "Initial analysis monitor failed: " + e.getMessage());
+                    return;
+                }
+                if (program.isClosed() || monitor.isCancelled()) {
+                    return;
+                }
+                Msg.info(ZenyardGhidraPlugin.this,
+                    "Initial analysis observed complete via AutoAnalysisManager monitor");
+                Swing.runLater(() -> handleAnalysisComplete(program));
             }
         };
         executeBackgroundTask(task);

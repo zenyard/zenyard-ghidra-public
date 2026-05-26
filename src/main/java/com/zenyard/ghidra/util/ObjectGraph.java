@@ -131,7 +131,9 @@ public class ObjectGraph {
     
     /**
      * Add dependencies for a global variable.
-     * If function A references global variable G, then A is a dependency of G.
+     * If function A references global variable G, then G is a dependency of A
+     * (globals must be uploaded before the functions that reference them, so
+     * analysis actors can see them when analyzing the function).
      */
     private static void addGlobalVariableDependencies(Program program, Address globalVarAddress,
                                                       Map<Address, Set<Address>> objToDependencies) {
@@ -139,7 +141,6 @@ public class ObjectGraph {
             return;
         }
         
-        // Get all references to this global variable
         ReferenceManager refManager = program.getReferenceManager();
         FunctionManager funcManager = program.getFunctionManager();
         
@@ -150,9 +151,8 @@ public class ObjectGraph {
             if (accessingFunction != null) {
                 Address funcAddress = accessingFunction.getEntryPoint();
                 
-                // Add function as dependency if it's in our graph
                 if (objToDependencies.containsKey(funcAddress)) {
-                    objToDependencies.get(globalVarAddress).add(funcAddress);
+                    objToDependencies.get(funcAddress).add(globalVarAddress);
                 }
             }
         }

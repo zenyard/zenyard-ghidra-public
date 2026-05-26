@@ -14,6 +14,10 @@ public class GlobalVariable extends BaseObject {
     
     @SerializedName("mangled_name")
     private String mangledName;
+
+    /** Declared size in the binary image (bytes), when known. Mirrors {@code size_bytes} in binary.py. */
+    @SerializedName("size_bytes")
+    private Integer sizeBytes;
     
     public GlobalVariable() {
         super();
@@ -41,6 +45,14 @@ public class GlobalVariable extends BaseObject {
     
     public void setMangledName(String mangledName) {
         this.mangledName = mangledName;
+    }
+
+    public Integer getSizeBytes() {
+        return sizeBytes;
+    }
+
+    public void setSizeBytes(Integer sizeBytes) {
+        this.sizeBytes = sizeBytes;
     }
 }
 

@@ -4,6 +4,7 @@ import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import com.zenyard.ghidra.events.EventDispatcher;
 import com.zenyard.ghidra.storage.SyncStatusStorage;
+import com.zenyard.ghidra.tasks.BackgroundTaskUtil;
 
 /**
  * Manages TrackChangesTask event listener registration.
@@ -80,17 +81,33 @@ public class TrackChangesTaskManager {
      * Enable change tracking after program initialization completes.
      * Flushes pending events while tracking is disabled to avoid marking
      * objects dirty during initial database/application state restoration.
+     *
+     * Thread-safety: flushEvents() synchronously dispatches every queued
+     * DomainObjectChangeEvent on the calling thread. After Ghidra's auto-analysis
+     * the queue can be enormous, so we move the flush + the post-flush state
+     * toggles to a background thread regardless of caller. Callers (EDT or
+     * background) may invoke this without risk of freezing the UI.
+     *
+     * Ordering guarantee: setIgnoreEvents(true) runs synchronously on the
+     * calling thread before this method returns, so any event arriving between
+     * the call and the background flush is still ignored.
      */
     public void enableTrackingAfterInitialization() {
         if (currentProgram == null || trackChangesTask == null) {
             return;
         }
-        trackChangesTask.setIgnoreEvents(true);
-        if (!currentProgram.isClosed()) {
-            currentProgram.flushEvents();
-        }
-        trackChangesTask.setTrackingEnabled(true);
-        trackChangesTask.setIgnoreEvents(false);
+        final Program program = currentProgram;
+        final TrackChangesTask task = trackChangesTask;
+        // Suppress events synchronously — must happen before any flush so that
+        // backlog events are not handed to the not-yet-fully-initialized tracker.
+        task.setIgnoreEvents(true);
+        BackgroundTaskUtil.execute("Zenyard: flush program events", () -> {
+            if (!program.isClosed()) {
+                program.flushEvents();
+            }
+            task.setTrackingEnabled(true);
+            task.setIgnoreEvents(false);
+        });
     }
 
     public boolean shouldProcessEvents() {

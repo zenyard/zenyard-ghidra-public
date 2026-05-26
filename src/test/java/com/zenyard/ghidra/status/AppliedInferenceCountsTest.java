@@ -16,6 +16,7 @@ class AppliedInferenceCountsTest {
         Map<String, Integer> raw = new HashMap<>();
         raw.put("FunctionOverview", 10);
         raw.put("Name", 15);
+        raw.put("GlobalVariableType", 2);
         raw.put("SwiftFunction", 3);
         raw.put("ParameterType", 4);
         raw.put("ReturnType", 2);
@@ -24,11 +25,11 @@ class AppliedInferenceCountsTest {
         AppliedInferenceCounts counts = AppliedInferenceCounts.fromRawCounts(raw);
 
         assertEquals(10, counts.getFunctions());
-        assertEquals(5, counts.getGlobalVariables()); // 15 - 10
+        assertEquals(7, counts.getGlobalVariables()); // (15 - 10) + 2
         assertEquals(3, counts.getSwiftSources());
         assertEquals(6, counts.getSignatureModifications()); // 4 + 2
         assertEquals(7, counts.getStructModifications());
-        assertEquals(31, counts.getTotal());
+        assertEquals(33, counts.getTotal());
     }
 
     @Test
@@ -36,10 +37,11 @@ class AppliedInferenceCountsTest {
         Map<String, Integer> raw = new HashMap<>();
         raw.put("FunctionOverview", 20);
         raw.put("Name", 5);
+        raw.put("GlobalVariableType", 3);
 
         AppliedInferenceCounts counts = AppliedInferenceCounts.fromRawCounts(raw);
 
-        assertEquals(0, counts.getGlobalVariables());
+        assertEquals(3, counts.getGlobalVariables());
     }
 
     @Test
@@ -99,5 +101,17 @@ class AppliedInferenceCountsTest {
         AppliedInferenceCounts counts = AppliedInferenceCounts.fromRawCounts(raw);
 
         assertEquals(5, counts.getTotal());
+    }
+
+    @Test
+    void globalVariableTypeCountsAsGlobalVariableResult() {
+        Map<String, Integer> raw = Map.of(
+            "GlobalVariableType", 4
+        );
+
+        AppliedInferenceCounts counts = AppliedInferenceCounts.fromRawCounts(raw);
+
+        assertEquals(4, counts.getGlobalVariables());
+        assertEquals(4, counts.getTotal());
     }
 }

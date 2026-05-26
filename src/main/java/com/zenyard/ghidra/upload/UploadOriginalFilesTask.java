@@ -1,13 +1,19 @@
 package com.zenyard.ghidra.upload;
 
-import java.io.File;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.nio.file.Files;
+import java.io.OutputStream;
+import java.net.URI;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.channels.Channels;
+import java.nio.channels.Pipe;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
+import com.zenyard.ghidra.api.generated.ApiClient;
 import com.zenyard.ghidra.api.generated.ApiException;
 import com.zenyard.ghidra.api.generated.api.BinariesApi;
 import com.zenyard.ghidra.events.ZenyardEvent;
@@ -21,37 +27,47 @@ import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
+import org.apache.http.HttpEntity;
+import org.apache.http.entity.ContentType;
+import org.apache.http.entity.mime.MultipartEntityBuilder;
 
 /**
  * Background task to upload original binary file.
  * Waits for BINARY_REGISTERED event, then uploads files and publishes UPLOAD_ORIGINAL_FILES_COMPLETE.
- * 
+ *
  * NOTE: mirrors zenyard_ida/upload_original_files_task.py
  */
 public class UploadOriginalFilesTask extends StatusBarAwareTask {
-    
+
     private static final String TASK_ID = "upload_original_files";
     private static final int STATUS_BAR_PRIORITY = StatusBarPriorities.UPLOAD_ORIGINAL_FILES;
-    
+
     private final PluginTool tool;
-    private final BinariesApi binariesApi;
+    private final ApiClient apiClient;
     private final Program program;
-    
+
     // Event waiting
     private final Object waitLock = new Object();
     private volatile boolean binaryRegistered = false;
     private volatile boolean shouldStop = false;
     private UUID binaryId = null;
-    
-    public UploadOriginalFilesTask(PluginTool tool, 
+
+    public UploadOriginalFilesTask(PluginTool tool,
                                   BinariesApi binariesApi, StatusBarManager statusBarManager,
+                                  Program program, EventDispatcher eventDispatcher) {
+        this(tool, binariesApi, null, statusBarManager, program, eventDispatcher);
+    }
+
+    public UploadOriginalFilesTask(PluginTool tool,
+                                  BinariesApi binariesApi, ApiClient apiClient,
+                                  StatusBarManager statusBarManager,
                                   Program program, EventDispatcher eventDispatcher) {
         super("Upload Original File", true, false, false, eventDispatcher, statusBarManager, TASK_ID, STATUS_BAR_PRIORITY);
         this.tool = tool;
-        this.binariesApi = binariesApi;
+        this.apiClient = apiClient;
         this.program = program;
     }
-    
+
     @Override
     public Set<ZenyardEvent.EventType> getSubscribedEventTypes() {
         Set<ZenyardEvent.EventType> types = new HashSet<>();
@@ -59,7 +75,7 @@ public class UploadOriginalFilesTask extends StatusBarAwareTask {
         types.add(ZenyardEvent.EventType.PROGRAM_DEACTIVATED);
         return types;
     }
-    
+
     @Override
     public void handleEvent(ZenyardEvent event) {
         if (event.getType() == ZenyardEvent.EventType.BINARY_REGISTERED) {
@@ -93,7 +109,7 @@ public class UploadOriginalFilesTask extends StatusBarAwareTask {
             }
         }
     }
-    
+
     @Override
     protected void doRun(TaskMonitor monitor) {
         try {
@@ -105,7 +121,7 @@ public class UploadOriginalFilesTask extends StatusBarAwareTask {
                 publishEvent(new ZenyardEvent(ZenyardEvent.EventType.UPLOAD_ORIGINAL_FILES_COMPLETE, getTaskTitle()));
                 return;
             }
-            
+
             // Check if binary ID is already available
             String binaryIdStr = props.getString("binary_id");
             if (binaryIdStr != null && !binaryIdStr.isEmpty()) {
@@ -116,7 +132,7 @@ public class UploadOriginalFilesTask extends StatusBarAwareTask {
                     // Invalid UUID format, wait for event
                 }
             }
-            
+
             // Wait for BINARY_REGISTERED event
             if (!binaryRegistered) {
                 synchronized (waitLock) {
@@ -132,7 +148,7 @@ public class UploadOriginalFilesTask extends StatusBarAwareTask {
                                 // Invalid UUID format, continue waiting
                             }
                         }
-                        
+
                         try {
                             waitLock.wait(1000); // Wait up to 1 second, then check again
                         } catch (InterruptedException e) {
@@ -142,11 +158,11 @@ public class UploadOriginalFilesTask extends StatusBarAwareTask {
                     }
                 }
             }
-            
+
             if (binaryId == null || monitor.isCancelled() || shouldStop) {
                 return;
             }
-            
+
             runWithStatusBar(() -> {
                 StatusBarManager statusBarManager = getStatusBarManager();
                 if (statusBarManager != null) {
@@ -160,19 +176,12 @@ public class UploadOriginalFilesTask extends StatusBarAwareTask {
                     statusBarManager.updateTaskStatus(TASK_ID, "Uploading binary file...", null, true);
                 }
 
-                // Upload file
+                // Upload raw bytes — the server stores and later gzip-decompresses this data.
                 CompletableFuture.supplyAsync(() -> {
                     try {
-                        // Convert byte array to File for upload
-                        File tempFile = File.createTempFile("binary_upload_", ".bin");
-                        Files.write(tempFile.toPath(), serialized.getData());
-                        try {
-                            binariesApi.putOriginalFile(serialized.getName(), binaryId, tempFile, serialized.getType());
-                        } finally {
-                            tempFile.delete();
-                        }
+                        putOriginalFileBinary(binaryId, serialized.getName(), serialized.getData(), serialized.getType());
                         return null;
-                    } catch (IOException | ApiException e) {
+                    } catch (Exception e) {
                         throw new RuntimeException(e);
                     }
                 }).get();
@@ -183,12 +192,58 @@ public class UploadOriginalFilesTask extends StatusBarAwareTask {
                 // Publish UPLOAD_ORIGINAL_FILES_COMPLETE event
                 publishEvent(new ZenyardEvent(ZenyardEvent.EventType.UPLOAD_ORIGINAL_FILES_COMPLETE, getTaskTitle()));
             });
-            
+
         } catch (Exception e) {
             Msg.showError(this, tool.getActiveWindow(), "Upload Error",
                 "Failed to upload original file: " + e.getMessage(), e);
             throw new RuntimeException("Failed to upload original file", e);
         }
     }
-    
+
+    /**
+     * Upload raw binary bytes to the server's original_files endpoint.
+     * Uses a binary multipart part so the server receives and stores the exact
+     * gzip bytes that it later decompresses during analysis.
+     */
+    private void putOriginalFileBinary(UUID binaryId, String name, byte[] data, String type) throws Exception {
+        if (apiClient == null) {
+            throw new IllegalStateException("ApiClient required for binary upload");
+        }
+
+        String path = "/binaries/" + ApiClient.urlEncode(binaryId.toString())
+                + "/original_files/" + ApiClient.urlEncode(name)
+                + "?type=" + ApiClient.urlEncode(type);
+
+        MultipartEntityBuilder builder = MultipartEntityBuilder.create();
+        builder.addBinaryBody("data", data, ContentType.APPLICATION_OCTET_STREAM, name);
+        HttpEntity entity = builder.build();
+
+        // Stream the multipart body via a pipe to avoid buffering the entire payload.
+        Pipe pipe = Pipe.open();
+        new Thread(() -> {
+            try (OutputStream out = Channels.newOutputStream(pipe.sink())) {
+                entity.writeTo(out);
+            } catch (IOException e) {
+                Msg.error(this, "Error writing multipart body: " + e.getMessage());
+            }
+        }).start();
+
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+                .uri(URI.create(apiClient.getBaseUri() + path))
+                .header("Content-Type", entity.getContentType().getValue())
+                .header("Accept", "application/json")
+                .PUT(HttpRequest.BodyPublishers.ofInputStream(() -> Channels.newInputStream(pipe.source())));
+
+        if (apiClient.getRequestInterceptor() != null) {
+            apiClient.getRequestInterceptor().accept(requestBuilder);
+        }
+
+        HttpResponse<String> response = apiClient.getHttpClient()
+                .send(requestBuilder.build(), HttpResponse.BodyHandlers.ofString());
+
+        if (response.statusCode() / 100 != 2) {
+            throw new ApiException(response.statusCode(),
+                    "putOriginalFile call failed with: " + response.statusCode() + " - " + response.body());
+        }
+    }
 }

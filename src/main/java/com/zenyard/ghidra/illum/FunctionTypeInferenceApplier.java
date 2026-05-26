@@ -107,7 +107,7 @@ public class FunctionTypeInferenceApplier {
                 appliedType,
                 inference.getStructId()
             );
-            Msg.info(this, "Applied parameter_type at " + address + " index " + index
+            Msg.debug(this, "Applied parameter_type at " + address + " index " + index
                 + " -> " + (appliedType != null ? appliedType.getDisplayName() : resolved.getDisplayName()));
             return ApplyResult.APPLIED;
         } catch (InvalidInputException e) {

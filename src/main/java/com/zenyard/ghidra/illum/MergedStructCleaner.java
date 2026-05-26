@@ -9,6 +9,7 @@ import java.util.Set;
 import java.util.UUID;
 
 import com.zenyard.ghidra.api.generated.model.FieldDefinition;
+import com.zenyard.ghidra.api.generated.model.GlobalVariableType;
 import com.zenyard.ghidra.api.generated.model.Inference;
 import com.zenyard.ghidra.api.generated.model.ParameterType;
 import com.zenyard.ghidra.api.generated.model.ReturnType;
@@ -25,19 +26,23 @@ import ghidra.util.task.TaskMonitor;
 /**
  * Replaces inferred structs that have been superseded by backend merging.
  *
- * When the backend merges multiple struct IDs into a single canonical struct,
- * this cleaner replaces all program references to the old (merged-from) structs
- * with the new merged-into struct via {@code DataTypeManager.replaceDataType},
- * then prunes stored metadata for the old IDs.
+ * <p><b>Merge direction:</b> When a struct <b>X</b> has {@code merged_from: [A, B]}, it means
+ * the backend merged structs A and B <b>into</b> X. So <b>X is the canonical struct we keep</b>;
+ * A and B are the old structs we replace and remove. This cleaner does <b>not</b> remove X
+ * (the struct that has merged_from). It only removes A and B (the IDs listed inside merged_from).
  *
- * A struct is eligible for replacement only when:
+ * <p>For each such old struct (child), we replace all program references to it with the
+ * merged-into struct (parent) via {@code DataTypeManager.replaceDataType}, then prune
+ * stored metadata for the child.
+ *
+ * <p>A struct is eligible for replacement (i.e. it is a "child") only when:
  * <ol>
- *   <li>Its UUID appears in some other struct's {@code merged_from} list</li>
+ *   <li>Its UUID appears in <b>some other</b> struct's {@code merged_from} list</li>
  *   <li>Its UUID is not referenced by any inference in the current batch
  *       or the deferred-type-inference queue</li>
  * </ol>
  *
- * Using {@code replaceDataType} instead of {@code remove} ensures that all
+ * <p>Using {@code replaceDataType} instead of {@code remove} ensures that all
  * derived references (pointer wrappers, function signatures, local variables,
  * composite fields) are atomically rewritten to the merged-into struct,
  * eliminating the stale-pointer-blocker problem that prevented deletion.
@@ -171,7 +176,7 @@ public class MergedStructCleaner {
     }
 
     // ------------------------------------------------------------------
-    // Step 1: Build merged-from -> merged-into mapping
+    // Step 1: Build child -> parent mapping (child = in merged_from; parent = struct that has merged_from)
     // ------------------------------------------------------------------
 
     private Map<UUID, UUID> buildMergedFromMapping() {
@@ -181,8 +186,9 @@ public class MergedStructCleaner {
         for (Map.Entry<UUID, StructDefinition> entry : registry.entrySet()) {
             List<UUID> mf = entry.getValue().getMergedFrom();
             if (mf != null) {
+                UUID parentId = entry.getKey(); // struct that has merged_from is the parent we keep
                 for (UUID childId : mf) {
-                    childToParent.put(childId, entry.getKey());
+                    childToParent.put(childId, parentId); // child gets replaced by parent, then removed
                 }
             }
         }
@@ -200,7 +206,10 @@ public class MergedStructCleaner {
             return Set.of();
         }
 
-        Set<UUID> referenced = collectReferencedStructIds(currentBatch);
+        Set<UUID> referenced = collectReferencedStructIds(
+            currentBatch,
+            inferenceStorage != null ? inferenceStorage.getDeferredTypeInferences() : List.of()
+        );
         int mergedChildrenCount = mergedChildren.size();
         mergedChildren.removeAll(referenced);
         Msg.info(this, "Merged-struct cleanup: merged_from children=" + mergedChildrenCount
@@ -209,7 +218,9 @@ public class MergedStructCleaner {
         return mergedChildren;
     }
 
-    private Set<UUID> collectReferencedStructIds(List<Inference> currentBatch) {
+    Set<UUID> collectReferencedStructIds(
+            List<Inference> currentBatch,
+            List<InferenceStorage.DeferredTypeInferenceRecord> deferredRecords) {
         Set<UUID> referenced = new HashSet<>();
 
         if (currentBatch != null) {
@@ -237,12 +248,16 @@ public class MergedStructCleaner {
                     if (sid != null) {
                         referenced.add(sid);
                     }
+                } else if (actual instanceof GlobalVariableType) {
+                    UUID sid = ((GlobalVariableType) actual).getStructId();
+                    if (sid != null) {
+                        referenced.add(sid);
+                    }
                 }
             }
         }
 
-        for (InferenceStorage.DeferredTypeInferenceRecord rec :
-                inferenceStorage.getDeferredTypeInferences()) {
+        for (InferenceStorage.DeferredTypeInferenceRecord rec : deferredRecords) {
             if (rec.getParameterType() != null
                     && rec.getParameterType().getStructId() != null) {
                 referenced.add(rec.getParameterType().getStructId());
@@ -250,6 +265,10 @@ public class MergedStructCleaner {
             if (rec.getReturnType() != null
                     && rec.getReturnType().getStructId() != null) {
                 referenced.add(rec.getReturnType().getStructId());
+            }
+            if (rec.getGlobalVariableType() != null
+                    && rec.getGlobalVariableType().getStructId() != null) {
+                referenced.add(rec.getGlobalVariableType().getStructId());
             }
         }
 

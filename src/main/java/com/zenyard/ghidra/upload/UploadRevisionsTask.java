@@ -579,7 +579,10 @@ public class UploadRevisionsTask extends StatusBarAwareTask {
         if (revision != null) {
             return revision;
         }
-        return 1;
+        // Default 0 so the first uploaded revision becomes 1 after the
+        // pre-increment in the upload loop. Matches the IDA plugin's numbering
+        // and avoids leaving an unused phantom revision 1 on every fresh binary.
+        return 0;
     }
     
     /**

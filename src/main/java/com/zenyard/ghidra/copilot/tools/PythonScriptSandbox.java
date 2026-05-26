@@ -247,6 +247,9 @@ public final class PythonScriptSandbox {
 
         sb.append("import sys as _sb_sys, os as _sb_os, builtins as _sb_builtins\n");
 
+        // Pre-import stdlib modules that the wrapped script and common
+        sb.append("import io as _sb_pre_io, traceback as _sb_pre_tb\n");
+
         // Forbidden module set
         sb.append("_sb_forbidden_modules = frozenset({");
         boolean first = true;

@@ -14,6 +14,7 @@ import java.util.function.UnaryOperator;
 import java.util.function.BooleanSupplier;
 import com.zenyard.ghidra.api.generated.model.FieldDefinition;
 import com.zenyard.ghidra.api.generated.model.FunctionOverview;
+import com.zenyard.ghidra.api.generated.model.GlobalVariableType;
 import com.zenyard.ghidra.api.generated.model.Inference;
 import com.zenyard.ghidra.api.generated.model.Name;
 import com.zenyard.ghidra.api.generated.model.NotSwift;
@@ -70,6 +71,7 @@ public class InferenceApplier {
     private final VariableRenamer variableRenamer;
     private final StructInferenceApplier structInferenceApplier;
     private final FunctionTypeInferenceApplier functionTypeInferenceApplier;
+    private final GlobalVariableTypeInferenceApplier globalVariableTypeInferenceApplier;
     private final MergedStructCleaner mergedStructCleaner;
     private final PluginTool tool;
     private static final int MAX_DEFERRED_RETRY_ATTEMPTS = 3;
@@ -91,6 +93,8 @@ public class InferenceApplier {
         this.variableRenamer = new VariableRenamer(inferenceStorage);
         this.structInferenceApplier = new StructInferenceApplier(inferenceStorage);
         this.functionTypeInferenceApplier = new FunctionTypeInferenceApplier(inferenceStorage, structInferenceApplier);
+        this.globalVariableTypeInferenceApplier =
+            new GlobalVariableTypeInferenceApplier(inferenceStorage, structInferenceApplier);
         this.mergedStructCleaner = new MergedStructCleaner(inferenceStorage, structInferenceApplier);
         this.tool = tool;
     }
@@ -159,29 +163,77 @@ public class InferenceApplier {
             globalInferences.sort(Comparator.comparingInt(this::getInferencePriority));
             applyGlobalInferences(program, globalInferences, monitor, shouldStop);
         }
+
+        // Retry deferred type inferences before applying the current batch's gvt inferences.
+        TransactionUtils.runInTransaction(program, "Zenyard: Retry deferred type inferences", () -> {
+            retryDeferredTypeInferences(program, monitor);
+        });
+
+        // Apply global_variable_type inferences in ascending resolved span so finer typings
+        // at interior addresses are established before coarse structs that cover them.
+        List<GlobalVariableInferenceOrdering.GlobalVariableInferenceItem> gvtItems =
+            new ArrayList<>();
+        Iterator<Map.Entry<Address, List<Inference>>> byAddrIter =
+            byAddress.entrySet().iterator();
+        while (byAddrIter.hasNext()) {
+            Map.Entry<Address, List<Inference>> entry = byAddrIter.next();
+            List<Inference> list = entry.getValue();
+            Iterator<Inference> infIter = list.iterator();
+            while (infIter.hasNext()) {
+                Inference inf = infIter.next();
+                if ("global_variable_type".equals(getInferenceType(inf))) {
+                    gvtItems.add(
+                        new GlobalVariableInferenceOrdering.GlobalVariableInferenceItem(
+                            entry.getKey(), inf));
+                    infIter.remove();
+                }
+            }
+            if (list.isEmpty()) {
+                byAddrIter.remove();
+            }
+        }
+        if (!gvtItems.isEmpty()) {
+            List<GlobalVariableInferenceOrdering.GlobalVariableInferenceItem> orderedGvt =
+                GlobalVariableInferenceOrdering.sortBySpanAscending(
+                    program,
+                    structInferenceApplier,
+                    gvtItems);
+            // Each GVT gets its own transaction so that a failed apply (which clears code units
+            // before creating new data) is rolled back without corrupting adjacent inferences
+            // that were already successfully applied in this batch.
+            for (GlobalVariableInferenceOrdering.GlobalVariableInferenceItem it : orderedGvt) {
+                if (shouldStop != null && shouldStop.getAsBoolean()) {
+                    break;
+                }
+                if (monitor != null && monitor.isCancelled()) {
+                    break;
+                }
+                try {
+                    TransactionUtils.runInTransaction(
+                        program,
+                        "Zenyard: Apply global_variable_type at " + it.address,
+                        () -> applyAndStoreInference(program, it.address, it.inference, monitor));
+                } catch (Exception e) {
+                    Msg.warn(this, "Error applying global_variable_type at " + it.address
+                        + ": " + e.getMessage(), e);
+                }
+            }
+        }
         
-        // Apply inferences for each address (populates typeChangedAddresses)
-        for (Map.Entry<Address, List<Inference>> entry : byAddress.entrySet()) {
+        // Apply inferences for each address (populates typeChangedAddresses).
+        List<Address> orderedAddresses = new ArrayList<>(byAddress.keySet());
+        orderedAddresses.sort(Comparator.naturalOrder());
+        for (Address entryKey : orderedAddresses) {
             if (shouldStop != null && shouldStop.getAsBoolean()) {
                 return;
             }
             if (monitor != null && monitor.isCancelled()) {
                 return;
             }
-            List<Inference> sorted = new ArrayList<>(entry.getValue());
+            List<Inference> sorted = new ArrayList<>(byAddress.get(entryKey));
             sorted.sort(Comparator.comparingInt(this::getInferencePriority));
-            applyInferencesForAddress(program, entry.getKey(), sorted, monitor, shouldStop);
+            applyInferencesForAddress(program, entryKey, sorted, monitor, shouldStop);
         }
-
-        if (shouldStop != null && shouldStop.getAsBoolean()) {
-            return;
-        }
-        if (monitor != null && monitor.isCancelled()) {
-            return;
-        }
-        TransactionUtils.runInTransaction(program, "Zenyard: Retry deferred type inferences", () -> {
-            retryDeferredTypeInferences(program, monitor);
-        });
 
         // Catch-up: propagate return types to returned local variables for functions
         // whose return_type was applied in a previous session but local propagation
@@ -378,6 +430,8 @@ public class InferenceApplier {
             return "function_overview";
         } else if (actual instanceof Name) {
             return "name";
+        } else if (actual instanceof GlobalVariableType) {
+            return "global_variable_type";
         } else if (actual instanceof VariablesMapping) {
             return "variables";
         } else if (actual instanceof ParametersMapping) {
@@ -408,6 +462,8 @@ public class InferenceApplier {
             return ((FunctionOverview) actual).getAddress();
         } else if (actual instanceof Name) {
             return ((Name) actual).getAddress();
+        } else if (actual instanceof GlobalVariableType) {
+            return ((GlobalVariableType) actual).getAddress();
         } else if (actual instanceof VariablesMapping) {
             return ((VariablesMapping) actual).getAddress();
         } else if (actual instanceof ParametersMapping) {
@@ -448,10 +504,12 @@ public class InferenceApplier {
             applyName(program, address, (Name) actual);
         } else if (actual instanceof VariablesMapping) {
             VariablesMapping mapping = (VariablesMapping) actual;
-            Msg.info(this, "Applying variables_mapping at " + address + " entries="
+            Msg.debug(this, "Applying variables_mapping at " + address + " entries="
                 + (mapping.getVariablesMapping() != null ? mapping.getVariablesMapping().size() : 0)
                 + " keys=" + (mapping.getVariablesMapping() != null ? mapping.getVariablesMapping().keySet() : java.util.Collections.emptySet()));
             applyVariablesMapping(program, address, (VariablesMapping) actual);
+        } else if (actual instanceof GlobalVariableType) {
+            applyGlobalVariableType(program, address, (GlobalVariableType) actual);
         } else if (actual instanceof ParametersMapping) {
             applyParametersMapping(program, address, (ParametersMapping) actual);
         } else if (actual instanceof StructDefinition) {
@@ -518,6 +576,32 @@ public class InferenceApplier {
             applyVariablesMapping(program, address, mapped);
             return;
         }
+        if ("global_variable_type".equals(typeValue)) {
+            if (address == null) {
+                Msg.warn(this, "Skipping map-based global_variable_type at " + addressLabel + ": missing address");
+                return;
+            }
+            Object annotationValue = actual.get("type_annotation");
+            if (!(annotationValue instanceof String) || ((String) annotationValue).isBlank()) {
+                Msg.warn(this, "Skipping map-based global_variable_type at " + addressLabel
+                    + ": missing type_annotation payload");
+                return;
+            }
+            GlobalVariableType mapped = new GlobalVariableType();
+            mapped.setAddress(address.toString());
+            mapped.setTypeAnnotation(String.valueOf(annotationValue));
+            Object structIdValue = actual.get("struct_id");
+            if (structIdValue instanceof String && !((String) structIdValue).isBlank()) {
+                try {
+                    mapped.setStructId(java.util.UUID.fromString(String.valueOf(structIdValue)));
+                } catch (IllegalArgumentException e) {
+                    Msg.warn(this, "Invalid struct_id in map-based global_variable_type at "
+                        + addressLabel + ": " + structIdValue);
+                }
+            }
+            applyGlobalVariableType(program, address, mapped);
+            return;
+        }
         Msg.warn(this, "Unhandled inference map type '" + typeValue + "' at " + addressLabel);
     }
 
@@ -555,6 +639,18 @@ public class InferenceApplier {
         }
     }
 
+    private void applyGlobalVariableType(Program program, Address address, GlobalVariableType globalVariableType) {
+        if (address == null) {
+            return;
+        }
+        GlobalVariableTypeInferenceApplier.ApplyResult result =
+            globalVariableTypeInferenceApplier.applyGlobalVariableType(program, address, globalVariableType, 0);
+        if (result == GlobalVariableTypeInferenceApplier.ApplyResult.APPLIED) {
+            typeChangedAddresses.add(address);
+            variableRenamer.reconcilePendingGlobalDatRenamesForStructuredBase(program, address);
+        }
+    }
+
     public void retryDeferredTypeInferences(Program program) {
         retryDeferredTypeInferences(program, TaskMonitor.DUMMY);
     }
@@ -579,6 +675,10 @@ public class InferenceApplier {
             }
             if ("return_type".equals(record.getKind()) && record.getReturnType() != null) {
                 applyDeferredReturnType(program, record.getReturnType(), currentAttempts, monitor);
+                continue;
+            }
+            if ("global_variable_type".equals(record.getKind()) && record.getGlobalVariableType() != null) {
+                applyDeferredGlobalVariableType(program, record.getGlobalVariableType(), currentAttempts);
             }
         }
     }
@@ -654,6 +754,34 @@ public class InferenceApplier {
         }
     }
 
+    private void applyDeferredGlobalVariableType(
+        Program program,
+        GlobalVariableType inference,
+        int currentAttempts
+    ) {
+        Address address = parseAddress(inference.getAddress(), program);
+        if (address == null) {
+            requeueDeferredGlobalVariableType(inference, currentAttempts + 1);
+            return;
+        }
+
+        GlobalVariableTypeInferenceApplier.ApplyResult result =
+            globalVariableTypeInferenceApplier.applyGlobalVariableType(program, address, inference, currentAttempts);
+        if (result == GlobalVariableTypeInferenceApplier.ApplyResult.APPLIED) {
+            typeChangedAddresses.add(address);
+            variableRenamer.reconcilePendingGlobalDatRenamesForStructuredBase(program, address);
+        }
+        if (result == GlobalVariableTypeInferenceApplier.ApplyResult.DEFERRED
+            && currentAttempts + 1 >= MAX_DEFERRED_RETRY_ATTEMPTS) {
+            inferenceStorage.removeDeferredTypeInference(
+                inferenceStorage.buildDeferredGlobalVariableTypeInferenceId(inference));
+            Msg.warn(this, "Dropping deferred global_variable_type after max retries at " + inference.getAddress());
+        }
+        if (result == GlobalVariableTypeInferenceApplier.ApplyResult.SKIPPED) {
+            requeueDeferredGlobalVariableType(inference, currentAttempts + 1);
+        }
+    }
+
     private void requeueDeferredParameterType(ParameterType inference, int attempts) {
         if (attempts >= MAX_DEFERRED_RETRY_ATTEMPTS) {
             Msg.warn(this, "Dropping deferred parameter_type after max retries at " + inference.getAddress()
@@ -669,6 +797,14 @@ public class InferenceApplier {
             return;
         }
         inferenceStorage.enqueueDeferredReturnType(inference, attempts);
+    }
+
+    private void requeueDeferredGlobalVariableType(GlobalVariableType inference, int attempts) {
+        if (attempts >= MAX_DEFERRED_RETRY_ATTEMPTS) {
+            Msg.warn(this, "Dropping deferred global_variable_type after max retries at " + inference.getAddress());
+            return;
+        }
+        inferenceStorage.enqueueDeferredGlobalVariableType(inference, attempts);
     }
 
     /**
@@ -1446,6 +1582,11 @@ public class InferenceApplier {
         } else if (actual instanceof Name) {
             Name name = (Name) actual;
             data.put("name", name.getName());
+        } else if (actual instanceof GlobalVariableType) {
+            GlobalVariableType globalVariableType = (GlobalVariableType) actual;
+            data.put("type_annotation", globalVariableType.getTypeAnnotation());
+            java.util.UUID structId = globalVariableType.getStructId();
+            data.put("struct_id", structId != null ? structId.toString() : null);
         } else if (actual instanceof VariablesMapping) {
             VariablesMapping mapping = (VariablesMapping) actual;
             data.put("variables_mapping", mapping.getVariablesMapping());
@@ -1512,7 +1653,9 @@ public class InferenceApplier {
         if ("name".equals(type)) {
             return 2;
         }
-        if ("parameter_type".equals(type) || "return_type".equals(type)) {
+        if ("parameter_type".equals(type)
+                || "return_type".equals(type)
+                || "global_variable_type".equals(type)) {
             return 3;
         }
         if ("function_overview".equals(type)) {

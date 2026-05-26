@@ -39,6 +39,7 @@ public class DownloadInferencesTask extends StatusBarAwareTask {
     private static final int MAX_INFERENCES_PER_REQUEST = 50;
     private static final int MAX_BACKOFF_MS = ZenyardConstants.MAX_BACKOFF_MS;
     private static final int INITIAL_BACKOFF_MS = ZenyardConstants.INITIAL_BACKOFF_MS;
+    private static final double REVISION_EPS = 1e-6;
     private static final String TASK_ID = "download_inferences";
     private static final String LATEST_RESULTS_TASK_ID = "latest_results_applied";
     private static final int STATUS_BAR_PRIORITY = StatusBarPriorities.DOWNLOAD_INFERENCES;
@@ -51,7 +52,7 @@ public class DownloadInferencesTask extends StatusBarAwareTask {
     private volatile boolean shouldStop = false;
     private int consecutiveConnectionFailures = 0;
     private boolean lastConnected = true;
-    
+
     // Event waiting
     private final Object waitLock = new Object();
     private volatile boolean binaryIdAvailable = false;
@@ -214,7 +215,7 @@ public class DownloadInferencesTask extends StatusBarAwareTask {
         if (statusBarManager != null) {
             statusBarManager.unregisterTask(LATEST_RESULTS_TASK_ID);
         }
-        
+
         try {
             runWithStatusBar(() -> {
                 int currentRevision = getCurrentRevision();
@@ -226,7 +227,7 @@ public class DownloadInferencesTask extends StatusBarAwareTask {
                 }
 
                 while (!shouldStop && !monitor.isCancelled()) {
-                    int serverRevision = getServerRevision();
+                    double serverRevision = getServerRevisionFractional();
                     // Local revision may have progressed while downloading
                     currentRevision = getCurrentRevision();
                 
@@ -246,11 +247,16 @@ public class DownloadInferencesTask extends StatusBarAwareTask {
                 // Process inferences from response
                 boolean inferencesAdded = false;
                 if (response.getInferences() != null) {
-                    List<Inference> known = filterKnownInferences(
-                        response.getInferences(),
-                        unknown -> Msg.warn(this, "Skipping unknown inference type: " + unknown));
-                    for (Inference inference : known) {
-                        inferenceQueue.enqueue(inference);
+                    for (MaybeUnknownInference inference : response.getInferences()) {
+                        if (inference == null) {
+                            continue;
+                        }
+                        if (inference.getInference() == null) {
+                            Msg.debug(this, "DownloadInferencesTask: inference slot had no typed "
+                                + "payload (discarded — often unknown OpenAPI discriminator)");
+                            continue;
+                        }
+                        inferenceQueue.enqueue(inference.getInference());
                         inferencesAdded = true;
                     }
                 }
@@ -258,7 +264,7 @@ public class DownloadInferencesTask extends StatusBarAwareTask {
                 // Publish event when new inferences are added
                 if (inferencesAdded) {
                     int inferenceCount = response.getInferences() != null ? response.getInferences().size() : 0;
-                    Msg.info(this, "DownloadInferencesTask: Publishing NEW_INFERENCES_AVAILABLE event for " 
+                    Msg.debug(this, "DownloadInferencesTask: Publishing NEW_INFERENCES_AVAILABLE event for "
                         + inferenceCount + " new inferences");
                     publishEvent(new ZenyardEvent(ZenyardEvent.EventType.NEW_INFERENCES_AVAILABLE, 
                         getTaskTitle()));
@@ -280,8 +286,10 @@ public class DownloadInferencesTask extends StatusBarAwareTask {
                     // More inferences available - continue immediately
                     // cursor already updated above
                     Msg.debug(this, "More inferences available - continuing immediately");
-                } else if (serverRevision == currentRevision) {
-                    // Done fetching: no more inferences AND server has finished analyzing
+                } else if (Math.abs(serverRevision - currentRevision) < REVISION_EPS) {
+                    // Done fetching: no more inferences AND server is exactly at currentRevision.
+                    // Mirrors IDA's `server_revision == current_revision` float-vs-int equality:
+                    // fractional values like 1.5 (server analyzing rev 2) must NOT match rev 1.
                     Msg.info(this, "Done fetching inferences for revision " + currentRevision);
                     return;
                 } else {
@@ -297,13 +305,12 @@ public class DownloadInferencesTask extends StatusBarAwareTask {
                         }
                     }
                     // Re-read serverRevision after waking up (may have been updated)
-                    serverRevision = getServerRevision();
+                    serverRevision = getServerRevisionFractional();
                     currentRevision = getCurrentRevision();
-                    Double serverRevisionFractional = getServerRevisionFractional();
-                    Msg.debug(this, "Server revision: " + serverRevision + ", current revision: " + currentRevision + ", server revision fractional: " + serverRevisionFractional);
+                    Msg.debug(this, "Server revision: " + serverRevision + ", current revision: " + currentRevision);
 
-                    // Check again if we're done
-                    if (serverRevision == currentRevision) {
+                    // Check again if we're done (exact-equality, matches IDA)
+                    if (Math.abs(serverRevision - currentRevision) < REVISION_EPS) {
                         Msg.info(this, "Done fetching inferences for revision " + currentRevision);
                         return;
                     }
@@ -374,15 +381,10 @@ public class DownloadInferencesTask extends StatusBarAwareTask {
         if (revision != null) {
             return revision;
         }
-        return 1;
-    }
-    
-    /**
-     * Get server revision number (derived from fractional value).
-     * This method exists for backward compatibility with code that expects integer.
-     */
-    private int getServerRevision() {
-        return (int) getServerRevisionFractional();
+        // Default 0 — must match UploadRevisionsTask. On a fresh binary with no
+        // uploads, no revisions exist on the server, so polling for "current
+        // revision" returns 0 and any equality check sees parity.
+        return 0;
     }
     
     /**
@@ -399,10 +401,9 @@ public class DownloadInferencesTask extends StatusBarAwareTask {
                 // Invalid format, fall back to default
             }
         }
-        // Default to 1.0 if not set
-        return 1.0;
+        return 0.0;
     }
-    
+
     /**
      * Get inference cursor.
      */

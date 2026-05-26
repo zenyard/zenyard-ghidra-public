@@ -1,5 +1,6 @@
 package com.zenyard.ghidra.copilot.deepagent;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -74,9 +75,8 @@ public class PlanNode implements AsyncNodeActionWithConfig<CopilotDeepState> {
     public CompletableFuture<Map<String, Object>> apply(CopilotDeepState state, RunnableConfig config) {
         String skillsSection = state.skillsPrompt().orElse("");
         String resolvedSystemPrompt = systemPrompt + "\n\n" + skillsSection + "\n\n" + orchestrationInstructions();
-        int systemPromptReserve = MessageSummarizer.estimateTextTokens(resolvedSystemPrompt);
 
-        java.util.ArrayList<ChatMessage> rawMessages = new java.util.ArrayList<>();
+        List<ChatMessage> rawMessages = new ArrayList<>();
         rawMessages.add(SystemMessage.from(resolvedSystemPrompt));
         rawMessages.addAll(state.messages());
         List<ChatMessage> patchedMessages = MessageSanitizer.patchDanglingToolCalls(rawMessages);
@@ -88,10 +88,10 @@ public class PlanNode implements AsyncNodeActionWithConfig<CopilotDeepState> {
             .toolSpecifications(toolSpecifications)
             .build();
 
-        List<ChatMessage> preparedMessages = compactMessagesForRequest(baseMessages, false, systemPromptReserve);
+        List<ChatMessage> preparedMessages = compactMessagesForRequest(baseMessages, false);
         if (streamingChatModel != null && streamHandler != null) {
             CompletableFuture<Map<String, Object>> future = streamPlan(preparedMessages, parameters);
-            return withPromptTooLongRetry(future, baseMessages, parameters, systemPromptReserve);
+            return withPromptTooLongRetry(future, baseMessages, parameters);
         }
         try {
             return CompletableFuture.completedFuture(syncPlan(preparedMessages, parameters));
@@ -99,7 +99,7 @@ public class PlanNode implements AsyncNodeActionWithConfig<CopilotDeepState> {
             if (!shouldRetryPromptTooLong(e)) {
                 throw e;
             }
-            List<ChatMessage> retryMessages = compactMessagesForRequest(baseMessages, true, systemPromptReserve);
+            List<ChatMessage> retryMessages = compactMessagesForRequest(baseMessages, true);
             return CompletableFuture.completedFuture(syncPlan(retryMessages, parameters));
         }
     }
@@ -190,8 +190,7 @@ public class PlanNode implements AsyncNodeActionWithConfig<CopilotDeepState> {
     private CompletableFuture<Map<String, Object>> withPromptTooLongRetry(
             CompletableFuture<Map<String, Object>> future,
             List<ChatMessage> baseMessages,
-            ChatRequestParameters parameters,
-            int systemPromptReserve) {
+            ChatRequestParameters parameters) {
         return future.handle((result, throwable) -> {
             if (throwable == null) {
                 return CompletableFuture.completedFuture(result);
@@ -200,7 +199,7 @@ public class PlanNode implements AsyncNodeActionWithConfig<CopilotDeepState> {
             if (!shouldRetryPromptTooLong(cause)) {
                 return CompletableFuture.<Map<String, Object>>failedFuture(cause);
             }
-            List<ChatMessage> retryMessages = compactMessagesForRequest(baseMessages, true, systemPromptReserve);
+            List<ChatMessage> retryMessages = compactMessagesForRequest(baseMessages, true);
             try {
                 return CompletableFuture.completedFuture(syncPlan(retryMessages, parameters));
             } catch (RuntimeException retryError) {
@@ -209,18 +208,14 @@ public class PlanNode implements AsyncNodeActionWithConfig<CopilotDeepState> {
         }).thenCompose(java.util.function.Function.identity());
     }
 
-    private List<ChatMessage> compactMessagesForRequest(
-            List<ChatMessage> messages,
-            boolean aggressiveRetry,
-            int extraReserveTokens) {
+    private List<ChatMessage> compactMessagesForRequest(List<ChatMessage> messages, boolean aggressiveRetry) {
         if (summarizer == null) {
             return MessageSummarizer.truncateToolArgsInList(
                 messages,
                 deepAgentConfig.toolArgTruncateThreshold());
         }
         int reserveTokens = deepAgentConfig.requestTokenReserveTokens()
-            + MessageSummarizer.estimateToolSpecificationTokens(toolSpecifications)
-            + Math.max(0, extraReserveTokens)
+            + estimateToolSpecificationTokens(toolSpecifications)
             + (aggressiveRetry ? deepAgentConfig.promptTooLongRetryExtraReserveTokens() : 0);
         CopilotSummarizer.CompactionResult result = summarizer.compactMessages(
             messages,
@@ -243,6 +238,13 @@ public class PlanNode implements AsyncNodeActionWithConfig<CopilotDeepState> {
                 + " budgetTokens=" + result.budgetTokens()
                 + " passes=" + result.passes());
         return result.messages();
+    }
+
+    private int estimateToolSpecificationTokens(List<ToolSpecification> specs) {
+        if (specs == null || specs.isEmpty() || summarizer == null) {
+            return 0;
+        }
+        return summarizer.estimateTokenCount(String.valueOf(specs));
     }
 
     private void showCompactionStatus(String status) {

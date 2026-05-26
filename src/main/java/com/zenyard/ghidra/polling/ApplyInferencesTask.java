@@ -12,6 +12,7 @@ import com.zenyard.ghidra.events.EventDispatcher;
 import com.zenyard.ghidra.tasks.StatusBarAwareTask;
 import com.zenyard.ghidra.illum.InferenceApplier;
 import com.zenyard.ghidra.illum.FunctionOverviewAnnotator;
+import com.zenyard.ghidra.illum.UnreferencedStructSweeper;
 import com.zenyard.ghidra.storage.InferenceStorage;
 import com.zenyard.ghidra.status.AppliedInferenceCounts;
 import com.zenyard.ghidra.status.InferenceCountTracker;
@@ -77,11 +78,11 @@ public class ApplyInferencesTask extends StatusBarAwareTask {
     @Override
     public void handleEvent(ZenyardEvent event) {
         if (event.getType() == ZenyardEvent.EventType.NEW_INFERENCES_AVAILABLE) {
-            Msg.info(this, "ApplyInferencesTask: Received NEW_INFERENCES_AVAILABLE event");
+            Msg.debug(this, "ApplyInferencesTask: Received NEW_INFERENCES_AVAILABLE event");
             synchronized (waitLock) {
                 newInferencesAvailable = true;
                 waitLock.notify();
-                Msg.info(this, "ApplyInferencesTask: Notified waiting thread, queue size: " + inferenceQueue.size());
+                Msg.debug(this, "ApplyInferencesTask: Notified waiting thread, queue size: " + inferenceQueue.size());
             }
         } else if (event.getType() == ZenyardEvent.EventType.PROGRAM_DEACTIVATED) {
             synchronized (waitLock) {
@@ -102,7 +103,9 @@ public class ApplyInferencesTask extends StatusBarAwareTask {
         FunctionOverviewAnnotator overviewAnnotator = new FunctionOverviewAnnotator();
         InferenceStorage inferenceStorage = new InferenceStorage(program);
         InferenceApplier inferenceApplier = new InferenceApplier(overviewAnnotator, inferenceStorage, tool);
-        
+        UnreferencedStructSweeper unreferencedStructSweeper = new UnreferencedStructSweeper(inferenceStorage);
+        boolean sweepDirty = false;
+
         // Main loop: wait for notifications and apply inferences
         while (!shouldStop && !monitor.isCancelled()) {
             // Wait for new inferences to be available
@@ -137,8 +140,22 @@ public class ApplyInferencesTask extends StatusBarAwareTask {
             if (!inferenceQueue.isEmpty()) {
                 Msg.info(this, "ApplyInferencesTask: Starting to apply " + inferenceQueue.size() + " inferences");
                 applyInferencesBatch(monitor, inferenceApplier);
+                sweepDirty = true;
             } else {
                 Msg.info(this, "ApplyInferencesTask: Queue is empty, continuing to wait");
+            }
+
+            // Sweep orphan structs once the inference pipeline drains. The merged-from
+            // cleaner already ran inline per batch; this catches structs left behind by
+            // collision-rename or by inferences that retyped a consumer without merging.
+            if (sweepDirty && inferenceQueue.isEmpty() && !shouldStop && !monitor.isCancelled()
+                    && program != null && !program.isClosed()) {
+                try {
+                    unreferencedStructSweeper.sweep(program, monitor);
+                } catch (Exception e) {
+                    Msg.warn(this, "Unreferenced-struct sweep failed: " + e.getMessage(), e);
+                }
+                sweepDirty = false;
             }
         }
         runningMonitor = null;

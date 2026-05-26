@@ -69,6 +69,53 @@ public class ZenyardProgramProperties {
     }
     
     /**
+     * Write multiple string properties in a single transaction.
+     */
+    public void setStrings(java.util.Map<String, String> entries) {
+        if (program == null || program.isClosed() || entries.isEmpty()) {
+            return;
+        }
+
+        int transactionId;
+        try {
+            transactionId = program.startTransaction("Set Zenyard properties batch");
+        } catch (RuntimeException e) {
+            Msg.debug(this, "Skipping batch property write during shutdown: " + e.getMessage());
+            return;
+        }
+
+        boolean success = false;
+        RuntimeException primary = null;
+        try {
+            for (java.util.Map.Entry<String, String> entry : entries.entrySet()) {
+                options.setString(entry.getKey(), entry.getValue());
+            }
+            success = true;
+        } catch (RuntimeException e) {
+            primary = e;
+        } finally {
+            try {
+                program.endTransaction(transactionId, success);
+            } catch (RuntimeException endEx) {
+                if (primary != null) {
+                    primary.addSuppressed(endEx);
+                } else {
+                    Msg.debug(this, "endTransaction failed for batch property write: " + endEx.getMessage());
+                }
+            }
+        }
+
+        if (primary != null) {
+            String msg = String.valueOf(primary.getMessage());
+            if (msg.contains("Database is closed") || msg.contains("Transaction has been terminated")) {
+                Msg.debug(this, "Skipping batch property write during shutdown: " + msg);
+                return;
+            }
+            Msg.error(this, "Failed batch property write: " + primary.getMessage(), primary);
+        }
+    }
+
+    /**
      * Get a string property.
      */
     public String getString(String key) {

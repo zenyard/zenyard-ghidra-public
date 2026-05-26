@@ -97,7 +97,9 @@ public class GlobalVariableSerializer {
             }
         }
         
-        return new ArrayList<>(uses);
+        List<String> sorted = new ArrayList<>(uses);
+        sorted.sort(null);
+        return sorted;
     }
 }
 

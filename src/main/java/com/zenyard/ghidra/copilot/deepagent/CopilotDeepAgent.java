@@ -142,10 +142,6 @@ public class CopilotDeepAgent {
             summarizer,
             resolvedConfig,
             resolvedConfig.responseStreamingTimeoutMs(),
-            resolvedConfig.contextWindowTokens(),
-            resolvedConfig.summarizationTriggerFraction(),
-            resolvedConfig.summarizationKeepMessages(),
-            resolvedConfig.toolArgTruncateThreshold(),
             tracer);
 
         this.responseNode = responseNode;

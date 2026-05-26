@@ -20,6 +20,8 @@ import com.google.gson.stream.JsonWriter;
 
 import org.openapitools.jackson.nullable.JsonNullable;
 
+import com.zenyard.ghidra.api.AddressHelper;
+import com.zenyard.ghidra.api.generated.model.GlobalVariableType;
 import com.zenyard.ghidra.api.generated.model.ParameterType;
 import com.zenyard.ghidra.api.generated.model.ParametersMapping;
 import com.zenyard.ghidra.api.generated.model.ReturnType;
@@ -50,7 +52,10 @@ public class InferenceStorage {
     private static final String DEFERRED_TYPE_INFERENCES_KEY = INFERENCE_PREFIX + "deferred.type_inferences";
     private static final String VARIABLE_IDENTITIES_PREFIX = VARIABLE_PREFIX + "identity.";
     private static final String APPLIED_VARIABLE_RENAMES_PREFIX = VARIABLE_PREFIX + "applied_renames.";
-    
+    private static final String APPLIED_VARIABLE_RENAME_RECORDS_PREFIX = VARIABLE_PREFIX + "applied_rename_records.";
+    /** JSON map: canonical hex address key -> pending global DAT_* rename (for reconciliation with global_variable_type). */
+    private static final String GLOBAL_DAT_PENDING_RENAMES_KEY = VARIABLE_PREFIX + "global_dat_pending_renames";
+
     private final ZenyardProgramProperties properties;
     private final Gson gson;
     
@@ -257,6 +262,7 @@ public class InferenceStorage {
         private String id;
         private String kind;
         private int attempts;
+        private GlobalVariableType globalVariableType;
         private ParameterType parameterType;
         private ReturnType returnType;
 
@@ -267,12 +273,14 @@ public class InferenceStorage {
             String id,
             String kind,
             int attempts,
+            GlobalVariableType globalVariableType,
             ParameterType parameterType,
             ReturnType returnType
         ) {
             this.id = id;
             this.kind = kind;
             this.attempts = attempts;
+            this.globalVariableType = globalVariableType;
             this.parameterType = parameterType;
             this.returnType = returnType;
         }
@@ -287,6 +295,10 @@ public class InferenceStorage {
 
         public int getAttempts() {
             return attempts;
+        }
+
+        public GlobalVariableType getGlobalVariableType() {
+            return globalVariableType;
         }
 
         public ParameterType getParameterType() {
@@ -341,6 +353,155 @@ public class InferenceStorage {
 
         public String asKey() {
             return (kind != null ? kind : "unknown") + ":" + (location != null ? location : "unknown") + ":" + size;
+        }
+    }
+
+    /**
+     * Persisted ownership metadata for an applied rename.
+     */
+    public static class AppliedVariableRenameRecord {
+        private String targetName;
+        private VariableStorageIdentity storageIdentity;
+
+        public AppliedVariableRenameRecord() {
+        }
+
+        public AppliedVariableRenameRecord(String targetName, VariableStorageIdentity storageIdentity) {
+            this.targetName = targetName;
+            this.storageIdentity = storageIdentity;
+        }
+
+        public String getTargetName() {
+            return targetName;
+        }
+
+        public void setTargetName(String targetName) {
+            this.targetName = targetName;
+        }
+
+        public VariableStorageIdentity getStorageIdentity() {
+            return storageIdentity;
+        }
+
+        public void setStorageIdentity(VariableStorageIdentity storageIdentity) {
+            this.storageIdentity = storageIdentity;
+        }
+    }
+
+    /**
+     * Pending rename for a global data label (DAT_*, etc.) keyed by memory address so
+     * {@code global_variable_type} can apply semantic names as comments after the struct is laid down.
+     */
+    public static class GlobalDatPendingRenameEntry {
+        private String memoryAddressKey;
+        private String originalName;
+        private String newName;
+        private String functionAddressKey;
+
+        public GlobalDatPendingRenameEntry() {
+        }
+
+        public String getMemoryAddressKey() {
+            return memoryAddressKey;
+        }
+
+        public void setMemoryAddressKey(String memoryAddressKey) {
+            this.memoryAddressKey = memoryAddressKey;
+        }
+
+        public String getOriginalName() {
+            return originalName;
+        }
+
+        public void setOriginalName(String originalName) {
+            this.originalName = originalName;
+        }
+
+        public String getNewName() {
+            return newName;
+        }
+
+        public void setNewName(String newName) {
+            this.newName = newName;
+        }
+
+        public String getFunctionAddressKey() {
+            return functionAddressKey;
+        }
+
+        public void setFunctionAddressKey(String functionAddressKey) {
+            this.functionAddressKey = functionAddressKey;
+        }
+    }
+
+    /**
+     * Canonical 16-digit lowercase hex key for an address (matches inference API addresses).
+     */
+    public static String formatMemoryAddressKey(Address address) {
+        return AddressHelper.fromAddress(address);
+    }
+
+    /**
+     * Record or replace a pending global DAT rename at {@code memoryAddress} (e.g. after variables_mapping).
+     */
+    public void putGlobalDatPendingRename(
+            Address memoryAddress,
+            String originalName,
+            String newName,
+            Address functionAddress
+    ) {
+        if (memoryAddress == null || newName == null || newName.isBlank()) {
+            return;
+        }
+        String key = formatMemoryAddressKey(memoryAddress);
+        if (key == null) {
+            return;
+        }
+        Map<String, GlobalDatPendingRenameEntry> map = getGlobalDatPendingRenames();
+        GlobalDatPendingRenameEntry entry = new GlobalDatPendingRenameEntry();
+        entry.setMemoryAddressKey(key);
+        entry.setOriginalName(originalName);
+        entry.setNewName(newName);
+        entry.setFunctionAddressKey(functionAddress != null ? formatMemoryAddressKey(functionAddress) : null);
+        map.put(key, entry);
+        saveGlobalDatPendingRenames(map);
+    }
+
+    /**
+     * All pending global DAT renames (copy).
+     */
+    public Map<String, GlobalDatPendingRenameEntry> getGlobalDatPendingRenames() {
+        String json = properties.getString(GLOBAL_DAT_PENDING_RENAMES_KEY);
+        if (json == null || json.isEmpty()) {
+            return new HashMap<>();
+        }
+        Type mapType = new TypeToken<Map<String, GlobalDatPendingRenameEntry>>() { }.getType();
+        Map<String, GlobalDatPendingRenameEntry> map = gson.fromJson(json, mapType);
+        return map != null ? new HashMap<>(map) : new HashMap<>();
+    }
+
+    private void saveGlobalDatPendingRenames(Map<String, GlobalDatPendingRenameEntry> map) {
+        if (map == null || map.isEmpty()) {
+            properties.setString(GLOBAL_DAT_PENDING_RENAMES_KEY, "");
+            return;
+        }
+        properties.setString(GLOBAL_DAT_PENDING_RENAMES_KEY, gson.toJson(map));
+    }
+
+    /**
+     * Remove one pending entry after it has been reconciled with a structured global.
+     */
+    public void removeGlobalDatPendingRename(Address memoryAddress) {
+        if (memoryAddress == null) {
+            return;
+        }
+        String key = formatMemoryAddressKey(memoryAddress);
+        if (key == null) {
+            return;
+        }
+        Map<String, GlobalDatPendingRenameEntry> map = getGlobalDatPendingRenames();
+        if (map.remove(key) != null) {
+            saveGlobalDatPendingRenames(map);
         }
     }
     
@@ -473,6 +634,40 @@ public class InferenceStorage {
         }
         String json = properties.getString(APPLIED_VARIABLE_RENAMES_PREFIX + address.toString());
         return json != null && !json.isEmpty();
+    }
+
+    /**
+     * Persist ownership metadata for successfully-applied variable renames.
+     */
+    public void storeAppliedVariableRenameRecords(
+        Address address,
+        Map<String, AppliedVariableRenameRecord> appliedRenameRecords
+    ) {
+        if (address == null || appliedRenameRecords == null || appliedRenameRecords.isEmpty()) {
+            return;
+        }
+        Map<String, AppliedVariableRenameRecord> merged = getAppliedVariableRenameRecords(address);
+        merged.putAll(appliedRenameRecords);
+        properties.setString(
+            APPLIED_VARIABLE_RENAME_RECORDS_PREFIX + address.toString(),
+            gson.toJson(merged)
+        );
+    }
+
+    /**
+     * Get persisted ownership metadata for applied variable renames.
+     */
+    public Map<String, AppliedVariableRenameRecord> getAppliedVariableRenameRecords(Address address) {
+        if (address == null) {
+            return new HashMap<>();
+        }
+        String json = properties.getString(APPLIED_VARIABLE_RENAME_RECORDS_PREFIX + address.toString());
+        if (json == null || json.isEmpty()) {
+            return new HashMap<>();
+        }
+        Type mapType = new TypeToken<Map<String, AppliedVariableRenameRecord>>() { }.getType();
+        Map<String, AppliedVariableRenameRecord> records = gson.fromJson(json, mapType);
+        return records != null ? records : new HashMap<>();
     }
     
     /**
@@ -704,6 +899,7 @@ public class InferenceStorage {
             id,
             "parameter_type",
             attempts,
+            null,
             inference,
             null
         );
@@ -723,7 +919,27 @@ public class InferenceStorage {
             "return_type",
             attempts,
             null,
+            null,
             inference
+        );
+        upsertDeferredTypeInference(record);
+    }
+
+    /**
+     * Add or replace a deferred global variable type inference.
+     */
+    public void enqueueDeferredGlobalVariableType(GlobalVariableType inference, int attempts) {
+        if (inference == null || inference.getAddress() == null) {
+            return;
+        }
+        String id = buildDeferredGlobalVariableTypeInferenceId(inference);
+        DeferredTypeInferenceRecord record = new DeferredTypeInferenceRecord(
+            id,
+            "global_variable_type",
+            attempts,
+            inference,
+            null,
+            null
         );
         upsertDeferredTypeInference(record);
     }
@@ -805,6 +1021,29 @@ public class InferenceStorage {
     }
 
     /**
+     * Mark global variable type as inferred so later updates can safely overwrite.
+     */
+    public void markInferredGlobalVariableType(Address address, String typeName) {
+        if (address == null) {
+            return;
+        }
+        String key = INFERRED_TYPE_PREFIX + "global." + address.toString();
+        properties.setString(key, typeName != null ? typeName : "inferred");
+    }
+
+    /**
+     * Check whether global variable type was inferred before.
+     */
+    public boolean wasGlobalVariableTypeInferred(Address address) {
+        if (address == null) {
+            return false;
+        }
+        String key = INFERRED_TYPE_PREFIX + "global." + address.toString();
+        String value = properties.getString(key);
+        return value != null && !value.isEmpty();
+    }
+
+    /**
      * Mark that the return type was successfully propagated to the returned local variable.
      */
     public void markReturnTypeLocalPropagated(Address address) {
@@ -838,6 +1077,13 @@ public class InferenceStorage {
         UUID structId = inference.getStructId();
         String structPart = structId != null ? structId.toString() : "none";
         return "return_type:" + inference.getAddress()
+            + ":" + sanitizeForId(inference.getTypeAnnotation()) + ":" + structPart;
+    }
+
+    public String buildDeferredGlobalVariableTypeInferenceId(GlobalVariableType inference) {
+        UUID structId = inference.getStructId();
+        String structPart = structId != null ? structId.toString() : "none";
+        return "global_variable_type:" + inference.getAddress()
             + ":" + sanitizeForId(inference.getTypeAnnotation()) + ":" + structPart;
     }
 

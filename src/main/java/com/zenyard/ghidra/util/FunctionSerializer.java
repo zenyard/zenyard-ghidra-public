@@ -1,7 +1,6 @@
 package com.zenyard.ghidra.util;
 
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -16,12 +15,15 @@ import com.zenyard.ghidra.api.generated.model.Range;
 import com.zenyard.ghidra.api.generated.model.RangeDetail;
 import com.zenyard.ghidra.api.generated.model.Thunk;
 import ghidra.app.decompiler.ClangFuncNameToken;
+import ghidra.app.decompiler.ClangLine;
 import ghidra.app.decompiler.ClangToken;
 import ghidra.app.decompiler.ClangTokenGroup;
 import ghidra.app.decompiler.ClangVariableToken;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
+import ghidra.app.decompiler.PrettyPrinter;
+import ghidra.app.decompiler.component.DecompilerUtils;
 import ghidra.program.model.pcode.HighGlobal;
 import ghidra.program.model.pcode.HighLocal;
 import ghidra.program.model.pcode.HighParam;
@@ -119,9 +121,10 @@ public class FunctionSerializer {
                         + (results.getErrorMessage() != null ? results.getErrorMessage() : "Unknown error"));
                 }
                 
-                CodeAndRanges car = extractCodeAndRanges(results, program);
-                decompiledCode = car.code();
-                ranges = car.ranges();
+                CodeAndLineRanges all = extractCodeAndLineRanges(results, program);
+                decompiledCode = all.code();
+                ranges = all.ranges();
+                lineRanges = all.lineRanges();
 
                 long lvarCount = ranges.stream()
                     .filter(r -> r.getDetail() != null && r.getDetail().getActualInstance() instanceof LVarDetail)
@@ -130,10 +133,7 @@ public class FunctionSerializer {
                 ghidra.util.Msg.debug(FunctionSerializer.class,
                     "Ranges for " + apiAddress + ": " + ranges.size()
                     + " [lvar=" + lvarCount + " addr=" + addrCount + "]");
-                
-                // Extract line ranges (simplified - one range per line)
-                lineRanges = extractLineRanges(decompiledCode);
-                
+
                 // Extract decompiler notes/warnings
                 decompilerNotes = extractDecompilerNotes(results);
                 
@@ -262,19 +262,135 @@ public class FunctionSerializer {
     
     record CodeAndRanges(String code, List<Range> ranges) {}
 
+    record CodeAndLineRanges(String code, List<Range> ranges, List<LineRange> lineRanges) {}
+
     record TokenData(String text, RangeDetail detail) {}
 
-    private static CodeAndRanges extractCodeAndRanges(DecompileResults results, Program program) {
-        ClangTokenGroup markup = results.getCCodeMarkup();
-        List<TokenData> tokenData = new ArrayList<>();
+    /** A decompiled line: indent level, stable id, and tokens within. */
+    record LineData(int indent, String id, List<TokenData> tokens) {}
 
-        Iterator<ClangToken> it = markup.tokenIterator(true);
-        while (it.hasNext()) {
-            ClangToken token = it.next();
-            tokenData.add(new TokenData(token.getText(), buildRangeDetail(token, program)));
+    /**
+     * Walk the decompiler markup line-by-line, producing {@code code} (with newlines and
+     * indentation), per-token {@code ranges}, and IDA-aligned {@code lineRanges} that anchor
+     * each decompiled line to an instruction address. Mirrors
+     * {@code decompai_ida.lines.get_line_ids} — leading addressless lines become {@code header},
+     * trailing addressless lines become {@code tail}, and addressless lines between code emit
+     * the address of the next addressed line so they collapse into the same range.
+     */
+    private static CodeAndLineRanges extractCodeAndLineRanges(DecompileResults results, Program program) {
+        ClangTokenGroup markup = results.getCCodeMarkup();
+        List<ClangLine> ccLines = DecompilerUtils.toLines(markup);
+        return buildCodeAndLineRanges(buildLineData(ccLines, program));
+    }
+
+    private static List<LineData> buildLineData(List<ClangLine> ccLines, Program program) {
+        // Trim trailing fully-empty ClangLines (no tokens, no indent). DecompilerUtils.toLines
+        // emits one when the markup ends on a ClangBreak, but the server validator uses
+        // code.rstrip("\n").count("\n") + 1 — a trailing empty line contributes no \n after rstrip
+        // and would make line_ranges sum exceed the counted code lines by one.
+        int trimmed = ccLines.size();
+        while (trimmed > 0) {
+            ClangLine candidate = ccLines.get(trimmed - 1);
+            if (candidate.getIndent() != 0) break;
+            boolean hasContent = false;
+            for (ClangToken t : candidate.getAllTokens()) {
+                String text = t.getText();
+                if (text != null && !text.isEmpty()) {
+                    hasContent = true;
+                    break;
+                }
+            }
+            if (hasContent) break;
+            trimmed--;
+        }
+        if (trimmed != ccLines.size()) {
+            ccLines = ccLines.subList(0, trimmed);
         }
 
-        return buildCodeAndRanges(tokenData);
+        int n = ccLines.size();
+        List<List<TokenData>> tokens = new ArrayList<>(n);
+        Address[] firstAddresses = new Address[n];
+        int firstAddressedIdx = -1;
+        int lastAddressedIdx = -1;
+        for (int i = 0; i < n; i++) {
+            ClangLine line = ccLines.get(i);
+            List<TokenData> lineTokens = new ArrayList<>();
+            Address firstAddr = null;
+            for (ClangToken token : line.getAllTokens()) {
+                lineTokens.add(new TokenData(token.getText(), buildRangeDetail(token, program)));
+                if (firstAddr == null && token.getMinAddress() != null) {
+                    firstAddr = token.getMinAddress();
+                }
+            }
+            tokens.add(lineTokens);
+            firstAddresses[i] = firstAddr;
+            if (firstAddr != null) {
+                if (firstAddressedIdx < 0) firstAddressedIdx = i;
+                lastAddressedIdx = i;
+            }
+        }
+
+        // Carry-forward scan: each addressless line inherits the next addressed line's address.
+        String[] carriedId = new String[n];
+        String pending = null;
+        for (int i = n - 1; i >= 0; i--) {
+            Address addr = firstAddresses[i];
+            if (addr != null) {
+                pending = Long.toHexString(addr.getOffset());
+            }
+            carriedId[i] = pending;
+        }
+
+        List<LineData> result = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            String id;
+            if (firstAddressedIdx < 0 || i < firstAddressedIdx) {
+                id = "header";
+            } else if (i > lastAddressedIdx) {
+                id = "tail";
+            } else {
+                id = carriedId[i];
+            }
+            result.add(new LineData(ccLines.get(i).getIndent(), id, tokens.get(i)));
+        }
+        return result;
+    }
+
+    static CodeAndLineRanges buildCodeAndLineRanges(List<LineData> lines) {
+        StringBuilder code = new StringBuilder();
+        List<Range> ranges = new ArrayList<>();
+        List<LineRange> lineRanges = new ArrayList<>();
+
+        for (LineData line : lines) {
+            for (int j = 0; j < line.indent(); j++) {
+                code.append(PrettyPrinter.INDENT_STRING);
+            }
+            for (TokenData token : line.tokens()) {
+                String text = token.text();
+                if (text == null || text.isEmpty()) continue;
+                int start = code.length();
+                code.append(text);
+                if (token.detail() != null) {
+                    Range range = new Range();
+                    range.setStart(start);
+                    range.setLength(text.length());
+                    range.setDetail(token.detail());
+                    ranges.add(range);
+                }
+            }
+            code.append('\n');
+
+            if (!lineRanges.isEmpty() && lineRanges.get(lineRanges.size() - 1).getId().equals(line.id())) {
+                LineRange last = lineRanges.get(lineRanges.size() - 1);
+                last.setLineCount(last.getLineCount() + 1);
+            } else {
+                LineRange lr = new LineRange();
+                lr.setId(line.id());
+                lr.setLineCount(1);
+                lineRanges.add(lr);
+            }
+        }
+        return new CodeAndLineRanges(code.toString(), ranges, lineRanges);
     }
 
     static CodeAndRanges buildCodeAndRanges(List<TokenData> tokens) {
@@ -465,24 +581,6 @@ public class FunctionSerializer {
         return detail;
     }
 
-    /**
-     * Extract line ranges from decompiled code.
-     */
-    private static List<LineRange> extractLineRanges(String code) {
-        List<LineRange> lineRanges = new ArrayList<>();
-        String[] lines = code.split("\n");
-        
-        for (int i = 0; i < lines.length; i++) {
-            String lineId = "line_" + (i + 1);
-            LineRange lineRange = new LineRange();
-            lineRange.setLineCount(1);
-            lineRange.setId(lineId);
-            lineRanges.add(lineRange);
-        }
-        
-        return lineRanges;
-    }
-    
     /**
      * Extract decompiler notes/warnings.
      */

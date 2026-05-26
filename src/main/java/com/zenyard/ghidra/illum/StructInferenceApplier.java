@@ -12,11 +12,14 @@ import java.util.regex.Pattern;
 import com.zenyard.ghidra.api.generated.model.FieldDefinition;
 import com.zenyard.ghidra.api.generated.model.StructDefinition;
 import com.zenyard.ghidra.storage.InferenceStorage;
+import com.zenyard.ghidra.util.FunctionPointerTypeSupport;
 
 import ghidra.program.model.data.ArrayDataType;
+import ghidra.program.model.data.ByteDataType;
 import ghidra.program.model.data.CategoryPath;
 import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.DataTypeConflictHandler;
+import ghidra.program.model.data.DataTypeDependencyException;
 import ghidra.program.model.data.DataTypeComponent;
 import ghidra.program.model.data.DataTypeManager;
 import ghidra.program.model.data.DoubleDataType;
@@ -35,6 +38,9 @@ public class StructInferenceApplier {
 
     private static final CategoryPath STRUCT_CATEGORY = new CategoryPath("/zenyard/structs");
     private static final Pattern ARRAY_PATTERN = Pattern.compile(".*\\[(\\d+)\\]\\s*$");
+    /** C-style declarator between type and open array: {@code uint8_t identifier[]}. */
+    private static final Pattern DECLARATOR_BEFORE_OPEN_ARRAY =
+        Pattern.compile("^(.*\\S)\\s+([a-zA-Z_]\\w*)\\s*\\[\\s*\\]\\s*$");
 
     private final InferenceStorage inferenceStorage;
 
@@ -92,8 +98,8 @@ public class StructInferenceApplier {
             return;
         }
 
-        Structure structure = ensureStructure(dtm, structName);
-        structure.deleteAll();
+        StructureDataType replacementStructure =
+            new StructureDataType(STRUCT_CATEGORY, structName, 0, dtm);
 
         for (FieldDefinition field : fields) {
             if (field == null) {
@@ -106,9 +112,19 @@ public class StructInferenceApplier {
             }
 
             String fieldName = sanitizeName(field.getSuggestedFieldName(), "field_" + offset);
-            DataType fieldType = resolveInferenceDataType(program, field.getFieldType(), field.getStructId());
+            DataType fieldType = resolveInferenceDataType(
+                program,
+                field.getFieldType(),
+                field.getStructId()
+            );
             if (fieldType == null) {
-                fieldType = resolveFallbackFieldType(program, definition, structure, structName, field);
+                fieldType = resolveFallbackFieldType(
+                    program,
+                    definition,
+                    replacementStructure,
+                    structName,
+                    field
+                );
                 if (fieldType == null) {
                     Msg.warn(this, "Failed resolving struct field type for " + structName + "." + fieldName
                         + " annotation=" + field.getFieldType());
@@ -117,22 +133,28 @@ public class StructInferenceApplier {
             }
 
             int fieldLength = Math.max(1, getSafeDataTypeLength(fieldType, program));
-            ensureStructureLength(structure, offset + fieldLength);
             try {
-                DataTypeComponent existing = structure.getComponentAt(offset);
-                if (existing != null && !(existing.getDataType() instanceof Undefined1DataType)) {
-                    structure.delete(existing.getOrdinal());
-                }
-                ensureStructureLength(structure, offset + fieldLength);
-                structure.insertAtOffset(offset, fieldType, fieldLength, fieldName, null);
+                insertFieldAtOffset(
+                    replacementStructure,
+                    offset,
+                    fieldType,
+                    fieldLength,
+                    fieldName
+                );
             } catch (Exception e) {
                 Msg.warn(this, "Failed applying field " + fieldName + " at +" + offset + ": " + e.getMessage());
             }
         }
 
-        ensureCycleStructPointerField(program, definition, structure, structName, cycleMembers);
+        ensureCycleStructPointerField(
+            program,
+            definition,
+            replacementStructure,
+            structName,
+            cycleMembers
+        );
 
-        DataType resolved = dtm.resolve(structure, DataTypeConflictHandler.REPLACE_HANDLER);
+        DataType resolved = replaceOrResolveStructure(dtm, structName, replacementStructure);
         inferenceStorage.storeStructDataTypePath(definition.getId(), resolved.getPathName());
         inferenceStorage.storeStructName(definition.getId(), structName);
         inferenceStorage.storeStructEffectiveName(definition.getId(), structName);
@@ -171,23 +193,47 @@ public class StructInferenceApplier {
         }
         DataTypeManager dtm = program.getDataTypeManager();
 
+        String effective = rewriteOpenArraysAsPointers(typeAnnotation);
+        boolean openArrayRewritten =
+            typeAnnotation != null && effective != null && !typeAnnotation.trim().equals(effective.trim());
+
         if (structId != null) {
             DataType mappedStruct = resolveStructTypeById(program, structId);
             if (mappedStruct != null) {
-                return applyPointerDepth(mappedStruct, countTrailingPointers(typeAnnotation));
+                return applyArrayThenPointersFromAnnotation(
+                    mappedStruct,
+                    program,
+                    effective,
+                    dtm,
+                    null);
             }
-            // When a struct_id is provided, require an actual mapped struct to avoid
-            // falsely resolving to an unrelated named type (e.g. typedef/placeholder).
+            // When struct_id is present but the struct is not in the DTM yet, still resolve
+            // abstract function-pointer annotations (e.g. void (*)(uint32_t)) instead of failing.
+            if (typeAnnotation == null
+                || !FunctionPointerTypeSupport.annotationLooksLikeAbstractFunctionPointer(typeAnnotation)) {
+                // Open-array fields decay to pointers; resolve from the rewritten annotation without
+                // struct_id so uint8_t[] etc. still apply when struct_id is stale or wrong.
+                if (openArrayRewritten) {
+                    return resolveInferenceDataType(program, effective, null);
+                }
+                return null;
+            }
+        }
+
+        if (effective == null || effective.trim().isEmpty()) {
             return null;
         }
 
-        if (typeAnnotation == null || typeAnnotation.trim().isEmpty()) {
-            return null;
+        int pointerDepth = countTrailingPointers(effective);
+        String coreAnnotation =
+            FunctionPointerTypeSupport.stripTrailingPointerSuffix(effective.trim());
+        DataType abstractFnPtr = FunctionPointerTypeSupport.tryResolveAbstractFunctionPointer(
+            program, coreAnnotation);
+        if (abstractFnPtr != null) {
+            return applyPointerDepth(abstractFnPtr, pointerDepth, dtm);
         }
 
-        int pointerDepth = countTrailingPointers(typeAnnotation);
-        String normalized = normalizeTypeName(typeAnnotation);
-        int arrayCount = parseArrayCount(normalized);
+        String normalized = normalizeTypeName(effective);
         String baseTypeName = stripArraySuffix(normalized);
 
         DataType baseType = resolveBaseType(dtm, baseTypeName);
@@ -198,12 +244,38 @@ public class StructInferenceApplier {
             return null;
         }
 
-        DataType resolved = baseType;
+        return applyArrayThenPointersFromAnnotation(
+            baseType,
+            program,
+            effective,
+            dtm,
+            baseTypeName);
+    }
+
+    /**
+     * When {@code baseTypeNameForCharArray} is non-null, byte-sized {@code char} array annotations
+     * use the DTM {@code /byte} type as the array element (matches legacy name-resolution behavior).
+     * When null (struct resolved by {@code struct_id}), the core type is always the array element.
+     */
+    private DataType applyArrayThenPointersFromAnnotation(
+            DataType coreType,
+            Program program,
+            String typeAnnotation,
+            DataTypeManager dtm,
+            String baseTypeNameForCharArray) {
+        int pointerDepth = countTrailingPointers(typeAnnotation);
+        String normalized = typeAnnotation != null ? normalizeTypeName(typeAnnotation) : "";
+        int arrayCount = parseArrayCount(normalized);
+        DataType resolved = coreType;
         if (arrayCount > 0 && pointerDepth == 0) {
-            int elementLength = Math.max(1, getSafeDataTypeLength(baseType, program));
-            resolved = new ArrayDataType(baseType, arrayCount, elementLength, dtm);
+            DataType arrayBaseType = baseTypeNameForCharArray != null
+                && isByteSizedCharArrayBase(baseTypeNameForCharArray)
+                ? firstNonNull(dtm.getDataType("/byte"), ByteDataType.dataType)
+                : coreType;
+            int elementLength = Math.max(1, getSafeDataTypeLength(arrayBaseType, program));
+            resolved = new ArrayDataType(arrayBaseType, arrayCount, elementLength, dtm);
         }
-        return applyPointerDepth(resolved, pointerDepth);
+        return applyPointerDepth(resolved, pointerDepth, dtm);
     }
 
     /**
@@ -245,7 +317,7 @@ public class StructInferenceApplier {
         if (program == null || definition == null || structure == null || field == null) {
             return null;
         }
-        String typeAnnotation = field.getFieldType();
+        String typeAnnotation = rewriteOpenArraysAsPointers(field.getFieldType());
         int pointerDepth = countTrailingPointers(typeAnnotation);
         if (pointerDepth <= 0) {
             return null;
@@ -262,11 +334,14 @@ public class StructInferenceApplier {
                 || baseTypeName.equalsIgnoreCase(structName)
                 || sanitizeName(baseTypeName, "").equals(sanitizeName(structName, ""));
         }
+        DataTypeManager dtm = program.getDataTypeManager();
         if (isSelfReferential) {
-            DataType ptrToSelf = new PointerDataType(structure);
-            return pointerDepth > 1 ? applyPointerDepth(ptrToSelf, pointerDepth - 1) : ptrToSelf;
+            DataType ptrToSelf = new PointerDataType(structure, dtm);
+            return pointerDepth > 1
+                ? applyPointerDepth(ptrToSelf, pointerDepth - 1, dtm)
+                : ptrToSelf;
         }
-        return new PointerDataType();
+        return new PointerDataType(dtm);
     }
 
     /**
@@ -357,18 +432,20 @@ public class StructInferenceApplier {
         }
     }
 
-    private Structure ensureStructure(DataTypeManager dtm, String structName) {
+    static DataType replaceOrResolveStructure(
+            DataTypeManager dtm,
+            String structName,
+            StructureDataType replacementStructure) {
         DataType existing = dtm.getDataType(STRUCT_CATEGORY, structName);
         if (existing instanceof Structure) {
-            return (Structure) existing;
+            try {
+                return dtm.replaceDataType(existing, replacementStructure, false);
+            } catch (DataTypeDependencyException e) {
+                Msg.warn(StructInferenceApplier.class,
+                    "Failed replacing existing struct '" + structName + "': " + e.getMessage());
+            }
         }
-
-        StructureDataType candidate = new StructureDataType(STRUCT_CATEGORY, structName, 0, dtm);
-        DataType resolved = dtm.resolve(candidate, DataTypeConflictHandler.REPLACE_HANDLER);
-        if (resolved instanceof Structure) {
-            return (Structure) resolved;
-        }
-        return candidate;
+        return dtm.resolve(replacementStructure, DataTypeConflictHandler.REPLACE_HANDLER);
     }
 
     private DataType resolveBaseType(DataTypeManager dtm, String typeName) {
@@ -440,13 +517,6 @@ public class StructInferenceApplier {
         }
     }
 
-    private void ensureStructureLength(Structure structure, int requiredLength) {
-        int currentLength = structure.getLength();
-        if (requiredLength > currentLength) {
-            structure.growStructure(requiredLength - currentLength);
-        }
-    }
-
     /**
      * For structs in a cycle (e.g. linked-list Node) or structs with self-referential pointer
      * fields detected by name, ensure there is space for the pointer field when the inference
@@ -483,7 +553,7 @@ public class StructInferenceApplier {
             if (field == null) {
                 continue;
             }
-            String fieldAnnotation = field.getFieldType();
+            String fieldAnnotation = rewriteOpenArraysAsPointers(field.getFieldType());
             int pointerDepth = countTrailingPointers(fieldAnnotation);
             if (pointerDepth <= 0) {
                 continue;
@@ -531,10 +601,15 @@ public class StructInferenceApplier {
                 continue;
             }
             String fieldName = sanitizeName(field.getSuggestedFieldName(), "self_ptr_" + pointerOffset);
-            DataType ptrToSelf = new PointerDataType(structure);
-            ensureStructureLength(structure, pointerOffset + pointerSize);
+            DataType ptrToSelf = new PointerDataType(structure, program.getDataTypeManager());
             try {
-                structure.insertAtOffset(pointerOffset, ptrToSelf, pointerSize, fieldName, null);
+                insertFieldAtOffset(
+                    structure,
+                    pointerOffset,
+                    ptrToSelf,
+                    pointerSize,
+                    fieldName
+                );
                 Msg.info(this, "Added self-referential '" + fieldName + "' at +" + pointerOffset
                         + " for struct " + structName + " (cycle=" + isCycleMember + ")");
             } catch (Exception e) {
@@ -542,6 +617,19 @@ public class StructInferenceApplier {
                         + pointerOffset + ": " + e.getMessage());
             }
         }
+    }
+
+    static void insertFieldAtOffset(
+            Structure structure,
+            int offset,
+            DataType fieldType,
+            int fieldLength,
+            String fieldName) {
+        DataTypeComponent existing = structure.getComponentAt(offset);
+        if (existing != null && !(existing.getDataType() instanceof Undefined1DataType)) {
+            structure.delete(existing.getOrdinal());
+        }
+        structure.insertAtOffset(offset, fieldType, fieldLength, fieldName, null);
     }
 
     /**
@@ -579,10 +667,24 @@ public class StructInferenceApplier {
         return Math.max(1, program.getDefaultPointerSize());
     }
 
-    private DataType applyPointerDepth(DataType base, int pointerDepth) {
+    private boolean isByteSizedCharArrayBase(String baseTypeName) {
+        if (baseTypeName == null) {
+            return false;
+        }
+        String normalized = baseTypeName.trim().toLowerCase();
+        return normalized.equals("char")
+            || normalized.equals("signed char")
+            || normalized.equals("unsigned char");
+    }
+
+    /** Wrap in pointers using {@code dtm} so length matches the program (void* was 4 without it). */
+    private DataType applyPointerDepth(
+            DataType base,
+            int pointerDepth,
+            DataTypeManager dtm) {
         DataType result = base;
         for (int i = 0; i < pointerDepth; i++) {
-            result = new PointerDataType(result);
+            result = new PointerDataType(result, dtm);
         }
         return result;
     }
@@ -635,6 +737,61 @@ public class StructInferenceApplier {
             normalized = normalized.substring(0, normalized.length() - 1).trim();
         }
         return normalized;
+    }
+
+    /**
+     * Trailing {@code []} without a numeric dimension is treated like one pointer level ({@code *}),
+     * including {@code char*[]} → {@code char**}. Fixed-size {@code [N]} suffixes are unchanged.
+     * Also normalizes {@code uint8_t identifier[]} → {@code uint8_t*}.
+     */
+    static String rewriteOpenArraysAsPointers(String typeAnnotation) {
+        if (typeAnnotation == null) {
+            return null;
+        }
+        String s = stripDeclaratorBeforeOpenArray(typeAnnotation.trim());
+        StringBuilder sb = new StringBuilder(s);
+        while (true) {
+            String t = sb.toString().trim();
+            if (t.isEmpty()) {
+                break;
+            }
+            if (endsWithFixedSizeArraySuffix(t)) {
+                break;
+            }
+            if (!t.matches("(?s).*\\[\\s*\\]\\s*$")) {
+                break;
+            }
+            int open = t.lastIndexOf('[');
+            if (open < 0) {
+                break;
+            }
+            sb = new StringBuilder(t.substring(0, open).trim()).append('*');
+        }
+        return sb.toString().trim();
+    }
+
+    private static boolean endsWithFixedSizeArraySuffix(String t) {
+        return t != null && t.matches("(?s).*\\[\\s*\\d+\\s*\\]\\s*$");
+    }
+
+    /**
+     * Strip {@code uint8_t identifier[]} → {@code uint8_t []} for open-array handling.
+     */
+    private static String stripDeclaratorBeforeOpenArray(String s) {
+        if (s == null || s.isEmpty()) {
+            return s;
+        }
+        if (endsWithFixedSizeArraySuffix(s)) {
+            return s;
+        }
+        if (!s.matches("(?s).*\\[\\s*\\]\\s*$")) {
+            return s;
+        }
+        Matcher m = DECLARATOR_BEFORE_OPEN_ARRAY.matcher(s);
+        if (m.matches()) {
+            return m.group(1).trim() + " []";
+        }
+        return s;
     }
 
     private DataType firstNonNull(DataType first, DataType second) {

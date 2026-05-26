@@ -19,7 +19,6 @@ import com.zenyard.ghidra.events.EventDispatcher;
 import com.zenyard.ghidra.tasks.EventAwareTask;
 import com.zenyard.ghidra.storage.ZenyardProgramProperties;
 import com.zenyard.ghidra.status.AnalysisStatus;
-import com.zenyard.ghidra.status.RemoteAnalysisStats;
 import com.zenyard.ghidra.util.ZenyardConstants;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
@@ -47,6 +46,10 @@ public class PollServerStatusTask extends EventAwareTask {
     private final Program program;
     private volatile boolean shouldStop = false;
     private Integer maxServerRevision = null;
+    // In-memory marker: have we observed the server analyzing since this task started?
+    // Mirrors IDA's lack of any persisted analysis-in-progress state — analysis
+    // tracking is per-run, not across program close/reopen.
+    private boolean analysisObserved = false;
     private int consecutiveConnectionFailures = 0;
     private boolean lastConnected = true;
     
@@ -165,132 +168,112 @@ public class PollServerStatusTask extends EventAwareTask {
             Msg.debug(this, "PollServerStatusTask: Binary ID available, starting polling loop");
             
             verifyConnectivityOnce();
-            
-            // Restore analysis state if it was in progress when program was closed
-            restoreAnalysisStateIfNeeded();
-            
+
             int localRevision = getLocalRevision();
             double fractionalServerRevision = getServerRevisionFractional();
-            
+
             while (!shouldStop && !monitor.isCancelled()) {
+                // IDA-parity gating: when fully in sync, suppress the server poll
+                // until the client has moved ahead. Polling while in sync was the
+                // window in which the server's "received but not yet enqueued"
+                // state surfaced as an empty `revision_analyses`, causing
+                // calculateServerRevisionFractional() to write the misleading
+                // "idle ⇒ local_revision" placeholder and the download task to
+                // declare premature completion.
+                // See decompai-ida/src/decompai_ida/poll_server_status_task.py
+                // (_run): the same `if client_in_sync: ...; wait_for_client_ahead;`
+                // gate precedes _poll_server there.
+                boolean clientInSync = Math.abs(localRevision - fractionalServerRevision) < REVISION_EPS;
+                if (clientInSync) {
+                    setLastDoneRevision(localRevision);
+                    maxServerRevision = null;
+                    if (analysisObserved) {
+                        Msg.debug(this, "PollServerStatusTask: Client in sync, signaling completion");
+                        analysisObserved = false;
+                    }
+                    publishAnalysisStatus(null, fractionalServerRevision);
+                    waitForClientAhead(monitor);
+                    if (shouldStop || monitor.isCancelled()) {
+                        return;
+                    }
+                    localRevision = getLocalRevision();
+                    fractionalServerRevision = getServerRevisionFractional();
+                }
+
                 try {
                     // Poll server status
                     BinaryStatus status = binariesApi.getDetailedStatus(binaryId);
-                    
+
                     // Extract and publish queue position from BinaryStatus.state
                     publishQueuePositionIfChanged(status);
-                    
+
                     // Extract and publish paused state from BinaryStatus.state
                     publishPausedStateIfChanged(status);
                     boolean paused = extractIsPaused(status);
-                    
+
                     // Refresh local revision each poll to avoid stale progress/ETA calculations
                     int currentLocalRevision = getLocalRevision();
                     if (currentLocalRevision != localRevision) {
                         Msg.debug(this, "PollServerStatusTask: Local revision changed: " + localRevision + " -> " + currentLocalRevision);
                         localRevision = currentLocalRevision;
                     }
-                    
+
                     // Calculate and update server revision from status
                     // Store only fractional value (like Python version) - derive integer when needed
                     double oldFractionalServerRevision = fractionalServerRevision;
                     int currentServerRevisionInt = (int) fractionalServerRevision;
                     fractionalServerRevision = calculateServerRevisionFractional(status, currentServerRevisionInt, localRevision);
                     setServerRevisionFractional(fractionalServerRevision);
-                    
+
                     // Publish event if server revision changed (compare fractional values like Python version)
                     // This ensures events are published even when only the fractional part changes (e.g., 5.7 -> 5.8)
                     // Use tolerance-based comparison for floating point to handle precision issues
                     double tolerance = 0.0001;
                     boolean revisionChanged = Math.abs(oldFractionalServerRevision - fractionalServerRevision) > tolerance;
-                    
+
                     if (revisionChanged) {
                         Msg.debug(this, "Server revision changed: " + oldFractionalServerRevision + " -> " + fractionalServerRevision);
                         java.util.Map<String, Object> payload = new java.util.HashMap<>();
                         payload.put("serverRevision", (int) fractionalServerRevision);
                         payload.put("serverRevisionFractional", fractionalServerRevision);
-                        publishEvent(new ZenyardEvent(ZenyardEvent.EventType.SERVER_REVISION_UPDATED, 
+                        publishEvent(new ZenyardEvent(ZenyardEvent.EventType.SERVER_REVISION_UPDATED,
                             getTaskTitle(), payload));
                     } else {
                         Msg.debug(this, "Server revision unchanged: " + fractionalServerRevision + " (old: " + oldFractionalServerRevision + ")");
                     }
-                    
+
                     // When paused, suppress analysis progress tracking entirely so
                     // the status bar doesn't misleadingly show "Analyzing in background".
                     if (paused) {
-                        if (getRemoteAnalysisStats() != null) {
-                            clearRemoteAnalysisStats();
-                        }
+                        analysisObserved = false;
                         publishAnalysisStatus(null, fractionalServerRevision);
                     } else {
-                        // Track RemoteAnalysisStats when analysis starts
                         boolean isAnalyzing = (status.getRevisionAnalyses() != null && !status.getRevisionAnalyses().isEmpty());
-                        Msg.debug(this, "PollServerStatusTask: isAnalyzing=" + isAnalyzing 
+                        Msg.debug(this, "PollServerStatusTask: isAnalyzing=" + isAnalyzing
                             + ", revision_analyses=" + (status.getRevisionAnalyses() != null ? status.getRevisionAnalyses().size() : 0));
-                        
-                        // Check if analysis was in progress but server shows it's not analyzing anymore
-                        if (!isAnalyzing && isAnalysisInProgress()) {
-                            Msg.info(this, "PollServerStatusTask: Analysis completed while program was closed");
-                            clearRemoteAnalysisStats();
-                            setRemoteAnalysisCompletedOnce();
-                            publishAnalysisStatus(null, fractionalServerRevision);
-                        }
-                        
-                        if (isAnalyzing && getRemoteAnalysisStats() == null) {
-                            setRemoteAnalysisStats(new RemoteAnalysisStats(System.currentTimeMillis(), fractionalServerRevision));
-                            Msg.debug(this, "PollServerStatusTask: Analysis started, created RemoteAnalysisStats");
-                        }
-                        boolean hadAnalysisStats = (getRemoteAnalysisStats() != null);
-                        
-                        // Check if client is in sync with server (fractional compare, like IDA)
-                        boolean clientInSync = Math.abs(localRevision - fractionalServerRevision) < REVISION_EPS;
 
-                        if (clientInSync) {
-                            setLastDoneRevision(localRevision);
-                            if (getRemoteAnalysisStats() != null) {
-                                clearRemoteAnalysisStats();
-                            } else if (isAnalysisInProgress()) {
-                                setAnalysisInProgress(false);
-                                Msg.debug(this, "PollServerStatusTask: Analysis completed while program was closed, clearing flag");
-                            }
-                            int prevLocalRevision = localRevision;
-                            waitForClientAhead(monitor, localRevision);
-                            localRevision = getLocalRevision();
-
-                            if (localRevision != prevLocalRevision) {
-                                // Local revision advanced during wait — the server
-                                // revision from this poll cycle is stale and must not
-                                // be used for progress calculation.  Re-poll immediately
-                                // so the next iteration works with fresh server data.
-                                consecutiveConnectionFailures = 0;
-                                updateConnectivity(true);
-                                continue;
-                            }
+                        if (isAnalyzing && !analysisObserved) {
+                            analysisObserved = true;
+                            Msg.debug(this, "PollServerStatusTask: Analysis started");
                         }
-                        
+
                         AnalysisStatus analysisStatus = calculateAnalysisStatus(localRevision, fractionalServerRevision);
                         if (analysisStatus != null) {
-                            Msg.debug(this, "PollServerStatusTask: Publishing ANALYSIS_STATUS_UPDATED, progress=" 
+                            Msg.debug(this, "PollServerStatusTask: Publishing ANALYSIS_STATUS_UPDATED, progress="
                                 + analysisStatus.getProgress());
                             publishAnalysisStatus(analysisStatus, fractionalServerRevision);
-                        } else if (clientInSync) {
-                            if (hadAnalysisStats) {
-                                Msg.debug(this, "PollServerStatusTask: Client in sync, signaling completion");
-                                setRemoteAnalysisCompletedOnce();
-                            }
-                            publishAnalysisStatus(null, fractionalServerRevision);
                         } else {
                             Msg.debug(this, "PollServerStatusTask: No analysis status to publish");
                         }
                     }
-                    
+
                     // Reset connection failure counter on successful poll
                     consecutiveConnectionFailures = 0;
                     updateConnectivity(true);
-                    
+
                     // Wait before next poll
                     Thread.sleep(POLL_INTERVAL_MS);
-                    
+
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     return;
@@ -341,30 +324,39 @@ public class PollServerStatusTask extends EventAwareTask {
     }
     
     /**
-     * Wait for client to be ahead of server.
+     * Wait until the client's local revision is strictly ahead of the server's
+     * revision. Used by the main poll loop to gate the next server poll when
+     * client and server are in sync — mirrors
+     * decompai_ida/poll_server_status_task.py::_wait_for_client_to_be_ahead_of_server.
+     * Polls local + server-revision properties every 100 ms; exits when the
+     * client moves ahead, the task is stopped, or the monitor is cancelled.
      */
-    private void waitForClientAhead(TaskMonitor monitor, int currentRevision) {
-        int waitCount = 0;
-        while (!shouldStop && !monitor.isCancelled() && waitCount < 100) {
+    private void waitForClientAhead(TaskMonitor monitor) {
+        while (!shouldStop && !monitor.isCancelled()) {
             int localRev = getLocalRevision();
             int serverRev = (int) getServerRevisionFractional();
-            
+
             if (localRev > serverRev) {
-                return; // Client is ahead
+                return;
             }
-            
+
             try {
                 Thread.sleep(100);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
             }
-            waitCount++;
         }
     }
     
     /**
-     * Get local revision number.
+     * Get local revision number. Default 0 to match UploadRevisionsTask and
+     * DownloadInferencesTask, which share the same "revision" property. A
+     * mismatched default here caused the polling task to compute
+     * clientInSync=false against a 0-default server revision on every fresh
+     * binary, fire a premature poll, and persist `server_revision_fractional=1`
+     * before any upload — which the download task then read as completion.
+     * Mirrors decompai_ida/model.py: `revision = SingleValue("revision", int, default=0)`.
      */
     private int getLocalRevision() {
         ZenyardProgramProperties props = new ZenyardProgramProperties(program);
@@ -372,7 +364,7 @@ public class PollServerStatusTask extends EventAwareTask {
         if (revision != null) {
             return revision;
         }
-        return 1;
+        return 0;
     }
     
     /**
@@ -389,10 +381,9 @@ public class PollServerStatusTask extends EventAwareTask {
                 // Invalid format, fall back to default
             }
         }
-        // Default to 1.0 if not set
-        return 1.0;
+        return 0.0;
     }
-    
+
     /**
      * Store fractional server revision for accurate progress calculation.
      */
@@ -443,6 +434,8 @@ public class PollServerStatusTask extends EventAwareTask {
     
     /**
      * Get last done revision (when client was last in sync with server).
+     * Default 0 to match decompai_ida/model.py
+     * (`last_done_revision = SingleValue("last_done_revision", float, default=0.0)`).
      */
     private int getLastDoneRevision() {
         ZenyardProgramProperties props = new ZenyardProgramProperties(program);
@@ -450,7 +443,7 @@ public class PollServerStatusTask extends EventAwareTask {
         if (revision != null) {
             return revision;
         }
-        return 1;
+        return 0;
     }
     
     /**
@@ -459,82 +452,6 @@ public class PollServerStatusTask extends EventAwareTask {
     private void setLastDoneRevision(int revision) {
         ZenyardProgramProperties props = new ZenyardProgramProperties(program);
         props.setInt("last_done_revision", revision);
-    }
-    
-    /**
-     * Get RemoteAnalysisStats from properties.
-     */
-    private RemoteAnalysisStats getRemoteAnalysisStats() {
-        ZenyardProgramProperties props = new ZenyardProgramProperties(program);
-        String startTimeStr = props.getString("remote_analysis_start_time");
-        String startRevisionStr = props.getString("remote_analysis_start_revision");
-        
-        if (startTimeStr == null || startRevisionStr == null 
-            || startTimeStr.isEmpty() || startRevisionStr.isEmpty()) {
-            return null;
-        }
-        
-        try {
-            long startTime = Long.parseLong(startTimeStr);
-            double startRevision = Double.parseDouble(startRevisionStr);
-            return new RemoteAnalysisStats(startTime, startRevision);
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-    
-    /**
-     * Set RemoteAnalysisStats to properties.
-     */
-    private void setRemoteAnalysisStats(RemoteAnalysisStats stats) {
-        ZenyardProgramProperties props = new ZenyardProgramProperties(program);
-        props.setString("remote_analysis_start_time", String.valueOf(stats.getStartTime()));
-        props.setString("remote_analysis_start_revision", String.valueOf(stats.getStartRevision()));
-        // Mark analysis as in progress
-        setAnalysisInProgress(true);
-    }
-    
-    /**
-     * Clear RemoteAnalysisStats from properties.
-     */
-    private void clearRemoteAnalysisStats() {
-        ZenyardProgramProperties props = new ZenyardProgramProperties(program);
-        // Clear by setting to empty string (properties will be treated as not set)
-        props.setString("remote_analysis_start_time", "");
-        props.setString("remote_analysis_start_revision", "");
-        // Mark analysis as not in progress
-        setAnalysisInProgress(false);
-    }
-    
-    /**
-     * Check if analysis is in progress (persisted state).
-     */
-    private boolean isAnalysisInProgress() {
-        ZenyardProgramProperties props = new ZenyardProgramProperties(program);
-        String flag = props.getString("analysis_in_progress");
-        return "true".equals(flag);
-    }
-    
-    /**
-     * Set analysis in progress flag.
-     */
-    private void setAnalysisInProgress(boolean inProgress) {
-        ZenyardProgramProperties props = new ZenyardProgramProperties(program);
-        if (inProgress) {
-            props.setString("analysis_in_progress", "true");
-        } else {
-            // Clear by setting to empty string
-            props.setString("analysis_in_progress", "");
-        }
-    }
-
-    /**
-     * Persist that the binary has completed remote analysis at least once.
-     * Used by change tracking to suppress CHANGES_DETECTED before first analysis.
-     */
-    private void setRemoteAnalysisCompletedOnce() {
-        ZenyardProgramProperties props = new ZenyardProgramProperties(program);
-        props.setString("remote_analysis_completed_once", "true");
     }
     
     /**
@@ -563,63 +480,6 @@ public class PollServerStatusTask extends EventAwareTask {
         progress = Math.max(0.0, Math.min(1.0, progress));
         
         return new AnalysisStatus(progress);
-    }
-    
-    /**
-     * Restore analysis state if it was in progress when the program was closed.
-     * This allows the status bar to show "Analyzing in background" immediately on program activation,
-     * before the first server poll completes.
-     * 
-     * However, if analysis completed while the program was closed (client is in sync),
-     * we clear the state instead of restoring it.
-     */
-    private void restoreAnalysisStateIfNeeded() {
-        if (!isAnalysisInProgress()) {
-            Msg.debug(this, "PollServerStatusTask: No analysis in progress, skipping state restoration");
-            return;
-        }
-        
-        RemoteAnalysisStats stats = getRemoteAnalysisStats();
-        if (stats == null) {
-            Msg.debug(this, "PollServerStatusTask: Analysis in progress flag set but no stats found, clearing flag");
-            setAnalysisInProgress(false);
-            return;
-        }
-        
-        // Get current state from properties
-        int localRevision = getLocalRevision();
-        double fractionalServerRevision = getServerRevisionFractional();
-        
-        // Check if client is already in sync with server - this indicates analysis completed
-        // while the program was closed
-        boolean clientInSync = Math.abs(localRevision - fractionalServerRevision) < REVISION_EPS;
-        
-        if (clientInSync) {
-            // Analysis completed while program was closed - clear the state
-            Msg.info(this, "PollServerStatusTask: Analysis completed while program was closed, clearing state");
-            clearRemoteAnalysisStats(); // This also clears analysis_in_progress flag
-            setRemoteAnalysisCompletedOnce();
-            // Publish null status to unregister the status bar task
-            publishAnalysisStatus(null, fractionalServerRevision);
-            return;
-        }
-        
-        Msg.info(this, "PollServerStatusTask: Restoring analysis state - analysis was in progress when program closed");
-        
-        // Calculate analysis status using stored state
-        // Note: This uses the last known server_revision_fractional, which may be slightly stale
-        // The first poll will update it, but this gives immediate feedback to the user
-        AnalysisStatus analysisStatus = calculateAnalysisStatus(localRevision, fractionalServerRevision);
-        
-        if (analysisStatus != null) {
-            Msg.debug(this, "PollServerStatusTask: Restored analysis status, progress=" 
-                + analysisStatus.getProgress());
-            publishAnalysisStatus(analysisStatus, fractionalServerRevision);
-        } else {
-            // Analysis may have completed while program was closed, or state is invalid
-            // First poll will handle this properly
-            Msg.debug(this, "PollServerStatusTask: Could not restore analysis status, will check on first poll");
-        }
     }
     
     /**

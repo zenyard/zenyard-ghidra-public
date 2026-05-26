@@ -61,7 +61,7 @@ public class AnalyticsEventConsumer implements EventConsumer {
     private final boolean analyticsEnabled;
     /** Buffered pending event waiting for a binary ID to arrive. */
     private volatile AnalysisAcceptedEvent pendingAnalysisEvent = null;
-
+ 
     public AnalyticsEventConsumer(ApiClient apiClient, PluginConfiguration config) {
         this.analyticsApi = new AnalyticsApi(apiClient);
         this.analyticsEnabled = config.isAnalyticsEnabled();

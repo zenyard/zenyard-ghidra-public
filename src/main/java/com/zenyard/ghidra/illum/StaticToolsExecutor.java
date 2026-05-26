@@ -1,7 +1,6 @@
 package com.zenyard.ghidra.illum;
 
-import java.io.File;
-import java.nio.file.Files;
+import java.util.Base64;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -105,14 +104,8 @@ public class StaticToolsExecutor {
                 // Step 2: Serialize binary and upload original file
                 BinarySerializer.SerializedBinary serializedBinary = BinarySerializer.serializeBinary(program);
                 workflowManager.executeApiRequest(() -> {
-                    // Convert byte array to File for upload
-                    File tempFile = File.createTempFile("binary_upload_", ".bin");
-                    Files.write(tempFile.toPath(), serializedBinary.getData());
-                    try {
-                        binariesApi.putOriginalFile(serializedBinary.getName(), binaryId, tempFile, serializedBinary.getType());
-                    } finally {
-                        tempFile.delete();
-                    }
+                    String encodedData = Base64.getEncoder().encodeToString(serializedBinary.getData());
+                    binariesApi.putOriginalFile(serializedBinary.getName(), binaryId, encodedData, serializedBinary.getType());
                 });
                 
                 monitor.setMessage("Serializing functions...");

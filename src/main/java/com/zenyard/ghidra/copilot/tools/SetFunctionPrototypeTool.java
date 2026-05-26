@@ -4,21 +4,18 @@ import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import ghidra.app.cmd.function.ApplyFunctionSignatureCmd;
 import ghidra.app.cmd.function.FunctionRenameOption;
-import ghidra.app.services.DataTypeQueryService;
 import ghidra.app.util.parser.FunctionSignatureParser;
-import ghidra.program.model.data.ArchiveType;
-import ghidra.program.model.data.CategoryPath;
+import com.zenyard.ghidra.util.FunctionPointerTypeSupport;
+import com.zenyard.ghidra.util.HeadlessDataTypeQueryService;
 import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.DataTypeManager;
-import ghidra.program.model.data.DataTypePath;
 import ghidra.program.model.data.FunctionDefinitionDataType;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.SourceType;
-import ghidra.util.task.TaskMonitor;
+import ghidra.util.Msg;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
@@ -77,6 +74,9 @@ public class SetFunctionPrototypeTool {
                 boolean commit = false;
                 try {
                     DataTypeManager dtm = program.getDataTypeManager();
+                    prototype = FunctionPointerTypeSupport.preprocessPrototypeForSignatureParser(
+                        program, prototype);
+
                     FunctionSignatureParser parser = new FunctionSignatureParser(
                         dtm, new HeadlessDataTypeQueryService(dtm));
 
@@ -97,6 +97,13 @@ public class SetFunctionPrototypeTool {
                             + "program's data type manager."
                             + typeHints
                             + " Call getLocalTypes to see all available types.");
+                    }
+
+                    try {
+                        signature.setCategoryPath(FunctionPointerTypeSupport.ZENYARD_PROTOTYPES_CATEGORY);
+                    } catch (Exception e) {
+                        Msg.warn(SetFunctionPrototypeTool.class,
+                            "Could not set prototype category to /zenyard/prototypes: " + e.getMessage());
                     }
 
                     // The parser only reconstructs the textual signature fields.
@@ -147,108 +154,6 @@ public class SetFunctionPrototypeTool {
                     "Failed to set function prototype: " + e.getMessage(), e);
             }
         });
-    }
-
-    // ----------------------------------------------------------------
-    // Headless DataTypeQueryService — resolves types without GUI
-    // ----------------------------------------------------------------
-
-    /**
-     * Non-interactive implementation of {@link DataTypeQueryService} that
-     * resolves type names by searching the program's {@link DataTypeManager}
-     * across all categories.
-     *
-     * <p>The real tool-based service may show a type-chooser dialog on the
-     * Swing EDT when multiple matches exist, which deadlocks when called
-     * from a non-EDT thread (the LangGraph executor). This implementation
-     * never shows dialogs — it picks the best match automatically.
-     */
-    private static class HeadlessDataTypeQueryService implements DataTypeQueryService {
-
-        private final DataTypeManager dtm;
-
-        HeadlessDataTypeQueryService(DataTypeManager dtm) {
-            this.dtm = dtm;
-        }
-
-        @Override
-        public DataType getDataType(String filterText) {
-            return promptForDataType(filterText);
-        }
-
-        @Override
-        public DataType promptForDataType(String filterText) {
-            if (filterText == null || filterText.isBlank()) {
-                return null;
-            }
-
-            // Fast path: check root category
-            DataType rootMatch = dtm.getDataType(CategoryPath.ROOT, filterText);
-            if (rootMatch != null) {
-                return rootMatch;
-            }
-
-            // Search across all categories by name
-            List<DataType> matches = new ArrayList<>();
-            dtm.findDataTypes(filterText, matches);
-
-            if (matches.isEmpty()) {
-                return null;
-            }
-            if (matches.size() == 1) {
-                return matches.get(0);
-            }
-
-            // Multiple matches: prefer program-local type over built-in
-            for (DataType dt : matches) {
-                if (dt.getSourceArchive() != null
-                        && dt.getSourceArchive().getArchiveType()
-                            == ArchiveType.PROGRAM) {
-                    return dt;
-                }
-            }
-            return matches.get(0);
-        }
-
-        @Override
-        public List<DataType> getSortedDataTypeList() {
-            List<DataType> all = new ArrayList<>();
-            Iterator<DataType> iter = dtm.getAllDataTypes();
-            while (iter.hasNext()) {
-                all.add(iter.next());
-            }
-            all.sort((a, b) -> a.getName().compareToIgnoreCase(b.getName()));
-            return all;
-        }
-
-        @Override
-        public List<CategoryPath> getSortedCategoryPathList() {
-            return Collections.emptyList();
-        }
-
-        @Override
-        public List<DataType> findDataTypes(String name, TaskMonitor monitor) {
-            List<DataType> results = new ArrayList<>();
-            dtm.findDataTypes(name, results);
-            return results;
-        }
-
-        @Override
-        public List<DataType> getDataTypesByPath(DataTypePath path) {
-            if (path == null) {
-                return Collections.emptyList();
-            }
-            DataType dt = dtm.getDataType(path);
-            return dt != null ? List.of(dt) : Collections.emptyList();
-        }
-
-        @Override
-        public DataType getProgramDataTypeByPath(DataTypePath path) {
-            if (path == null) {
-                return null;
-            }
-            return dtm.getDataType(path);
-        }
     }
 
     // ----------------------------------------------------------------

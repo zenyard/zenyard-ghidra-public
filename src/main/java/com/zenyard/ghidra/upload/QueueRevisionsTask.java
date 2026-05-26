@@ -32,7 +32,6 @@ import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Program;
-import ghidra.program.model.mem.MemoryBlock;
 import ghidra.util.Msg;
 import ghidra.util.task.Task;
 import ghidra.util.task.TaskLauncher;
@@ -268,15 +267,16 @@ public class QueueRevisionsTask extends EventAwareTask {
             Function function = funcManager.getFunctionAt(address);
             
             if (function != null) {
-                com.zenyard.ghidra.api.generated.model.Function apiFunction = 
+                com.zenyard.ghidra.api.generated.model.Function apiFunction =
                     FunctionSerializer.serializeFunction(program, function, 0);
                 obj = new ModelObject();
                 obj.setActualInstance(apiFunction);
             } else {
-                MemoryBlock block = program.getMemory().getBlock(address);
-                if (block != null && block.getStart().equals(address)) {
+                Optional<SectionSerializer.SectionView> sectionView =
+                    SectionSerializer.findSectionAt(program, address);
+                if (sectionView.isPresent()) {
                     com.zenyard.ghidra.api.generated.model.Section section =
-                        SectionSerializer.serializeBlock(block);
+                        SectionSerializer.serializeSection(sectionView.get());
                     obj = new ModelObject();
                     obj.setActualInstance(section);
                 } else {
@@ -328,7 +328,49 @@ public class QueueRevisionsTask extends EventAwareTask {
         Msg.info(this, "Zenyard: Queued revision with " + objects.size() + " objects");
         return revision;
     }
-    
+
+    /**
+     * Reorder addresses so sections come first, then globals, then everything else,
+     * preserving the relative order within each band and emitting each address at
+     * most once.
+     *
+     * <p>Sections and globals are pulled forward because both must have an
+     * {@code Object} row in place before any inference at that address is written
+     * (server-side filtering — see the call site for details).
+     *
+     * <p>The dedup is what fixes the {@code objects_pkey} upload regression: an
+     * address can appear in both {@code sectionAddresses} and {@code globalAddresses}
+     * when Ghidra reports both a section and a global at the same page-aligned
+     * offset (common at Mach-O / ELF segment starts). Without the dedup the address
+     * lands in the upload chunk twice and the multi-row INSERT trips
+     * {@code (binary_id, address, min_revision)}.
+     */
+    static List<Address> reorderSectionsAndGlobalsFirst(
+            List<Address> orderedAddresses,
+            Set<Address> sectionAddresses,
+            Set<Address> globalAddresses) {
+        List<Address> reordered = new ArrayList<>(orderedAddresses.size());
+        Set<Address> appended = new HashSet<>();
+        for (Address addr : orderedAddresses) {
+            if (sectionAddresses.contains(addr) && appended.add(addr)) {
+                reordered.add(addr);
+            }
+        }
+        for (Address addr : orderedAddresses) {
+            if (globalAddresses.contains(addr) && appended.add(addr)) {
+                reordered.add(addr);
+            }
+        }
+        for (Address addr : orderedAddresses) {
+            if (!sectionAddresses.contains(addr)
+                    && !globalAddresses.contains(addr)
+                    && appended.add(addr)) {
+                reordered.add(addr);
+            }
+        }
+        return reordered;
+    }
+
     /**
      * Inner task that performs the actual revision processing with modal dialog.
      * This task is launched only when processing actually begins.
@@ -362,17 +404,56 @@ public class QueueRevisionsTask extends EventAwareTask {
             }
             
             SyncStatusStorage syncStatusStorage = new SyncStatusStorage(program);
+            List<Symbol> initialSymbols = null;
             if (isInitialUpload) {
-                initializeSyncStatus(program);
+                initialSymbols = initializeSyncStatus(program);
             }
-            
-            // Phase 1: Scan for dirty objects
+
+            // Phase 1: Scan for dirty objects.
+            // On initial upload reuse the list already computed by initializeSyncStatus — avoids
+            // a second full enumeration and the per-address getObjectSymbolForAddress calls.
             monitor.setMessage("Scanning database for objects...");
-            List<Symbol> dirtySymbols = parentTask.getDirtyObjectSymbols(monitor, syncStatusStorage);
+            List<Symbol> dirtySymbols = initialSymbols != null
+                ? initialSymbols
+                : parentTask.getDirtyObjectSymbols(monitor, syncStatusStorage);
             
             // Phase 2: Topological ordering
             List<Address> orderedAddresses = ObjectGraph.getObjectsInApproxTopoOrder(program, dirtySymbols);
-            
+
+            // Phase 2b: Pull section and global-variable addresses to the front
+            // of the queue. Both need an Object row in place before any inference
+            // at that address is written, otherwise the server filters those
+            // inferences out:
+            //   - Sections: `_validate_global_origins` drops every global access
+            //     whose address falls outside the union of uploaded non-executable
+            //     section ranges.
+            //   - Globals: `_object_exists_for_inference` requires
+            //     `objects.min_revision <= inferences.revision`, so any GVT
+            //     written by a caller before the global's own Object is uploaded
+            //     stays invisible to later queries — including
+            //     `GlobalStructAggregationActor._collect_all_gvts_by_address`. On
+            //     busybox this hid 496 GVTs at hot data addresses (e.g.
+            //     applet_main) and produced zero consolidation tasks, leaving
+            //     orphan struct types behind after merge.
+            // Both symbol classes are leaves in the topo graph and would otherwise
+            // land near the tail. Sections come first, then globals, then the
+            // topo-ordered remainder (functions); relative order within each band
+            // is preserved.
+            Set<Address> sectionAddresses = new HashSet<>();
+            Set<Address> globalAddresses = new HashSet<>();
+            for (Symbol symbol : dirtySymbols) {
+                String type = symbol.getType();
+                if ("section".equals(type)) {
+                    sectionAddresses.add(symbol.getAddress());
+                } else if ("global_variable".equals(type)) {
+                    globalAddresses.add(symbol.getAddress());
+                }
+            }
+            if (!sectionAddresses.isEmpty() || !globalAddresses.isEmpty()) {
+                orderedAddresses = reorderSectionsAndGlobalsFirst(
+                    orderedAddresses, sectionAddresses, globalAddresses);
+            }
+
             // Initialize progress monitor for processing phase
             monitor.setMessage(PREPARING_MESSAGE + "...");
             monitor.initialize(orderedAddresses.size());
@@ -460,17 +541,22 @@ public class QueueRevisionsTask extends EventAwareTask {
         }
     }
 
-    private static void initializeSyncStatus(Program program) {
+    private static List<Symbol> initializeSyncStatus(Program program) {
         if (program == null) {
-            return;
+            return new ArrayList<>();
+        }
+        List<Symbol> symbols = ObjectReader.getAllObjectSymbols(program);
+        List<Address> addresses = new ArrayList<>(symbols.size());
+        for (Symbol symbol : symbols) {
+            addresses.add(symbol.getAddress());
         }
         SyncStatusStorage syncStatusStorage = new SyncStatusStorage(program);
-        List<Symbol> symbols = ObjectReader.getAllObjectSymbols(program);
-        for (Symbol symbol : symbols) {
-            syncStatusStorage.markDirty(symbol.getAddress());
-        }
+        syncStatusStorage.bulkMarkAllDirty(addresses);
+        Msg.info(QueueRevisionsTask.class,
+            "Marked " + symbols.size() + " object addresses as dirty for initial sync");
         ZenyardProgramProperties props = new ZenyardProgramProperties(program);
         props.setString("database_dirty", "true");
+        return symbols;
     }
 
     /**
